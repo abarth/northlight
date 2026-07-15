@@ -1,6 +1,11 @@
 import { PaintEngine, type RenderState } from './gpu/engine';
 import * as shaders from './gpu/shaders';
 import * as color from './color/convert';
+import * as brushDefaults from './brush/defaults';
+import * as brushDynamics from './brush/dynamics';
+import * as brushPatterns from './brush/patterns';
+import * as brushPresets from './brush/presets';
+import { engineStrokeParams } from './brush/engineParams';
 import { StrokeSession } from './gpu/stroke';
 import { rasterizeSelection } from './gpu/selection';
 import { DOC_SIZE, nextLayerId, useStore } from './store';
@@ -24,6 +29,13 @@ declare global {
       PaintEngine: typeof PaintEngine;
       StrokeSession: typeof StrokeSession;
       rasterizeSelection: typeof rasterizeSelection;
+      brush: {
+        defaults: typeof brushDefaults;
+        dynamics: typeof brushDynamics;
+        patterns: typeof brushPatterns;
+        presets: typeof brushPresets;
+        engineStrokeParams: typeof engineStrokeParams;
+      };
     };
   }
 }
@@ -35,6 +47,13 @@ window.__northlight = {
   PaintEngine,
   StrokeSession,
   rasterizeSelection,
+  brush: {
+    defaults: brushDefaults,
+    dynamics: brushDynamics,
+    patterns: brushPatterns,
+    presets: brushPresets,
+    engineStrokeParams,
+  },
 };
 
 export function setEngine(e: PaintEngine | null): void {

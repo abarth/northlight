@@ -8,9 +8,10 @@ import {
   selectAll,
   undo,
 } from '../controller';
-import { hsvToRgb } from '../color/convert';
 import { PaintEngine } from '../gpu/engine';
 import { StrokeSession } from '../gpu/stroke';
+import { engineStrokeParams } from '../brush/engineParams';
+import type { PointerSample } from '../brush/dynamics';
 import { DOC_SIZE, useStore } from '../store';
 import type { Point, ToolId } from '../types';
 
@@ -44,6 +45,11 @@ export function CanvasView() {
     over: false,
   });
   const spaceRef = useRef(false);
+  const digitRef = useRef<{ str: string; at: number; target: 'opacity' | 'flow' }>({
+    str: '',
+    at: 0,
+    target: 'opacity',
+  });
   const [ready, setReady] = useState(false);
 
   const tool = useStore((s) => s.tool);
@@ -137,6 +143,42 @@ export function CanvasView() {
       }
       if (mod) return;
 
+      // Photoshop numeric shortcuts: digits set opacity, Shift+digits set
+      // flow — swapped while the airbrush toggle is on. Two digits typed
+      // quickly combine (4 then 5 -> 45%); 0 means 100%. Match on e.code so
+      // Shift+7 ('&' as a key) still counts as a digit.
+      const digitMatch = /^(?:Digit|Numpad)([0-9])$/.exec(e.code);
+      if (digitMatch && (s.tool === 'brush' || s.tool === 'eraser')) {
+        const digit = digitMatch[1];
+        const toolKey = s.tool;
+        const settings = s[toolKey];
+        const target: 'opacity' | 'flow' =
+          e.shiftKey === settings.airbrush ? 'opacity' : 'flow';
+        const now = performance.now();
+        const buf = digitRef.current;
+        let str =
+          now - buf.at < 700 && buf.target === target ? buf.str + digit : digit;
+        if (str.length > 2) str = str.slice(-2);
+        digitRef.current = { str, at: now, target };
+        let val = parseInt(str, 10);
+        if (str.length === 1) val *= 10; // single digit means N*10%
+        if (val === 0) val = 100;
+        s.updateBrush({ [target]: val / 100 } as never, toolKey);
+        return;
+      }
+
+      // Shift+[ / ] step hardness by 25%, like Photoshop.
+      if (e.shiftKey && (e.key === '{' || e.key === '}')) {
+        const toolKey = s.tool === 'eraser' ? 'eraser' : 'brush';
+        const tip = s[toolKey].tip;
+        const dir = e.key === '}' ? 0.25 : -0.25;
+        s.updateBrush(
+          { tip: { ...tip, hardness: Math.min(1, Math.max(0, tip.hardness + dir)) } },
+          toolKey,
+        );
+        return;
+      }
+
       switch (e.key) {
         case 'b': s.setTool('brush'); break;
         case 'e': s.setTool('eraser'); break;
@@ -149,14 +191,16 @@ export function CanvasView() {
         case 'd': s.resetColors(); break;
         case '[': {
           const t = s.tool === 'eraser' ? 'eraser' : 'brush';
-          const size = s[t].size;
-          s.updateBrush({ size: Math.max(1, size - Math.max(1, Math.round(size * 0.1))) }, t);
+          const tip = s[t].tip;
+          const size = Math.max(1, tip.size - Math.max(1, Math.round(tip.size * 0.1)));
+          s.updateBrush({ tip: { ...tip, size } }, t);
           break;
         }
         case ']': {
           const t = s.tool === 'eraser' ? 'eraser' : 'brush';
-          const size = s[t].size;
-          s.updateBrush({ size: Math.min(1000, size + Math.max(1, Math.round(size * 0.1))) }, t);
+          const tip = s[t].tip;
+          const size = Math.min(1000, tip.size + Math.max(1, Math.round(tip.size * 0.1)));
+          s.updateBrush({ tip: { ...tip, size } }, t);
           break;
         }
         case 'Enter':
@@ -167,6 +211,7 @@ export function CanvasView() {
             polyRef.current = null;
             polyPreviewRef.current = null;
           } else if (dragRef.current?.kind === 'stroke') {
+            dragRef.current.session.cancel();
             getEngine()?.cancelStroke();
             dragRef.current = null;
           } else {
@@ -262,8 +307,15 @@ export function CanvasView() {
     });
   }
 
-  function pressureOf(e: PointerEvent): number {
-    return e.pointerType === 'pen' ? e.pressure : 1;
+  function sampleOf(e: PointerEvent, doc: Point): PointerSample {
+    return {
+      x: doc.x,
+      y: doc.y,
+      pressure: e.pointerType === 'pen' ? e.pressure : 1,
+      tiltX: e.tiltX ?? 0,
+      tiltY: e.tiltY ?? 0,
+      twist: e.twist ?? 0,
+    };
   }
 
   function activeTool(e: { button?: number }): ToolId {
@@ -296,15 +348,9 @@ export function CanvasView() {
       case 'brush':
       case 'eraser': {
         const settings = t === 'eraser' ? s.eraser : s.brush;
-        const rgb = hsvToRgb(s.fg);
-        engine.beginStroke({
-          mode: t === 'eraser' ? 'erase' : 'paint',
-          color: [rgb.r, rgb.g, rgb.b],
-          opacity: settings.opacity,
-          hardness: settings.hardness,
-        });
-        const session = new StrokeSession(engine, settings);
-        session.down({ x: doc.x, y: doc.y, pressure: pressureOf(e.nativeEvent) });
+        engine.beginStroke(engineStrokeParams(settings, t === 'eraser' ? 'erase' : 'paint'));
+        const session = new StrokeSession(engine, settings, { fg: s.fg, bg: s.bg });
+        session.down(sampleOf(e.nativeEvent, doc));
         dragRef.current = { kind: 'stroke', session };
         break;
       }
@@ -364,12 +410,7 @@ export function CanvasView() {
             ? e.nativeEvent.getCoalescedEvents()
             : [e.nativeEvent];
         const list = events.length > 0 ? events : [e.nativeEvent];
-        drag.session.move(
-          list.map((ev) => {
-            const d = screenToDoc(eventToScreen(ev));
-            return { x: d.x, y: d.y, pressure: pressureOf(ev) };
-          }),
-        );
+        drag.session.move(list.map((ev) => sampleOf(ev, screenToDoc(eventToScreen(ev)))));
         break;
       }
       case 'pan':
@@ -541,7 +582,7 @@ export function CanvasView() {
     const t = spaceRef.current ? 'pan' : s.tool;
     if (cur.over && (t === 'brush' || t === 'eraser')) {
       const settings = t === 'eraser' ? s.eraser : s.brush;
-      const r = (settings.size / 2) * s.view.zoom;
+      const r = (settings.tip.size / 2) * s.view.zoom;
       ctx.beginPath();
       ctx.arc(cur.x, cur.y, Math.max(r, 1), 0, Math.PI * 2);
       ctx.lineWidth = Math.max(1, dpr);

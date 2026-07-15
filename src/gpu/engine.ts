@@ -4,16 +4,43 @@ import {
   PRESENT_SHADER,
   STAMP_SHADER,
 } from './shaders';
-import { BLEND_MODE_INDEX, type LayerMeta, type Viewport } from '../types';
+import { BLEND_MODE_INDEX, type BlendMode, type LayerMeta, type Viewport } from '../types';
+import {
+  TEXTURE_BLEND_INDEX,
+  type DualBrush,
+  type PatternId,
+  type TextureBlend,
+  type TipShape,
+} from '../brush/types';
+import { getDualTile, getPattern, getTip } from '../brush/patterns';
+import { STAMP_FLOATS } from '../brush/dynamics';
 
-export interface StrokeParams {
+export interface EngineTextureParams {
+  pattern: PatternId;
+  /** pattern tile size in document pixels */
+  scalePx: number;
+  brightness: number;
+  contrast: number;
+  invert: boolean;
+  depth: number;
+  mode: TextureBlend;
+  /** apply per stamp (true) or once over the whole stroke (false) */
+  eachTip: boolean;
+}
+
+export interface EngineStrokeParams {
   mode: 'paint' | 'erase';
-  /** straight sRGB 0..1 */
-  color: [number, number, number];
   /** stroke-level opacity cap, 0..1 */
   opacity: number;
-  /** 0..1 */
+  /** paint blending mode against the layer */
+  blendMode: BlendMode;
+  /** 0..1, for the analytic round tip */
   hardness: number;
+  tipShape: TipShape;
+  wetEdges: boolean;
+  noise: boolean;
+  texture: EngineTextureParams | null;
+  dual: DualBrush | null;
 }
 
 export interface RenderState {
@@ -29,7 +56,9 @@ interface HistoryEntry {
 
 const MAX_HISTORY = 24;
 const UNIFORM_SLICE = 256;
-const MAX_LAYERS = 64;
+export const MAX_LAYERS = 64;
+const LAYER_U_SIZE = 80;
+const STAMP_STRIDE = STAMP_FLOATS * 4; // bytes
 
 export class PaintEngine {
   readonly device: GPUDevice;
@@ -54,7 +83,8 @@ export class PaintEngine {
   private strokeTex: GPUTexture;
   private selectionTex: GPUTexture | null = null;
   private whiteTex: GPUTexture;
-  private transparentTex: GPUTexture;
+
+  private patternTextures = new Map<string, GPUTexture>();
 
   private compositePipeline: GPURenderPipeline;
   private stampPipeline: GPURenderPipeline;
@@ -68,11 +98,15 @@ export class PaintEngine {
 
   private sampLinear: GPUSampler;
   private sampNearest: GPUSampler;
+  private sampRepeat: GPUSampler;
 
   private instanceBuf: GPUBuffer;
   private instanceCapacity = 4096; // stamps
 
-  private stroke: StrokeParams | null = null;
+  private stroke: EngineStrokeParams | null = null;
+  private strokeTipTex: GPUTexture | null = null;
+  private strokePatternTex: GPUTexture | null = null;
+  private strokeDualTex: GPUTexture | null = null;
 
   private undoStack: HistoryEntry[] = [];
   private redoStack: HistoryEntry[] = [];
@@ -107,7 +141,7 @@ export class PaintEngine {
 
     this.accum = [docTex('rgba8unorm', 'accumA'), docTex('rgba8unorm', 'accumB')];
     this.scratch = docTex('rgba8unorm', 'scratch');
-    this.strokeTex = docTex('r8unorm', 'stroke');
+    this.strokeTex = docTex('rgba8unorm', 'stroke');
 
     this.whiteTex = device.createTexture({
       size: [1, 1],
@@ -116,26 +150,25 @@ export class PaintEngine {
     });
     this.uploadTexture(this.whiteTex, new Uint8Array([255]), 1, 1, 1);
 
-    this.transparentTex = device.createTexture({
-      size: [1, 1],
-      format: 'rgba8unorm',
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    });
-    this.uploadTexture(this.transparentTex, new Uint8Array([0, 0, 0, 0]), 1, 1, 4);
-
     this.sampLinear = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.sampNearest = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
+    this.sampRepeat = device.createSampler({
+      magFilter: 'linear',
+      minFilter: 'linear',
+      addressModeU: 'repeat',
+      addressModeV: 'repeat',
+    });
 
     this.layerUniforms = device.createBuffer({
       size: UNIFORM_SLICE * MAX_LAYERS,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.stampUniforms = device.createBuffer({
-      size: 16,
+      size: 64,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.commitUniforms = device.createBuffer({
-      size: 32,
+      size: 64,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.viewUniforms = device.createBuffer({
@@ -144,7 +177,7 @@ export class PaintEngine {
     });
 
     this.instanceBuf = device.createBuffer({
-      size: this.instanceCapacity * 16,
+      size: this.instanceCapacity * STAMP_STRIDE,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     });
 
@@ -166,6 +199,8 @@ export class PaintEngine {
                 visibility: GPUShaderStage.FRAGMENT,
                 buffer: { type: 'uniform', hasDynamicOffset: true },
               },
+              { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+              { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
             ],
           }),
         ],
@@ -188,12 +223,17 @@ export class PaintEngine {
         entryPoint: 'vs',
         buffers: [
           {
-            arrayStride: 16,
+            arrayStride: STAMP_STRIDE,
             stepMode: 'instance',
             attributes: [
               { shaderLocation: 0, offset: 0, format: 'float32x2' }, // center
               { shaderLocation: 1, offset: 8, format: 'float32' }, // radius
               { shaderLocation: 2, offset: 12, format: 'float32' }, // alpha
+              { shaderLocation: 3, offset: 16, format: 'float32' }, // angle
+              { shaderLocation: 4, offset: 20, format: 'float32' }, // roundness
+              { shaderLocation: 5, offset: 24, format: 'float32x3' }, // color
+              { shaderLocation: 6, offset: 36, format: 'float32' }, // flags
+              { shaderLocation: 7, offset: 40, format: 'float32' }, // depthScale
             ],
           },
         ],
@@ -203,7 +243,7 @@ export class PaintEngine {
         entryPoint: 'fs',
         targets: [
           {
-            format: 'r8unorm',
+            format: 'rgba8unorm',
             blend: {
               color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
               alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
@@ -284,7 +324,11 @@ export class PaintEngine {
   // copies keep working; this path is correct everywhere.
   // -------------------------------------------------------------------------
 
-  private stagingFrom(bytes: Uint8Array, size: number): GPUBuffer {
+  private uploadBuffer(target: GPUBuffer, offset: number, data: ArrayBuffer | ArrayBufferView): void {
+    const bytes = ArrayBuffer.isView(data)
+      ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+      : new Uint8Array(data);
+    const size = Math.ceil(bytes.byteLength / 4) * 4;
     const staging = this.device.createBuffer({
       size,
       usage: GPUBufferUsage.COPY_SRC,
@@ -292,15 +336,6 @@ export class PaintEngine {
     });
     new Uint8Array(staging.getMappedRange()).set(bytes);
     staging.unmap();
-    return staging;
-  }
-
-  private uploadBuffer(target: GPUBuffer, offset: number, data: ArrayBuffer | ArrayBufferView): void {
-    const bytes = ArrayBuffer.isView(data)
-      ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
-      : new Uint8Array(data);
-    const size = Math.ceil(bytes.byteLength / 4) * 4;
-    const staging = this.stagingFrom(bytes, size);
     const enc = this.device.createCommandEncoder();
     enc.copyBufferToBuffer(staging, 0, target, offset, size);
     this.device.queue.submit([enc.finish()]);
@@ -339,6 +374,23 @@ export class PaintEngine {
     );
     this.device.queue.submit([enc.finish()]);
     staging.destroy();
+  }
+
+  /** Cached single-channel texture for patterns / tip shapes / dual tiles. */
+  private grayTexture(key: string, make: () => { size: number; data: Uint8Array }): GPUTexture {
+    let tex = this.patternTextures.get(key);
+    if (!tex) {
+      const map = make();
+      tex = this.device.createTexture({
+        label: `gray:${key}`,
+        size: [map.size, map.size],
+        format: 'r8unorm',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+      this.uploadTexture(tex, map.data, map.size, map.size, 1);
+      this.patternTextures.set(key, tex);
+    }
+    return tex;
   }
 
   // -------------------------------------------------------------------------
@@ -436,14 +488,50 @@ export class PaintEngine {
   // Strokes
   // -------------------------------------------------------------------------
 
-  beginStroke(params: StrokeParams): void {
+  beginStroke(params: EngineStrokeParams): void {
     this.stroke = params;
     this.clearTexture(this.strokeTex);
-    const u = new ArrayBuffer(16);
+
+    this.strokeTipTex =
+      params.tipShape === 'round'
+        ? null
+        : this.grayTexture(`tip:${params.tipShape}`, () => getTip(params.tipShape));
+    this.strokePatternTex = params.texture
+      ? this.grayTexture(`pat:${params.texture.pattern}`, () => getPattern(params.texture!.pattern))
+      : null;
+    this.strokeDualTex = params.dual
+      ? this.grayTexture(
+          `dual:${JSON.stringify([
+            params.dual.shape,
+            params.dual.size,
+            params.dual.spacing,
+            params.dual.scatter,
+            params.dual.bothAxes,
+            params.dual.count,
+          ])}`,
+          () => getDualTile(params.dual!),
+        )
+      : null;
+
+    const u = new ArrayBuffer(64);
     const f = new Float32Array(u);
+    const i = new Uint32Array(u);
+    const tex = params.texture;
     f[0] = this.docWidth;
     f[1] = this.docHeight;
     f[2] = params.hardness;
+    f[3] = params.tipShape === 'round' ? 0 : 1;
+    f[4] = tex && tex.eachTip ? 1 : 0;
+    f[5] = tex ? tex.scalePx : 256;
+    f[6] = params.noise ? 1 : 0;
+    f[7] = params.dual ? 1 : 0;
+    f[8] = tex ? tex.brightness : 0;
+    f[9] = tex ? tex.contrast : 0;
+    f[10] = tex && tex.invert ? 1 : 0;
+    f[11] = tex ? tex.depth : 1;
+    f[12] = 256; // dual tiles are generated at 1:1 document scale
+    i[13] = tex ? TEXTURE_BLEND_INDEX[tex.mode] : 0;
+    i[14] = params.dual ? TEXTURE_BLEND_INDEX[params.dual.mode] : 0;
     this.uploadBuffer(this.stampUniforms, 0, u);
   }
 
@@ -451,32 +539,34 @@ export class PaintEngine {
     return this.stroke !== null;
   }
 
-  get currentStroke(): StrokeParams | null {
+  get currentStroke(): EngineStrokeParams | null {
     return this.stroke;
   }
 
-  /** instances: packed [x, y, radius, alpha] per stamp. */
+  /** instances: packed STAMP_FLOATS records per stamp. */
   drawStamps(instances: Float32Array<ArrayBuffer>, count: number): void {
     if (!this.stroke || count === 0) return;
     if (count > this.instanceCapacity) {
       while (this.instanceCapacity < count) this.instanceCapacity *= 2;
       this.instanceBuf.destroy();
       this.instanceBuf = this.device.createBuffer({
-        size: this.instanceCapacity * 16,
+        size: this.instanceCapacity * STAMP_STRIDE,
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
       });
     }
-    this.uploadBuffer(this.instanceBuf, 0, instances.subarray(0, count * 4));
+    this.uploadBuffer(this.instanceBuf, 0, instances.subarray(0, count * STAMP_FLOATS));
 
+    const white = this.whiteTex.createView();
     const bindGroup = this.device.createBindGroup({
       layout: this.stampPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.stampUniforms } },
-        {
-          binding: 1,
-          resource: (this.selectionTex ?? this.whiteTex).createView(),
-        },
+        { binding: 1, resource: (this.selectionTex ?? this.whiteTex).createView() },
         { binding: 2, resource: this.sampLinear },
+        { binding: 3, resource: this.strokeTipTex?.createView() ?? white },
+        { binding: 4, resource: this.strokePatternTex?.createView() ?? white },
+        { binding: 5, resource: this.strokeDualTex?.createView() ?? white },
+        { binding: 6, resource: this.sampRepeat },
       ],
     });
 
@@ -505,15 +595,24 @@ export class PaintEngine {
     // commit pass below, so it captures the old contents).
     this.pushUndo(layerId);
 
-    const u = new ArrayBuffer(32);
+    const u = new ArrayBuffer(64);
     const f = new Float32Array(u);
     const i = new Uint32Array(u);
+    const tex = stroke.texture;
+    const texOn = tex && !tex.eachTip;
     i[0] = stroke.mode === 'erase' ? 2 : 1;
     f[1] = stroke.opacity;
-    f[4] = stroke.color[0];
-    f[5] = stroke.color[1];
-    f[6] = stroke.color[2];
-    f[7] = 1;
+    i[2] = BLEND_MODE_INDEX[stroke.blendMode] ?? 0;
+    f[3] = stroke.wetEdges ? 1 : 0;
+    f[4] = texOn ? 1 : 0;
+    f[5] = tex ? tex.scalePx : 256;
+    i[6] = tex ? TEXTURE_BLEND_INDEX[tex.mode] : 0;
+    f[8] = tex ? tex.brightness : 0;
+    f[9] = tex ? tex.contrast : 0;
+    f[10] = tex && tex.invert ? 1 : 0;
+    f[11] = tex ? tex.depth : 1;
+    f[12] = this.docWidth;
+    f[13] = this.docHeight;
     this.uploadBuffer(this.commitUniforms, 0, u);
 
     const bindGroup = this.device.createBindGroup({
@@ -523,6 +622,8 @@ export class PaintEngine {
         { binding: 1, resource: layer.createView() },
         { binding: 2, resource: this.strokeTex.createView() },
         { binding: 3, resource: { buffer: this.commitUniforms } },
+        { binding: 4, resource: (this.strokePatternTex ?? this.whiteTex).createView() },
+        { binding: 5, resource: this.sampRepeat },
       ],
     });
 
@@ -662,20 +763,29 @@ export class PaintEngine {
     // Write all per-layer uniform slices in one go.
     const buf = new ArrayBuffer(UNIFORM_SLICE * Math.max(1, visible.length));
     visible.forEach((meta, idx) => {
-      const f = new Float32Array(buf, idx * UNIFORM_SLICE, 8);
-      const u = new Uint32Array(buf, idx * UNIFORM_SLICE, 8);
+      const f = new Float32Array(buf, idx * UNIFORM_SLICE, LAYER_U_SIZE / 4);
+      const u = new Uint32Array(buf, idx * UNIFORM_SLICE, LAYER_U_SIZE / 4);
       u[0] = BLEND_MODE_INDEX[meta.blendMode] ?? 0;
       f[1] = meta.opacity;
+      const stroke = this.stroke;
       const strokeHere =
-        this.stroke !== null && meta.id === state.activeLayerId && meta.visible;
-      u[2] = strokeHere ? (this.stroke!.mode === 'erase' ? 2 : 1) : 0;
-      f[3] = strokeHere ? this.stroke!.opacity : 0;
+        stroke !== null && meta.id === state.activeLayerId && meta.visible;
+      u[2] = strokeHere ? (stroke!.mode === 'erase' ? 2 : 1) : 0;
       if (strokeHere) {
-        f[4] = this.stroke!.color[0];
-        f[5] = this.stroke!.color[1];
-        f[6] = this.stroke!.color[2];
-        f[7] = 1;
+        const tex = stroke.texture;
+        const texOn = tex && !tex.eachTip;
+        f[3] = stroke.opacity;
+        u[4] = BLEND_MODE_INDEX[stroke.blendMode] ?? 0;
+        f[5] = stroke.wetEdges ? 1 : 0;
+        f[6] = texOn ? 1 : 0;
+        f[7] = tex ? tex.scalePx : 256;
+        f[8] = tex ? tex.brightness : 0;
+        f[9] = tex ? tex.contrast : 0;
+        f[10] = tex && tex.invert ? 1 : 0;
+        f[11] = tex ? tex.depth : 1;
       }
+      f[16] = this.docWidth;
+      f[17] = this.docHeight;
     });
     this.uploadBuffer(this.layerUniforms, 0, buf);
 
@@ -693,10 +803,8 @@ export class PaintEngine {
     });
     clearPass.end();
 
+    const patternView = (this.strokePatternTex ?? this.whiteTex).createView();
     visible.forEach((meta, idx) => {
-      // Invisible layers still consume a pass slot only if we draw them; skip
-      // entirely unless a live stroke needs preview on them (it doesn't when
-      // hidden), so just skip.
       if (!meta.visible) return;
       const layerTex = this.layers.get(meta.id)!;
       const bindGroup = this.device.createBindGroup({
@@ -706,7 +814,9 @@ export class PaintEngine {
           { binding: 1, resource: this.accum[read].createView() },
           { binding: 2, resource: layerTex.createView() },
           { binding: 3, resource: this.strokeTex.createView() },
-          { binding: 4, resource: { buffer: this.layerUniforms, size: 32 } },
+          { binding: 4, resource: { buffer: this.layerUniforms, size: LAYER_U_SIZE } },
+          { binding: 5, resource: patternView },
+          { binding: 6, resource: this.sampRepeat },
         ],
       });
       const pass = enc.beginRenderPass({

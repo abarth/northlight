@@ -132,3 +132,19 @@ export const PenIcon = ({ size }: IconProps) => (
     <path d="M9 8h6" />
   </svg>
 );
+
+export const AirbrushIcon = ({ size }: IconProps) => (
+  <svg {...base(size)}>
+    <path d="M4 20c2-6 6-10 11-13" />
+    <path d="M15 4l5 5-3 1-3-3z" />
+    <path d="M9 10l1.5 1.5M7 14l1 1M12 8l2 2" strokeDasharray="0.5 3" />
+  </svg>
+);
+
+export const SettingsIcon = ({ size }: IconProps) => (
+  <svg {...base(size)}>
+    <path d="M4 8h10M18 8h2M4 16h2M10 16h10" />
+    <circle cx="16" cy="8" r="2" />
+    <circle cx="8" cy="16" r="2" />
+  </svg>
+);

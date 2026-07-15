@@ -72,28 +72,6 @@ export interface LayerMeta {
   blendMode: BlendMode;
 }
 
-export type BrushPreset = 'soft-round' | 'hard-round' | 'round';
-
-export interface BrushSettings {
-  preset: BrushPreset;
-  /** diameter in document pixels */
-  size: number;
-  /** 0..1 — fraction of the radius that is fully opaque */
-  hardness: number;
-  /** 0..1 — cap on how dark a single stroke can get */
-  opacity: number;
-  /** 0..1 — per-stamp paint deposition */
-  flow: number;
-  /** spacing between stamps as a fraction of the diameter (0.01..2) */
-  spacing: number;
-  /** 0..1 — input smoothing strength */
-  smoothing: number;
-  /** pen pressure dynamics */
-  pressureSize: boolean;
-  pressureOpacity: boolean;
-  pressureFlow: boolean;
-}
-
 export interface Viewport {
   /** document pixels -> device pixels scale */
   zoom: number;

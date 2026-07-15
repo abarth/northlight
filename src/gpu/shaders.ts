@@ -1,7 +1,7 @@
 /**
- * All WGSL shaders. Layer/accumulation textures store PREMULTIPLIED alpha.
- * Compositing math runs on non-linear sRGB values, matching Photoshop's
- * default (8-bit, "Blend RGB Colors Using Gamma" off).
+ * All WGSL shaders. Layer/accumulation/stroke textures store PREMULTIPLIED
+ * alpha. Compositing math runs on non-linear sRGB values, matching
+ * Photoshop's default (8-bit, "Blend RGB Colors Using Gamma" off).
  */
 
 export const FULLSCREEN_VS = /* wgsl */ `
@@ -161,53 +161,16 @@ fn blendPixel(mode: u32, b: vec3f, s: vec3f) -> vec3f {
     default: { return s; }
   }
 }
-`;
 
 /**
- * Composites one layer over the accumulated backdrop. The in-progress stroke
- * (brush or eraser) is merged into the active layer on the fly so painting
- * previews live under the correct blend mode / opacity.
+ * PDF compositing: source (straight color cs, alpha as_) over a premultiplied
+ * backdrop, honoring the blend mode. Returns premultiplied.
  */
-export const COMPOSITE_SHADER = /* wgsl */ `
-${FULLSCREEN_VS}
-${BLEND_LIB}
-
-struct LayerU {
-  blendMode: u32,
-  layerOpacity: f32,
-  strokeMode: u32,     // 0 = none, 1 = paint, 2 = erase
-  strokeOpacity: f32,
-  strokeColor: vec4f,
-}
-
-@group(0) @binding(0) var samp: sampler;
-@group(0) @binding(1) var accumTex: texture_2d<f32>;
-@group(0) @binding(2) var layerTex: texture_2d<f32>;
-@group(0) @binding(3) var strokeTex: texture_2d<f32>;
-@group(0) @binding(4) var<uniform> U: LayerU;
-
-@fragment
-fn fs(in: VSOut) -> @location(0) vec4f {
-  let dst = textureSampleLevel(accumTex, samp, in.uv, 0.0); // premultiplied backdrop
-  var l = textureSampleLevel(layerTex, samp, in.uv, 0.0);   // premultiplied layer
-  let m = textureSampleLevel(strokeTex, samp, in.uv, 0.0).r * U.strokeOpacity;
-
-  if (U.strokeMode == 1u) {
-    let sp = U.strokeColor.rgb * m;
-    l = vec4f(sp + l.rgb * (1.0 - m), m + l.a * (1.0 - m));
-  } else if (U.strokeMode == 2u) {
-    l = l * (1.0 - m);
-  }
-
-  let as_ = l.a * U.layerOpacity;
+fn compositePixel(dst: vec4f, cs: vec3f, as_: f32, mode: u32) -> vec4f {
   let ab = dst.a;
-  var cs = vec3f(0.0);
-  if (l.a > 0.0) { cs = l.rgb / l.a; }
   var cb = vec3f(0.0);
   if (ab > 0.0) { cb = dst.rgb / ab; }
-
-  let bl = blendPixel(U.blendMode, cb, cs);
-  // PDF compositing formula, emitted premultiplied:
+  let bl = blendPixel(mode, cb, cs);
   let co = as_ * (1.0 - ab) * cs + as_ * ab * bl + (1.0 - as_) * dst.rgb;
   let ao = as_ + ab * (1.0 - as_);
   return vec4f(co, ao);
@@ -215,32 +178,187 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 `;
 
 /**
- * Brush stamp: an instanced quad per dab, accumulated into the stroke
- * coverage texture (r8unorm) with OVER blending so flow builds up where
- * stamps overlap but saturates at 1.
- *
- * Tip profile: solid core of radius `hardness`, then a Gaussian falloff
- * rescaled to reach exactly 0 at the brush radius — this matches measured
- * Photoshop soft-round profiles. Hardness 100% keeps a ~1.6px anti-aliased
- * rim, as Photoshop does.
+ * Texture/dual-brush modulation and wet-edge helpers shared by the stamp,
+ * compositor, and commit shaders.
+ */
+const TEX_LIB = /* wgsl */ `
+// brightness/contrast/invert packed as bci.x/.y/.z
+fn texValue(raw: f32, bci: vec4f) -> f32 {
+  var v = raw + bci.x;
+  v = (v - 0.5) * (1.0 + bci.y * 2.0) + 0.5;
+  if (bci.z > 0.5) { v = 1.0 - v; }
+  return clamp(v, 0.0, 1.0);
+}
+
+// Photoshop texture modes operating on brush coverage a with texture
+// value v and strength depth.
+fn applyTexToAlpha(a: f32, v: f32, mode: u32, depth: f32) -> f32 {
+  switch (mode) {
+    case 0u: { return a * mix(1.0, v, depth); }                      // multiply
+    case 1u: { return clamp(a - (1.0 - v) * depth, 0.0, 1.0); }      // subtract
+    case 2u: { return min(a, mix(1.0, v, depth)); }                  // darken
+    case 3u: {                                                       // overlay
+      var o: f32;
+      if (a <= 0.5) { o = 2.0 * a * v; }
+      else { o = 1.0 - 2.0 * (1.0 - a) * (1.0 - v); }
+      return mix(a, clamp(o, 0.0, 1.0), depth);
+    }
+    case 4u: { return clamp(a - (1.0 - v) * depth * 1.5, 0.0, 1.0); } // height
+    default: { return a; }
+  }
+}
+
+// Wet edges: interior settles at ~60% while the rim stays strong.
+fn wetRemap(a: f32) -> f32 {
+  return clamp(0.6 * a + 0.4 * sin(3.14159265 * a), 0.0, 1.0);
+}
+
+fn hash21(p: vec2f) -> f32 {
+  return fract(sin(dot(p, vec2f(12.9898, 78.233))) * 43758.5453);
+}
+`;
+
+/**
+ * Stroke-into-layer merge, shared by the compositor (live preview) and the
+ * commit pass. Requires BLEND_LIB (compositePixel) and TEX_LIB.
+ */
+const MERGE_LIB = /* wgsl */ `
+/**
+ * Merges the live/committing stroke into a premultiplied layer pixel.
+ * st: premultiplied stroke texel. patRaw: raw pattern sample (for
+ * whole-stroke texture, i.e. Texture with "texture each tip" off).
+ */
+fn strokeMergeApply(
+  l: vec4f,
+  st: vec4f,
+  patRaw: f32,
+  mode: u32,        // 1 = paint, 2 = erase
+  blend: u32,
+  opacity: f32,
+  wet: f32,
+  texOn: f32,
+  bci: vec4f,
+  texMode: u32,
+) -> vec4f {
+  var cov = st.a;
+  if (texOn > 0.5) {
+    cov = applyTexToAlpha(cov, texValue(patRaw, bci), texMode, bci.w);
+  }
+  if (wet > 0.5) {
+    cov = wetRemap(cov);
+  }
+  let sa = cov * opacity;
+  if (mode == 2u) {
+    return l * (1.0 - sa);
+  }
+  var cs = vec3f(0.0);
+  if (st.a > 0.0) { cs = st.rgb / st.a; }
+  return compositePixel(l, cs, sa, blend);
+}
+`;
+
+/**
+ * Composites one layer over the accumulated backdrop. The in-progress stroke
+ * (brush or eraser) is merged into the active layer on the fly so painting
+ * previews live under the correct blend mode / opacity / texture.
+ */
+export const COMPOSITE_SHADER = /* wgsl */ `
+${FULLSCREEN_VS}
+${BLEND_LIB}
+${TEX_LIB}
+${MERGE_LIB}
+
+struct LayerU {
+  blendMode: u32,
+  layerOpacity: f32,
+  strokeMode: u32,     // 0 = none, 1 = paint, 2 = erase
+  strokeOpacity: f32,
+  strokeBlend: u32,
+  wetEdges: f32,
+  texOn: f32,          // whole-stroke texture enabled
+  texScalePx: f32,
+  texBCI: vec4f,       // brightness, contrast, invert, depth
+  texMode: u32,
+  _p0: f32,
+  _p1: f32,
+  _p2: f32,
+  docSize: vec2f,
+  _p3: vec2f,
+}
+
+@group(0) @binding(0) var samp: sampler;
+@group(0) @binding(1) var accumTex: texture_2d<f32>;
+@group(0) @binding(2) var layerTex: texture_2d<f32>;
+@group(0) @binding(3) var strokeTex: texture_2d<f32>;
+@group(0) @binding(4) var<uniform> U: LayerU;
+@group(0) @binding(5) var patternTex: texture_2d<f32>;
+@group(0) @binding(6) var repeatSamp: sampler;
+
+@fragment
+fn fs(in: VSOut) -> @location(0) vec4f {
+  let dst = textureSampleLevel(accumTex, samp, in.uv, 0.0);
+  var l = textureSampleLevel(layerTex, samp, in.uv, 0.0);
+
+  if (U.strokeMode != 0u) {
+    let st = textureSampleLevel(strokeTex, samp, in.uv, 0.0);
+    let patUv = in.uv * U.docSize / max(U.texScalePx, 1.0);
+    let patRaw = textureSampleLevel(patternTex, repeatSamp, patUv, 0.0).r;
+    l = strokeMergeApply(
+      l, st, patRaw, U.strokeMode, U.strokeBlend, U.strokeOpacity,
+      U.wetEdges, U.texOn, U.texBCI, U.texMode,
+    );
+  }
+
+  let as_ = l.a * U.layerOpacity;
+  var cs = vec3f(0.0);
+  if (l.a > 0.0) { cs = l.rgb / l.a; }
+  return compositePixel(dst, cs, as_, U.blendMode);
+}
+`;
+
+/**
+ * Brush stamp: an instanced quad per dab, accumulated OVER into the
+ * premultiplied stroke texture so flow builds up where stamps overlap but
+ * saturates at 1. Supports rotated/elliptical analytic round tips (with the
+ * Gaussian hardness falloff) and sampled texture tips, per-stamp color
+ * (Color Dynamics), per-stamp texture (Texture Each Tip), dual-brush
+ * modulation, noise, and selection clipping.
  */
 export const STAMP_SHADER = /* wgsl */ `
+${TEX_LIB}
+
 struct StampU {
   docSize: vec2f,
   hardness: f32,
+  tipTextured: f32,
+  texEach: f32,
+  texScalePx: f32,
+  noise: f32,
+  dualOn: f32,
+  texBCI: vec4f,       // brightness, contrast, invert, depth
+  dualScalePx: f32,
+  texMode: u32,
+  dualMode: u32,
   _pad: f32,
 }
 
 @group(0) @binding(0) var<uniform> SU: StampU;
 @group(0) @binding(1) var selTex: texture_2d<f32>;
-@group(0) @binding(2) var selSamp: sampler;
+@group(0) @binding(2) var clampSamp: sampler;
+@group(0) @binding(3) var tipTex: texture_2d<f32>;
+@group(0) @binding(4) var patternTex: texture_2d<f32>;
+@group(0) @binding(5) var dualTex: texture_2d<f32>;
+@group(0) @binding(6) var repeatSamp: sampler;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
-  @location(0) local: vec2f,   // position in units of the stamp radius
-  @location(1) docUv: vec2f,
+  @location(0) tipPos: vec2f,   // tip space: unit circle
+  @location(1) docPos: vec2f,
   @location(2) alpha: f32,
   @location(3) radius: f32,
+  @location(4) color: vec3f,
+  @location(5) flags: f32,
+  @location(6) depthScale: f32,
 }
 
 @vertex
@@ -249,25 +367,36 @@ fn vs(
   @location(0) center: vec2f,
   @location(1) radius: f32,
   @location(2) alpha: f32,
+  @location(3) angle: f32,
+  @location(4) roundness: f32,
+  @location(5) color: vec3f,
+  @location(6) flags: f32,
+  @location(7) depthScale: f32,
 ) -> VSOut {
   var corners = array<vec2f, 4>(
     vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0), vec2f(1.0, 1.0),
   );
   let c = corners[vi];
   let pad = radius + 1.0; // 1px apron for the anti-aliased rim
-  let doc = center + c * pad;
+  let off = vec2f(c.x * pad, c.y * pad * roundness);
+  let ca = cos(angle);
+  let sa = sin(angle);
+  let doc = center + vec2f(off.x * ca - off.y * sa, off.x * sa + off.y * ca);
   var out: VSOut;
-  out.local = c * pad / max(radius, 1e-4);
-  out.docUv = doc / SU.docSize;
+  out.tipPos = c * pad / max(radius, 1e-4);
+  out.docPos = doc;
   var ndc = doc / SU.docSize * 2.0 - 1.0;
   ndc.y = -ndc.y;
   out.pos = vec4f(ndc, 0.0, 1.0);
   out.alpha = alpha;
   out.radius = radius;
+  out.color = color;
+  out.flags = flags;
+  out.depthScale = depthScale;
   return out;
 }
 
-fn tipProfile(r: f32, hardness: f32, radiusPx: f32) -> f32 {
+fn roundProfile(r: f32, hardness: f32, radiusPx: f32) -> f32 {
   if (r >= 1.0) { return 0.0; }
   // Keep at least ~1.6 physical pixels of falloff so hard brushes stay
   // anti-aliased (Photoshop's 100%-hardness tip has the same soft rim).
@@ -282,40 +411,81 @@ fn tipProfile(r: f32, hardness: f32, radiusPx: f32) -> f32 {
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
-  var a = tipProfile(length(in.local), SU.hardness, in.radius) * in.alpha;
-  a = a * textureSampleLevel(selTex, selSamp, in.docUv, 0.0).r;
-  return vec4f(a, 0.0, 0.0, a);
+  var a: f32;
+  if (SU.tipTextured > 0.5) {
+    var uv = in.tipPos * 0.5 + vec2f(0.5);
+    let f = u32(in.flags + 0.5);
+    if ((f & 1u) != 0u) { uv.x = 1.0 - uv.x; }
+    if ((f & 2u) != 0u) { uv.y = 1.0 - uv.y; }
+    a = textureSampleLevel(tipTex, clampSamp, clamp(uv, vec2f(0.0), vec2f(1.0)), 0.0).r;
+    // hide the apron outside the tip square
+    if (abs(in.tipPos.x) > 1.0 || abs(in.tipPos.y) > 1.0) { a = 0.0; }
+  } else {
+    a = roundProfile(length(in.tipPos), SU.hardness, in.radius);
+  }
+  a = a * in.alpha;
+
+  if (SU.texEach > 0.5) {
+    let v = texValue(
+      textureSampleLevel(patternTex, repeatSamp, in.docPos / max(SU.texScalePx, 1.0), 0.0).r,
+      SU.texBCI,
+    );
+    a = applyTexToAlpha(a, v, SU.texMode, SU.texBCI.w * in.depthScale);
+  }
+  if (SU.dualOn > 0.5) {
+    let dv = textureSampleLevel(dualTex, repeatSamp, in.docPos / max(SU.dualScalePx, 1.0), 0.0).r;
+    a = applyTexToAlpha(a, dv, SU.dualMode, 1.0);
+  }
+  if (SU.noise > 0.5) {
+    let n = hash21(floor(in.docPos * 2.0));
+    a = a * mix(1.0, n, clamp(1.0 - a, 0.0, 1.0));
+  }
+  a = a * textureSampleLevel(selTex, clampSamp, in.docPos / SU.docSize, 0.0).r;
+  return vec4f(in.color * a, a);
 }
 `;
 
 /**
  * Bakes the finished stroke into the layer (rendered into a scratch texture,
- * then copied back). Mode 1 = paint over, mode 2 = erase.
+ * then copied back). Same merge math as the compositor preview.
  */
 export const COMMIT_SHADER = /* wgsl */ `
 ${FULLSCREEN_VS}
+${BLEND_LIB}
+${TEX_LIB}
+${MERGE_LIB}
 
 struct CommitU {
-  mode: u32,
+  mode: u32,           // 1 = paint, 2 = erase
   opacity: f32,
-  _pad: vec2f,
-  color: vec4f,
+  strokeBlend: u32,
+  wetEdges: f32,
+  texOn: f32,
+  texScalePx: f32,
+  texMode: u32,
+  _p0: f32,
+  texBCI: vec4f,
+  docSize: vec2f,
+  _p1: vec2f,
 }
 
 @group(0) @binding(0) var samp: sampler;
 @group(0) @binding(1) var layerTex: texture_2d<f32>;
 @group(0) @binding(2) var strokeTex: texture_2d<f32>;
 @group(0) @binding(3) var<uniform> U: CommitU;
+@group(0) @binding(4) var patternTex: texture_2d<f32>;
+@group(0) @binding(5) var repeatSamp: sampler;
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
   let l = textureSampleLevel(layerTex, samp, in.uv, 0.0);
-  let m = textureSampleLevel(strokeTex, samp, in.uv, 0.0).r * U.opacity;
-  if (U.mode == 2u) {
-    return l * (1.0 - m);
-  }
-  let sp = U.color.rgb * m;
-  return vec4f(sp + l.rgb * (1.0 - m), m + l.a * (1.0 - m));
+  let st = textureSampleLevel(strokeTex, samp, in.uv, 0.0);
+  let patUv = in.uv * U.docSize / max(U.texScalePx, 1.0);
+  let patRaw = textureSampleLevel(patternTex, repeatSamp, patUv, 0.0).r;
+  return strokeMergeApply(
+    l, st, patRaw, U.mode, U.strokeBlend, U.opacity,
+    U.wetEdges, U.texOn, U.texBCI, U.texMode,
+  );
 }
 `;
 

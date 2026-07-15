@@ -1,14 +1,8 @@
 import { create } from 'zustand';
-import type {
-  BlendMode,
-  BrushPreset,
-  BrushSettings,
-  HSV,
-  LayerMeta,
-  Point,
-  ToolId,
-  Viewport,
-} from './types';
+import type { BlendMode, HSV, LayerMeta, Point, ToolId, Viewport } from './types';
+import type { BrushSettings } from './brush/types';
+import { defaultBrush, makeBrush } from './brush/defaults';
+import { findPreset } from './brush/presets';
 
 export const DOC_DEFAULT_WIDTH = 1600;
 export const DOC_DEFAULT_HEIGHT = 1000;
@@ -30,25 +24,10 @@ export function nextLayerId(): string {
   return `layer-${Date.now().toString(36)}-${layerCounter++}`;
 }
 
-const defaultBrush: BrushSettings = {
-  preset: 'soft-round',
-  size: 40,
-  hardness: 0,
-  opacity: 1,
-  flow: 1,
-  spacing: 0.25,
-  smoothing: 0.15,
-  pressureSize: true,
-  pressureOpacity: false,
-  pressureFlow: false,
-};
+export type PaintToolId = 'brush' | 'eraser';
+export type SideTab = 'color' | 'brushes' | 'settings';
 
-const defaultEraser: BrushSettings = {
-  ...defaultBrush,
-  preset: 'hard-round',
-  hardness: 1,
-  pressureSize: false,
-};
+const initialEraser = makeBrush({ tip: { hardness: 1, size: 30, spacing: 0.15 } });
 
 export interface AppState {
   tool: ToolId;
@@ -60,6 +39,10 @@ export interface AppState {
 
   brush: BrushSettings;
   eraser: BrushSettings;
+  /** currently selected preset id per paint tool, for UI highlighting */
+  activePreset: Record<PaintToolId, string | null>;
+
+  sideTab: SideTab;
 
   layers: LayerMeta[]; // bottom -> top
   activeLayerId: string;
@@ -78,8 +61,10 @@ export interface AppState {
   swapColors: () => void;
   resetColors: () => void;
 
-  updateBrush: (patch: Partial<BrushSettings>, tool: 'brush' | 'eraser') => void;
-  applyPreset: (preset: BrushPreset, tool: 'brush' | 'eraser') => void;
+  /** shallow top-level merge; pass whole nested sections when patching them */
+  updateBrush: (patch: Partial<BrushSettings>, tool: PaintToolId) => void;
+  applyPreset: (presetId: string, tool: PaintToolId) => void;
+  setSideTab: (tab: SideTab) => void;
 
   addLayerMeta: (meta: LayerMeta, aboveId?: string) => void;
   removeLayerMeta: (id: string) => void;
@@ -101,8 +86,11 @@ export const useStore = create<AppState>((set) => ({
   fg: { h: 0, s: 0, v: 0 }, // black
   bg: { h: 0, s: 0, v: 1 }, // white
 
-  brush: defaultBrush,
-  eraser: defaultEraser,
+  brush: defaultBrush(),
+  eraser: initialEraser,
+  activePreset: { brush: 'soft-round', eraser: null },
+
+  sideTab: 'color',
 
   layers: [
     {
@@ -132,11 +120,17 @@ export const useStore = create<AppState>((set) => ({
   updateBrush: (patch, tool) =>
     set((s) => ({ [tool]: { ...s[tool], ...patch } }) as Partial<AppState>),
 
-  applyPreset: (preset, tool) =>
+  applyPreset: (presetId, tool) =>
     set((s) => {
-      const hardness = preset === 'soft-round' ? 0 : preset === 'hard-round' ? 1 : 0.5;
-      return { [tool]: { ...s[tool], preset, hardness } } as Partial<AppState>;
+      const preset = findPreset(presetId);
+      if (!preset) return {};
+      return {
+        [tool]: structuredClone(preset.settings),
+        activePreset: { ...s.activePreset, [tool]: presetId },
+      } as Partial<AppState>;
     }),
+
+  setSideTab: (sideTab) => set({ sideTab }),
 
   addLayerMeta: (meta, aboveId) =>
     set((s) => {

@@ -293,10 +293,275 @@ select {
 .side-panels {
   display: flex;
   flex-direction: column;
-  width: 260px;
+  width: 280px;
   background: var(--bg-2);
   border-left: 1px solid var(--border);
+  min-height: 0;
+}
+
+.side-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+}
+
+.side-tab {
+  flex: 1;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  padding: 7px 2px;
+  cursor: pointer;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.side-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  background: var(--bg-2);
+}
+
+.side-tab-content {
+  flex: 1 1 55%;
+  min-height: 140px;
   overflow-y: auto;
+}
+
+/* generic control rows (brush settings, pickers) */
+
+.ctl-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.ctl-row input[type='range'] {
+  flex: 1;
+  min-width: 40px;
+}
+
+.ctl-label {
+  width: 78px;
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctl-value {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--text-dim);
+}
+
+.ctl-row.disabled,
+.ctl-check.disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.ctl-control select {
+  flex: 1;
+  min-width: 0;
+}
+
+.ctl-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 4px 8px 4px 0;
+  cursor: pointer;
+}
+
+.ctl-inline {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+/* brush settings panel */
+
+.brush-settings-panel hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 6px 0;
+}
+
+.bs-section {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-bottom: 4px;
+  background: var(--bg-1);
+}
+
+.bs-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.bs-header:hover {
+  background: var(--bg-3);
+}
+
+.bs-title {
+  flex: 1;
+  font-size: 11px;
+}
+
+.bs-title.off {
+  color: var(--text-dim);
+}
+
+.bs-arrow {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.bs-dot {
+  width: 13px;
+}
+
+.bs-body {
+  padding: 4px 8px 8px;
+  border-top: 1px solid var(--border);
+}
+
+.bs-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  padding: 4px 2px;
+}
+
+/* brushes (presets) panel */
+
+.brushes-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.preset-groups {
+  margin-top: 4px;
+}
+
+.preset-group {
+  margin-bottom: 6px;
+}
+
+.preset-group-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 4px 2px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.preset-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.preset-row:hover {
+  background: var(--bg-3);
+}
+
+.preset-row.active {
+  border-color: var(--accent);
+  background: #2d3a4e;
+}
+
+.preset-thumb {
+  width: 92px;
+  height: 26px;
+  background: #f2f2f2;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.preset-name {
+  flex: 1;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preset-size {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+/* options bar tip picker */
+
+.tip-picker {
+  position: relative;
+}
+
+.tip-picker-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 2px 8px 2px 2px;
+  cursor: pointer;
+}
+
+.tip-thumb {
+  width: 64px;
+  height: 24px;
+  background: #f2f2f2;
+  border-radius: 3px;
+}
+
+.tip-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 50;
+  width: 300px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  padding: 10px;
+}
+
+.icon-btn.toggle {
+  gap: 3px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--text-dim);
+}
+
+.icon-btn.toggle.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.toggle-tag {
+  font-size: 10px;
 }
 
 .panel {
