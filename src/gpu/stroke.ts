@@ -2,6 +2,7 @@ import type { PaintEngine } from './engine';
 import type { BrushSettings } from '../brush/types';
 import {
   dynamicColor,
+  emitDualStamps,
   emitStamps,
   stampDiameter,
   STAMP_FLOATS,
@@ -37,12 +38,14 @@ export class StrokeSession {
   private last: PointerSample | null = null;
   private smoothed: PointerSample | null = null;
   private residual = 0; // distance carried since the last stamp
+  private residualDual = 0; // the dual tip walks its own spacing train
   private stepIndex = 0;
   private direction = 0;
   private initialDirection = 0;
   private initialDirectionSet = false;
   private strokeColor: RGB;
   private stamps: number[] = [];
+  private dualStamps: number[] = [];
   private airbrushTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(engine: PaintEngine, settings: BrushSettings, opts: StrokeSessionOptions) {
@@ -80,18 +83,31 @@ export class StrokeSession {
     );
   }
 
+  private emitDual(x: number, y: number, sample: PointerSample): void {
+    const dual = this.settings.dual;
+    if (!dual.enabled) return;
+    emitDualStamps(dual, this.contextAt(sample), x, y, this.rng, this.dualStamps);
+  }
+
   /** Spacing distance for the current pen state (control-scaled, no jitter). */
   private spacingPx(sample: PointerSample): number {
     const d = stampDiameter(this.settings, this.contextAt(sample), zeroRng);
     return Math.max(this.settings.tip.spacing * d, 0.5);
   }
 
+  private dualSpacingPx(): number {
+    const dual = this.settings.dual;
+    return Math.max(dual.spacing * dual.size, 0.5);
+  }
+
   down(sample: PointerSample): void {
     this.last = sample;
     this.smoothed = sample;
     this.residual = 0;
+    this.residualDual = 0;
     this.stepIndex = 0;
     this.emit(sample.x, sample.y, sample);
+    this.emitDual(sample.x, sample.y, sample);
     this.flush();
 
     if (this.settings.airbrush) {
@@ -101,6 +117,7 @@ export class StrokeSession {
         if (!at) return;
         this.stepIndex++;
         this.emit(at.x, at.y, at);
+        this.emitDual(at.x, at.y, at);
         this.flush();
       }, 40);
     }
@@ -134,6 +151,7 @@ export class StrokeSession {
   cancel(): void {
     this.stopAirbrush();
     this.stamps = [];
+    this.dualStamps = [];
   }
 
   private stopAirbrush(): void {
@@ -179,13 +197,37 @@ export class StrokeSession {
       const at = lerpSample(travelled / dist);
       this.emit(at.x, at.y, at);
     }
+
+    // The dual brush stamps its own train along the same segment, with its
+    // own spacing, exactly like Photoshop's secondary tip.
+    if (this.settings.dual.enabled) {
+      let t2 = 0;
+      const step = this.dualSpacingPx();
+      for (let guard = 0; guard < 10000; guard++) {
+        const need = step - this.residualDual;
+        if (t2 + need > dist) {
+          this.residualDual += dist - t2;
+          break;
+        }
+        t2 += need;
+        this.residualDual = 0;
+        const at = lerpSample(t2 / dist);
+        this.emitDual(at.x, at.y, at);
+      }
+    }
   }
 
   private flush(): void {
-    if (this.stamps.length === 0) return;
-    const arr = new Float32Array(this.stamps);
-    this.engine.drawStamps(arr, arr.length / STAMP_FLOATS);
-    this.stamps = [];
+    if (this.stamps.length > 0) {
+      const arr = new Float32Array(this.stamps);
+      this.engine.drawStamps(arr, arr.length / STAMP_FLOATS, 'primary');
+      this.stamps = [];
+    }
+    if (this.dualStamps.length > 0) {
+      const arr = new Float32Array(this.dualStamps);
+      this.engine.drawStamps(arr, arr.length / STAMP_FLOATS, 'dual');
+      this.dualStamps = [];
+    }
   }
 }
 

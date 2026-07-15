@@ -269,8 +269,24 @@ export const BRUSH_GROUPS: BrushGroup[] = [
   },
 ];
 
+/** Groups added at runtime (e.g. imported from .abr files). */
+const importedGroups: BrushGroup[] = [];
+
+export function allGroups(): BrushGroup[] {
+  return [...BRUSH_GROUPS, ...importedGroups];
+}
+
+let importCounter = 1;
+
+/** Registers an imported preset group and returns it. */
+export function registerImportedGroup(name: string, presets: BrushPreset[]): BrushGroup {
+  const group: BrushGroup = { id: `imported-${importCounter++}`, name, presets };
+  importedGroups.push(group);
+  return group;
+}
+
 export function findPreset(id: string): BrushPreset | undefined {
-  for (const g of BRUSH_GROUPS) {
+  for (const g of allGroups()) {
     const hit = g.presets.find((x) => x.id === id);
     if (hit) return hit;
   }

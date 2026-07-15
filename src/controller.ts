@@ -5,6 +5,7 @@ import * as brushDefaults from './brush/defaults';
 import * as brushDynamics from './brush/dynamics';
 import * as brushPatterns from './brush/patterns';
 import * as brushPresets from './brush/presets';
+import * as brushAbr from './brush/abr';
 import { engineStrokeParams } from './brush/engineParams';
 import { StrokeSession } from './gpu/stroke';
 import { rasterizeSelection } from './gpu/selection';
@@ -34,7 +35,9 @@ declare global {
         dynamics: typeof brushDynamics;
         patterns: typeof brushPatterns;
         presets: typeof brushPresets;
+        abr: typeof brushAbr;
         engineStrokeParams: typeof engineStrokeParams;
+        importAbr: typeof importAbr;
       };
     };
   }
@@ -52,7 +55,9 @@ window.__northlight = {
     dynamics: brushDynamics,
     patterns: brushPatterns,
     presets: brushPresets,
+    abr: brushAbr,
     engineStrokeParams,
+    importAbr,
   },
 };
 
@@ -133,6 +138,47 @@ export function selectAll(): void {
       { x: 0, y: height },
     ],
   ]);
+}
+
+/**
+ * Imports a Photoshop .abr file: registers its sampled tips, wraps every
+ * brush into a preset under a new "Imported" group, and selects the first
+ * one. Returns the number of imported brushes.
+ */
+export function importAbr(fileName: string, buffer: ArrayBuffer): number {
+  const result = brushAbr.parseAbr(buffer);
+  const baseName = fileName.replace(/\.abr$/i, '') || 'Imported';
+
+  for (const [id, map] of result.tips) {
+    brushPatterns.registerTip(`abr:${baseName}:${id}`, map);
+  }
+
+  const presets = result.brushes.map((b, i) => {
+    const settings = brushDefaults.makeBrush(b.settings);
+    if (b.tipId) {
+      settings.tip.shape = `abr:${baseName}:${b.tipId}`;
+      // sampled tips ignore hardness; keep size sane if the desc lacked one
+      if (!b.settings.tip?.size) {
+        const map = result.tips.get(b.tipId);
+        if (map) settings.tip.size = Math.min(map.size, 300);
+      }
+    }
+    return {
+      id: `abr:${baseName}:${i}`,
+      name: b.name || `${baseName} ${i + 1}`,
+      settings,
+    };
+  });
+
+  if (presets.length === 0) {
+    throw new Error('No brushes found in this ABR file.');
+  }
+
+  brushPresets.registerImportedGroup(baseName, presets);
+  const s = useStore.getState();
+  s.bumpPresetRevision();
+  s.applyPreset(presets[0].id, 'brush');
+  return presets.length;
 }
 
 export function undo(): void {

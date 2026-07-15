@@ -23,8 +23,12 @@ export interface DynamicControl {
   fadeSteps: number;
 }
 
-/** Computed tip shapes. `round` is analytic; the rest are generated textures. */
-export type TipShape = 'round' | 'chalk' | 'spatter' | 'grain';
+/**
+ * Tip shapes. `round` is analytic; chalk/spatter/grain are generated
+ * textures; any other string is a sampled tip registered at runtime
+ * (e.g. imported from a Photoshop .abr file).
+ */
+export type TipShape = 'round' | 'chalk' | 'spatter' | 'grain' | (string & {});
 
 export type PatternId = 'paper' | 'canvas' | 'sponge' | 'clouds' | 'speckle';
 
@@ -106,6 +110,8 @@ export interface DualBrush {
   enabled: boolean;
   /** the secondary tip shape */
   shape: TipShape;
+  /** 0..1, for a round secondary tip */
+  hardness: number;
   mode: TextureBlend;
   /** secondary tip diameter in px */
   size: number;

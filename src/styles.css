@@ -141,6 +141,23 @@ select {
   background: #45454c;
 }
 
+.btn.small {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.panel-title-row .panel-title {
+  margin-bottom: 0;
+}
+
 .icon-btn {
   display: inline-flex;
   align-items: center;

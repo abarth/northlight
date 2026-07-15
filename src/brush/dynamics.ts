@@ -1,6 +1,6 @@
 import { clamp, hsvToRgb, rgbToHsv, type RGB } from '../color/convert';
 import type { HSV } from '../types';
-import type { BrushSettings, ColorDynamics, DynamicControl } from './types';
+import type { BrushSettings, ColorDynamics, DualBrush, DynamicControl } from './types';
 
 /**
  * Pure per-stamp dynamics evaluation: turns brush settings + pen state into
@@ -252,5 +252,38 @@ export function emitStamps(
       (flipX ? FLAG_FLIP_X : 0) + (flipY ? FLAG_FLIP_Y : 0),
       depthScale,
     );
+  }
+}
+
+/**
+ * Emits the secondary (Dual Brush) stamps for one of its spacing steps. The
+ * dual tip runs its own train along the stroke — full-coverage stamps with
+ * their own scatter and count — accumulated into a separate mask that gates
+ * the primary stroke.
+ */
+export function emitDualStamps(
+  dual: DualBrush,
+  ctx: StampContext,
+  x: number,
+  y: number,
+  rng: () => number,
+  out: number[],
+): void {
+  for (let i = 0; i < dual.count; i++) {
+    let sx = x;
+    let sy = y;
+    if (dual.scatter > 0) {
+      const dist = (rng() * 2 - 1) * dual.scatter * dual.size;
+      if (dual.bothAxes) {
+        const a = rng() * TAU;
+        sx += Math.cos(a) * dist;
+        sy += Math.sin(a) * dist;
+      } else {
+        const n = ctx.direction + Math.PI / 2;
+        sx += Math.cos(n) * dist;
+        sy += Math.sin(n) * dist;
+      }
+    }
+    out.push(sx, sy, dual.size / 2, 1, 0, 1, 1, 1, 1, 0, 1);
   }
 }

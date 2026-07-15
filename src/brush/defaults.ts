@@ -52,6 +52,7 @@ export function defaultBrush(): BrushSettings {
     dual: {
       enabled: false,
       shape: 'spatter',
+      hardness: 1,
       mode: 'multiply',
       size: 40,
       spacing: 0.25,

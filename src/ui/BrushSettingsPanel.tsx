@@ -27,6 +27,12 @@ export function BrushSettingsPanel() {
     upd({ [key]: { ...(s[key] as object), ...patch } } as Partial<BrushSettings>);
   const openIt = (id: string) => setOpen((o) => (o === id ? '' : id));
 
+  /** Builtin tip options, plus the current imported tip when one is active. */
+  const tipOptions = (current: string) =>
+    TIP_SHAPES.some((t) => t.id === current)
+      ? TIP_SHAPES
+      : [...TIP_SHAPES, { id: current, label: `Imported (${current.split(':')[1] ?? '?'})` }];
+
   return (
     <div className="panel brush-settings-panel">
       <div className="panel-title">
@@ -37,7 +43,7 @@ export function BrushSettingsPanel() {
         <SelectRow
           label="Tip"
           value={s.tip.shape}
-          options={TIP_SHAPES}
+          options={tipOptions(s.tip.shape)}
           onChange={(v) => sect('tip', { shape: v })}
         />
         <ValSlider
@@ -258,8 +264,14 @@ export function BrushSettingsPanel() {
         <SelectRow
           label="Tip"
           value={s.dual.shape}
-          options={TIP_SHAPES}
+          options={tipOptions(s.dual.shape)}
           onChange={(v) => sect('dual', { shape: v })}
+        />
+        <PctSlider
+          label="Hardness"
+          value={s.dual.hardness}
+          disabled={s.dual.shape !== 'round'}
+          onChange={(v) => sect('dual', { hardness: v })}
         />
         <SelectRow
           label="Mode"
@@ -271,7 +283,7 @@ export function BrushSettingsPanel() {
           label="Size"
           value={s.dual.size}
           min={1}
-          max={256}
+          max={512}
           unit="px"
           onChange={(v) => sect('dual', { size: v })}
         />

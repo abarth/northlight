@@ -41,6 +41,8 @@ export interface AppState {
   eraser: BrushSettings;
   /** currently selected preset id per paint tool, for UI highlighting */
   activePreset: Record<PaintToolId, string | null>;
+  /** bumped whenever the preset library changes (e.g. after an ABR import) */
+  presetRevision: number;
 
   sideTab: SideTab;
 
@@ -64,6 +66,7 @@ export interface AppState {
   /** shallow top-level merge; pass whole nested sections when patching them */
   updateBrush: (patch: Partial<BrushSettings>, tool: PaintToolId) => void;
   applyPreset: (presetId: string, tool: PaintToolId) => void;
+  bumpPresetRevision: () => void;
   setSideTab: (tab: SideTab) => void;
 
   addLayerMeta: (meta: LayerMeta, aboveId?: string) => void;
@@ -89,6 +92,7 @@ export const useStore = create<AppState>((set) => ({
   brush: defaultBrush(),
   eraser: initialEraser,
   activePreset: { brush: 'soft-round', eraser: null },
+  presetRevision: 0,
 
   sideTab: 'color',
 
@@ -129,6 +133,8 @@ export const useStore = create<AppState>((set) => ({
         activePreset: { ...s.activePreset, [tool]: presetId },
       } as Partial<AppState>;
     }),
+
+  bumpPresetRevision: () => set((s) => ({ presetRevision: s.presetRevision + 1 })),
 
   setSideTab: (sideTab) => set({ sideTab }),
 

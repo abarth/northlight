@@ -250,17 +250,58 @@ const TEST = `
     assert('texture each tip: sponge carves per stamp', s2 >= 60, 'spread=' + s2);
   }
 
-  // ---- 12. dual brush modulates coverage ----
+  // ---- 12. dual brush: a true secondary stamp train gates the primary ----
   {
-    eng.beginStroke(sp({
-      dual: { enabled: true, shape: 'spatter', mode: 'multiply', size: 48,
-        spacing: 0.6, scatter: 0.3, bothAxes: true, count: 1 },
-    }));
+    const dual = { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',
+      size: 30, spacing: 0.5, scatter: 0, bothAxes: true, count: 1 };
+    eng.beginStroke(sp({ dual }));
+    // big primary footprint...
     eng.drawStamps(stamps(rec(200, 150, 80, 1)), 1);
+    // ...but the dual tip only stamped at two spots (and one outside).
+    // Dual stamps are coverage, written as white (R channel of the mask).
+    const cov = { color: [1, 1, 1] };
+    eng.drawStamps(stamps(
+      rec(170, 150, 15, 1, cov), rec(240, 150, 15, 1, cov), rec(340, 150, 15, 1, cov),
+    ), 3, 'dual');
     const d = await read();
-    const s3 = spread(d, 200, 150, 30);
+    const atDual1 = px(d, 170, 150)[0];
+    const atDual2 = px(d, 240, 150)[0];
+    const between = px(d, 205, 110)[0]; // inside primary, no dual coverage
+    const outside = px(d, 340, 150)[0]; // dual coverage but no primary
+    assert('dual brush: paint lands where both tips overlap',
+      atDual1 <= 2 && atDual2 <= 2, atDual1 + ',' + atDual2);
+    assert('dual brush: primary alone is masked out', between === 255,
+      'between=' + between);
+    assert('dual brush: dual alone paints nothing', outside === 255,
+      'outside=' + outside);
     eng.cancelStroke();
-    assert('dual brush: secondary tip breaks up coverage', s3 >= 60, 'spread=' + s3);
+  }
+
+  // ---- 13. dual brush walks its own spacing train along a stroke ----
+  {
+    const settings = makeBrush({
+      tip: { size: 40, hardness: 1, spacing: 0.1 },
+      dual: { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',
+        size: 16, spacing: 2.5, scatter: 0, bothAxes: false, count: 1 },
+      smoothing: 0,
+    });
+    eng.beginStroke(NL.brush.engineStrokeParams(settings, 'paint'));
+    const session = new NL.StrokeSession(eng, settings,
+      { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 } });
+    const samp = (x, y) => ({ x, y, pressure: 1, tiltX: 0, tiltY: 0, twist: 0 });
+    session.down(samp(80, 150));
+    session.move([samp(320, 150)]);
+    session.up();
+    let dark = 0, light = 0;
+    const d = await read();
+    for (let x = 85; x <= 315; x += 2) {
+      const v = px(d, x, 150)[0];
+      if (v < 60) dark++;
+      else if (v > 200) light++;
+    }
+    eng.cancelStroke();
+    assert('dual spacing: dabs with gaps along the stroke (not a solid line)',
+      dark >= 10 && light >= 10, 'dark=' + dark + ' light=' + light);
   }
 
   // ---- 13. noise roughens the soft falloff band ----
@@ -451,14 +492,11 @@ const TEST = `
     const pat = NL.brush.patterns.getPattern('sponge');
     assert('patterns: sponge generated and cached',
       pat.size === 256 && pat === NL.brush.patterns.getPattern('sponge'), '');
-    const tile = NL.brush.patterns.getDualTile(
-      { enabled: true, shape: 'spatter', mode: 'multiply', size: 48, spacing: 0.5,
-        scatter: 0.5, bothAxes: true, count: 2 });
-    let filled = 0;
-    for (let i = 0; i < tile.data.length; i++) if (tile.data[i] > 40) filled++;
-    const frac = filled / tile.data.length;
-    assert('patterns: dual tile has structure (not empty, not solid)',
-      frac > 0.05 && frac < 0.95, 'frac=' + frac.toFixed(3));
+    const custom = new Uint8Array(16 * 16).fill(200);
+    NL.brush.patterns.registerTip('test-tip', { size: 16, data: custom });
+    assert('patterns: registered tips resolve through getTip',
+      NL.brush.patterns.getTip('test-tip').data === custom &&
+      NL.brush.patterns.isRegisteredTip('test-tip'), '');
 
     const pencil = NL.brush.presets.findPreset('pencil');
     assert('presets: graphite pencil matches spec',
@@ -480,6 +518,163 @@ const TEST = `
     assert('store: applying a preset replaces brush settings',
       b.scatter.enabled && b.noise && NL.store.getState().activePreset.brush === 'pencil', '');
     NL.store.getState().applyPreset('soft-round', 'brush');
+  }
+
+  // ---- 21b. ABR import: legacy v2, modern v6.2 with descriptor, painting ----
+  {
+    // big-endian binary writer for synthesizing fixture files
+    class W {
+      constructor() { this.b = []; }
+      u8(x) { this.b.push(x & 0xff); return this; }
+      u16(x) { return this.u8(x >> 8).u8(x); }
+      u32(x) { return this.u16(Math.floor(x / 65536)).u16(x); }
+      f64(x) {
+        const dv = new DataView(new ArrayBuffer(8));
+        dv.setFloat64(0, x);
+        for (let i = 0; i < 8; i++) this.u8(dv.getUint8(i));
+        return this;
+      }
+      ascii(s) { for (const c of s) this.u8(c.charCodeAt(0)); return this; }
+      unicode(s) { this.u32(s.length); for (const c of s) this.u16(c.charCodeAt(0)); return this; }
+      dkey(s) { return s.length === 4 ? this.u32(0).ascii(s) : this.u32(s.length).ascii(s); }
+      raw(arr) { this.b.push(...arr); return this; }
+      buffer() { return new Uint8Array(this.b).buffer; }
+      get length() { return this.b.length; }
+    }
+
+    // --- v2 fixture: one 16x16 RLE-compressed sampled brush named "Old" ---
+    {
+      const w = 16, h = 16;
+      const rows = [];
+      for (let y = 0; y < h; y++) {
+        rows.push([w - 1, ...Array.from({ length: w }, (_, x) => (x < w / 2 ? 255 : 0))]);
+      }
+      const body = new W();
+      body.u32(0).u16(40); // misc, spacing 40%
+      body.unicode('Old');
+      body.u8(1); // antialiasing
+      body.u16(0).u16(0).u16(h).u16(w); // short bounds
+      body.u32(0).u32(0).u32(h).u32(w); // long bounds
+      body.u16(8).u8(1); // depth, RLE
+      for (const row of rows) body.u16(row.length);
+      for (const row of rows) body.raw(row);
+
+      const file = new W();
+      file.u16(2).u16(1); // version 2, count 1
+      file.u16(2).u32(body.length).raw(body.b); // type 2 sampled
+      const res = NL.brush.abr.parseAbr(file.buffer());
+      const b = res.brushes[0];
+      const tip = res.tips.get(b.tipId);
+      assert('abr v2: sampled brush parsed with name and spacing',
+        res.brushes.length === 1 && b.name === 'Old' &&
+        Math.abs(b.settings.tip.spacing - 0.4) < 1e-6, JSON.stringify(b));
+      assert('abr v2: RLE tip decoded (left half opaque)',
+        tip.size === 16 && tip.data[8 * 16 + 3] === 255 && tip.data[8 * 16 + 12] === 0, '');
+    }
+
+    // --- v6.2 fixture: samp bitmap + full descriptor ---
+    {
+      const uuid = '01234567-89ab-cdef-0123-456789abcdef'; // 36 chars
+      const w = 8, h = 8;
+      const pixels = [];
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) pixels.push(x < w / 2 ? 255 : 0);
+      }
+      const samp = new W();
+      samp.u8(36).ascii(uuid);
+      samp.raw(new Array(264).fill(0)); // subversion-2 header padding
+      samp.u32(0).u32(0).u32(h).u32(w); // rect
+      samp.u16(8).u8(0); // depth 8, raw
+      samp.raw(pixels);
+      while (samp.length % 4 !== 0) samp.u8(0);
+
+      // descriptor: Brsh list with one brushPreset
+      const desc = new W();
+      desc.u32(16); // versioned descriptor
+      desc.unicode('').dkey('null').u32(1);
+      desc.dkey('Brsh').ascii('VlLs').u32(1).ascii('Objc');
+      desc.unicode('').dkey('brsh').u32(9);
+      desc.dkey('Nm  ').ascii('TEXT').unicode('Fancy');
+      desc.dkey('Brsh').ascii('Objc');
+      {
+        desc.unicode('').dkey('brsh').u32(5);
+        desc.dkey('Dmtr').ascii('UntF').ascii('#Pxl').f64(40);
+        desc.dkey('Spcn').ascii('UntF').ascii('#Prc').f64(30);
+        desc.dkey('Angl').ascii('UntF').ascii('#Ang').f64(15);
+        desc.dkey('Rndn').ascii('UntF').ascii('#Prc').f64(80);
+        desc.dkey('sampledData').ascii('TEXT').unicode(uuid);
+      }
+      desc.dkey('useTipDynamics').ascii('bool').u8(1);
+      desc.dkey('szVr').ascii('Objc');
+      {
+        desc.unicode('').dkey('brVr').u32(3);
+        desc.dkey('bVTy').ascii('long').u32(2); // pen pressure
+        desc.dkey('fStp').ascii('long').u32(25);
+        desc.dkey('jitter').ascii('UntF').ascii('#Prc').f64(30);
+      }
+      desc.dkey('minimumDiameter').ascii('UntF').ascii('#Prc').f64(40);
+      desc.dkey('useScatter').ascii('bool').u8(1);
+      desc.dkey('scatterDynamics').ascii('Objc');
+      {
+        desc.unicode('').dkey('brVr').u32(2);
+        desc.dkey('bVTy').ascii('long').u32(0);
+        desc.dkey('jitter').ascii('UntF').ascii('#Prc').f64(150);
+      }
+      desc.dkey('Cnt ').ascii('long').u32(3);
+      desc.dkey('Wtdg').ascii('bool').u8(1);
+
+      const file = new W();
+      file.u16(6).u16(2); // version 6, subversion 2
+      file.ascii('8BIM').ascii('samp').u32(4 + samp.length);
+      file.u32(samp.length).raw(samp.b);
+      file.ascii('8BIM').ascii('desc').u32(desc.length).raw(desc.b);
+
+      const res = NL.brush.abr.parseAbr(file.buffer());
+      const b = res.brushes[0];
+      assert('abr v6: descriptor names and tip geometry mapped',
+        res.brushes.length === 1 && b.name === 'Fancy' && b.tipId === uuid &&
+        b.settings.tip.size === 40 && Math.abs(b.settings.tip.spacing - 0.3) < 1e-6 &&
+        b.settings.tip.angle === 15 && Math.abs(b.settings.tip.roundness - 0.8) < 1e-6,
+        JSON.stringify(b));
+      assert('abr v6: shape dynamics mapped (pressure size, 30% jitter, 40% min)',
+        b.settings.shape.enabled && b.settings.shape.sizeControl.source === 'pressure' &&
+        Math.abs(b.settings.shape.sizeJitter - 0.3) < 1e-6 &&
+        Math.abs(b.settings.shape.minDiameter - 0.4) < 1e-6,
+        JSON.stringify(b.settings.shape));
+      assert('abr v6: scatter (150% -> 1.5) + count and wet edges mapped',
+        b.settings.scatter.enabled && Math.abs(b.settings.scatter.scatter - 1.5) < 1e-6 &&
+        b.settings.scatter.count === 3 && b.settings.wetEdges === true,
+        JSON.stringify(b.settings.scatter));
+      assert('abr v6: sampled tip bitmap decoded',
+        res.tips.get(uuid).size === 8 && res.tips.get(uuid).data[4 * 8 + 1] === 255, '');
+
+      // --- full import wiring + painting with the imported tip ---
+      const before = NL.brush.presets.allGroups().length;
+      const n = NL.brush.importAbr('fixture.abr', file.buffer());
+      const groups = NL.brush.presets.allGroups();
+      const group = groups[groups.length - 1];
+      assert('abr import: registers a new preset group',
+        n === 1 && groups.length === before + 1 && group.name === 'fixture' &&
+        group.presets[0].name === 'Fancy', group.name);
+      assert('abr import: preset applied to the brush tool',
+        NL.store.getState().brush.tip.shape.startsWith('abr:fixture:') &&
+        NL.store.getState().brush.wetEdges === true, NL.store.getState().brush.tip.shape);
+
+      const imported = group.presets[0].settings;
+      const paintSettings = structuredClone(imported);
+      paintSettings.wetEdges = false;
+      paintSettings.shape.enabled = false;
+      paintSettings.scatter.enabled = false;
+      eng.beginStroke(NL.brush.engineStrokeParams(paintSettings, 'paint'));
+      eng.drawStamps(stamps(rec(200, 150, 32, 1)), 1);
+      const d = await read();
+      const leftHalf = px(d, 185, 150)[0];  // tip's opaque half
+      const rightHalf = px(d, 215, 150)[0]; // tip's transparent half
+      eng.cancelStroke();
+      assert('abr import: painting uses the sampled tip bitmap',
+        leftHalf <= 40 && rightHalf >= 240, leftHalf + ',' + rightHalf);
+      NL.store.getState().applyPreset('soft-round', 'brush');
+    }
   }
 
   // ---- 22. viewport present pass (offscreen) ----

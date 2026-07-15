@@ -1,6 +1,24 @@
 import { emitStamps, STAMP_FLOATS, type StampContext } from '../brush/dynamics';
-import { seededRng } from '../brush/patterns';
-import type { BrushSettings } from '../brush/types';
+import { getTip, seededRng } from '../brush/patterns';
+import type { BrushSettings, TipShape } from '../brush/types';
+
+/** Black-tinted canvas of a tip's alpha map, for preview stamping. */
+const tipCanvasCache = new Map<string, HTMLCanvasElement>();
+
+function tipCanvas(shape: TipShape): HTMLCanvasElement {
+  let c = tipCanvasCache.get(shape);
+  if (!c) {
+    const map = getTip(shape);
+    c = document.createElement('canvas');
+    c.width = map.size;
+    c.height = map.size;
+    const img = new ImageData(map.size, map.size);
+    for (let i = 0; i < map.data.length; i++) img.data[i * 4 + 3] = map.data[i];
+    c.getContext('2d')!.putImageData(img, 0, 0);
+    tipCanvasCache.set(shape, c);
+  }
+  return c;
+}
 
 /**
  * Draws a Photoshop-style stroke preview for a preset by running the real
@@ -49,6 +67,8 @@ export function drawBrushPreview(canvas: HTMLCanvasElement, settings: BrushSetti
     );
   }
 
+  const sampled = pv.tip.shape !== 'round' ? tipCanvas(pv.tip.shape) : null;
+
   for (let i = 0; i < stamps.length; i += STAMP_FLOATS) {
     const px = stamps[i];
     const py = stamps[i + 1];
@@ -56,21 +76,25 @@ export function drawBrushPreview(canvas: HTMLCanvasElement, settings: BrushSetti
     const alpha = stamps[i + 3];
     const angle = stamps[i + 4];
     const roundness = stamps[i + 5];
-    const hard = pv.tip.hardness;
 
     ctx.save();
     ctx.translate(px, py);
     ctx.rotate(angle);
     ctx.scale(1, Math.max(roundness, 0.05));
-    const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, radius);
-    const core = pv.tip.shape === 'round' ? hard * 0.98 : 0.35;
-    grad.addColorStop(0, `rgba(0,0,0,${alpha})`);
-    grad.addColorStop(Math.max(core, 0.01), `rgba(0,0,0,${alpha})`);
-    grad.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(0, 0, radius, 0, Math.PI * 2);
-    ctx.fill();
+    if (sampled) {
+      ctx.globalAlpha = alpha;
+      ctx.drawImage(sampled, -radius, -radius, radius * 2, radius * 2);
+    } else {
+      const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, radius);
+      const core = pv.tip.hardness * 0.98;
+      grad.addColorStop(0, `rgba(0,0,0,${alpha})`);
+      grad.addColorStop(Math.max(core, 0.01), `rgba(0,0,0,${alpha})`);
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(0, 0, radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.restore();
   }
 }

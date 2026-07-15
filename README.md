@@ -46,9 +46,10 @@ sections, all evaluated per stamp:
   modes (Multiply/Subtract/Darken/Overlay/Height), **Depth**, and **Texture
   Each Tip** with depth jitter + control (per-stamp) vs. whole-stroke
   texturing (Photoshop's default), applied at commit time.
-- **Dual Brush** — a secondary tip (with its own mode, size, spacing,
-  scatter, both-axes, count) gates the primary coverage, pre-baked into a
-  tileable modulation map.
+- **Dual Brush** — a true secondary brush, like Photoshop's: the second tip
+  (any shape, with hardness, mode, size, spacing, scatter, both-axes, count)
+  stamps its own train along the stroke into a separate GPU coverage mask
+  that gates the primary stroke at merge time.
 - **Color Dynamics** — foreground/background jitter (with control), hue,
   saturation and brightness jitter, purity, per-tip or per-stroke. Stroke
   accumulation is full-color, so every dab can have its own color.
@@ -64,6 +65,16 @@ separate color stroke texture that is composited live and baked on
 pointer-up. Spacing is distance-based and re-evaluated per stamp, so
 pressure-driven size changes stamp density correctly. The **eraser** shares
 the whole engine and erases layer alpha.
+
+### Photoshop ABR import
+The Brushes panel's **Import ABR…** button loads Photoshop brush files:
+legacy v1/v2 and modern v6/v7/v10 (8BIM `samp` + Actions-descriptor `desc`)
+formats, including PackBits-compressed tips. Sampled tip bitmaps become
+first-class brush tips (usable for the primary and dual tip), and descriptor
+settings are mapped best-effort: name, diameter, spacing, angle, roundness,
+hardness, flips, Shape Dynamics (controls, jitters, minimum diameter),
+Scattering, Transfer, Color Dynamics, Dual Brush, wet edges, noise, and
+airbrush. ABR texture *patterns* (`patt` section) are not imported.
 
 ### Brush presets
 The **Brushes** panel (sidebar tab) has a grouped, Photoshop-style preset
@@ -135,10 +146,12 @@ src/
     types.ts       full Photoshop-style brush settings model
     defaults.ts    defaults + preset deep-merge
     dynamics.ts    pure per-stamp evaluation (controls, jitters, scatter,
-                   color dynamics, transfer) — unit-testable
-    patterns.ts    procedural tileable patterns, sampled tips, dual-brush
-                   tiles (seeded, deterministic)
-    presets.ts     grouped preset library
+                   color dynamics, transfer, dual train) — unit-testable
+    patterns.ts    procedural tileable patterns, sampled tips, runtime tip
+                   registry (seeded, deterministic)
+    presets.ts     grouped preset library + imported groups
+    abr.ts         Photoshop .abr parser (v1/v2 + v6/v7/v10, PackBits,
+                   Actions-descriptor reader, settings mapping)
     engineParams.ts settings -> per-stroke GPU parameters
   gpu/
     shaders.ts    WGSL: compositor (all blend modes), brush stamp (rotated
@@ -158,9 +171,11 @@ src/
 
 Strokes render as instanced quads (position, radius, alpha, angle, roundness,
 color, flips, texture depth per stamp) into a premultiplied RGBA stroke
-texture with OVER accumulation; the compositor merges that texture into the
-active layer live (so previews respect the paint mode, opacity, wet edges and
-whole-stroke texture), and pointer-up bakes it into the layer texture. Layer
+texture with OVER accumulation; the dual brush accumulates its own
+single-channel coverage mask the same way. The compositor merges both into
+the active layer live (so previews respect the paint mode, opacity, dual
+gating, wet edges and whole-stroke texture), and pointer-up bakes them into
+the layer texture. Layer
 compositing ping-pongs between two accumulation textures, one pass per layer,
 then a present pass applies the viewport transform (nearest-neighbor sampling
 when zoomed in past 200%).
@@ -168,13 +183,15 @@ when zoomed in past 200%).
 ## Testing
 
 `tests/gpu.spec.mjs` drives the real engine in a browser against offscreen
-textures and asserts pixels (65 tests): brush falloff values, rotated
+textures and asserts pixels (75+ tests): brush falloff values, rotated
 elliptical tips, flow buildup vs. the opacity cap, paint blend modes, wet
-edges, per-stamp color, texture / texture-each-tip / dual-brush modulation,
-noise, eraser, selection clipping, undo/redo, pressure dynamics with
-minimums, airbrush build-up, the pure dynamics module, pattern/preset
-integrity, the viewport pass, Lab/HSV conversions, and the Photoshop numeric
-keyboard shortcuts.
+edges, per-stamp color, texture / texture-each-tip modulation, true
+dual-brush gating (masking and the secondary spacing train), noise, eraser,
+selection clipping, undo/redo, pressure dynamics with minimums, airbrush
+build-up, the pure dynamics module, pattern/preset integrity, ABR parsing
+(synthesized v2 + v6.2 fixtures with RLE tips and descriptors, plus the full
+import-and-paint path), the viewport pass, Lab/HSV conversions, and the
+Photoshop numeric keyboard shortcuts.
 
 ```bash
 npm run build

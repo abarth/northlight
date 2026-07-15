@@ -1,4 +1,4 @@
-import type { DualBrush, PatternId, TipShape } from './types';
+import type { PatternId, TipShape } from './types';
 
 /**
  * Procedural, tileable grayscale patterns (for the Texture section) and
@@ -235,71 +235,10 @@ function makeTip(shape: TipShape): GrayMap {
   return { size, data: toBytes(out) };
 }
 
-// ---------------------------------------------------------------------------
-// Dual-brush tiles
-//
-// Photoshop's dual brush stamps a secondary tip along the stroke with its own
-// spacing/scatter/count and combines it with the primary coverage. We
-// approximate that by pre-baking the secondary tip train into a tileable
-// 256x256 map (grid placement + scatter jitter, wrap-around drawing) that the
-// stamp shader samples in document space.
-// ---------------------------------------------------------------------------
-
-const DUAL_TILE = 256;
-
-function makeDualTile(dual: DualBrush): GrayMap {
-  const size = DUAL_TILE;
-  const out = new Float32Array(size * size);
-  const rng = mulberry32(0xd0a1);
-  const tip = getTip(dual.shape);
-  const tipSize = Math.max(3, Math.min(dual.size, size));
-  const step = Math.max(tipSize * Math.max(dual.spacing, 0.05), 3);
-  const jitter = dual.scatter * tipSize;
-
-  const drawTip = (cx: number, cy: number, gain: number) => {
-    const half = tipSize / 2;
-    const lo = Math.floor(-half);
-    const hi = Math.ceil(half);
-    for (let dy = lo; dy <= hi; dy++) {
-      for (let dx = lo; dx <= hi; dx++) {
-        // sample the tip alpha map
-        const u = (dx / tipSize + 0.5) * tip.size;
-        const v = (dy / tipSize + 0.5) * tip.size;
-        if (u < 0 || v < 0 || u >= tip.size || v >= tip.size) continue;
-        const a = (tip.data[(v | 0) * tip.size + (u | 0)] / 255) * gain;
-        if (a <= 0) continue;
-        const x = ((Math.round(cx + dx) % size) + size) % size;
-        const y = ((Math.round(cy + dy) % size) + size) % size;
-        const i = y * size + x;
-        out[i] = Math.max(out[i], a);
-      }
-    }
-  };
-
-  for (let gy = 0; gy < size / step; gy++) {
-    for (let gx = 0; gx < size / step; gx++) {
-      const n = Math.max(1, Math.round(dual.count * (0.6 + rng() * 0.4)));
-      for (let k = 0; k < n; k++) {
-        let x = gx * step + rng() * step;
-        let y = gy * step + rng() * step;
-        if (jitter > 0) {
-          if (dual.bothAxes) {
-            x += (rng() * 2 - 1) * jitter;
-            y += (rng() * 2 - 1) * jitter;
-          } else {
-            y += (rng() * 2 - 1) * jitter;
-          }
-        }
-        drawTip(x, y, 0.75 + rng() * 0.25);
-      }
-    }
-  }
-  return { size, data: toBytes(out) };
-}
-
 const patternCache = new Map<PatternId, GrayMap>();
 const tipCache = new Map<TipShape, GrayMap>();
-const dualCache = new Map<string, GrayMap>();
+/** Sampled tips registered at runtime (e.g. imported from .abr files). */
+const registeredTips = new Map<string, GrayMap>();
 
 export function getPattern(id: PatternId): GrayMap {
   let p = patternCache.get(id);
@@ -310,28 +249,24 @@ export function getPattern(id: PatternId): GrayMap {
   return p;
 }
 
+const BUILTIN_TIPS: TipShape[] = ['round', 'chalk', 'spatter', 'grain'];
+
 export function getTip(shape: TipShape): GrayMap {
+  const registered = registeredTips.get(shape);
+  if (registered) return registered;
   let t = tipCache.get(shape);
   if (!t) {
-    t = makeTip(shape);
+    t = makeTip(BUILTIN_TIPS.includes(shape) ? shape : 'round');
     tipCache.set(shape, t);
   }
   return t;
 }
 
-export function getDualTile(dual: DualBrush): GrayMap {
-  const key = JSON.stringify([
-    dual.shape,
-    dual.size,
-    dual.spacing,
-    dual.scatter,
-    dual.bothAxes,
-    dual.count,
-  ]);
-  let t = dualCache.get(key);
-  if (!t) {
-    t = makeDualTile(dual);
-    dualCache.set(key, t);
-  }
-  return t;
+/** Registers a sampled tip (square alpha map) under an id, e.g. from an ABR. */
+export function registerTip(id: string, map: GrayMap): void {
+  registeredTips.set(id, map);
+}
+
+export function isRegisteredTip(id: string): boolean {
+  return registeredTips.has(id);
 }
