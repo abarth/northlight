@@ -27,6 +27,7 @@ import {
 import { PaintEngine } from '../gpu/engine';
 import { StrokeSession } from '../gpu/stroke';
 import { engineStrokeParams } from '../brush/engineParams';
+import { tipOutline } from '../brush/tipOutline';
 import type { PointerSample } from '../brush/dynamics';
 import { rgbToHsv } from '../color/convert';
 import {
@@ -155,6 +156,37 @@ function rotateCursor(angle: number): string {
   return cur;
 }
 
+const selectionCursorCache = new Map<SelectionOp, string>();
+
+/**
+ * Crosshair cursor with a Photoshop-style badge at the lower right showing
+ * the pending boolean op: + (add), − (subtract), × (intersect). Built as an
+ * SVG data URI and cached per op; 'new' is the plain CSS crosshair.
+ */
+function selectionCursor(op: SelectionOp): string {
+  if (op === 'new') return 'crosshair';
+  let cur = selectionCursorCache.get(op);
+  if (cur) return cur;
+
+  const cross = '<path d="M10 3v14M3 10h14"/>';
+  const badge =
+    op === 'add'
+      ? '<path d="M19 15v8M15 19h8"/>'
+      : op === 'subtract'
+        ? '<path d="M15 19h8"/>'
+        : '<path d="M16 16l6 6M22 16l-6 6"/>';
+  const paths = cross + badge;
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26">` +
+    `<g fill="none" stroke-linecap="round">` +
+    `<g stroke="%23fff" stroke-width="3.4">${paths}</g>` +
+    `<g stroke="%23000" stroke-width="1.6">${paths}</g>` +
+    `</g></svg>`;
+  cur = `url("data:image/svg+xml,${svg.replace(/"/g, "'")}") 10 10, crosshair`;
+  selectionCursorCache.set(op, cur);
+  return cur;
+}
+
 /** Shift-drag: snap movement to horizontal / vertical / 45° diagonals. */
 function constrain45(dx: number, dy: number): [number, number] {
   if (Math.abs(dx) > 2 * Math.abs(dy)) return [dx, 0];
@@ -247,7 +279,13 @@ export function CanvasView() {
         fitView();
         setReady(true);
         const loop = () => {
-          engine.render(buildRenderState());
+          // Device loss surfaces via device.lost above; keep the loop alive
+          // so the 2D overlay (ants, transform box, brush cursor) still draws.
+          try {
+            engine.render(buildRenderState());
+          } catch {
+            /* rendering resumes if the device comes back */
+          }
           drawOverlay();
           raf = requestAnimationFrame(loop);
         };
@@ -295,6 +333,11 @@ export function CanvasView() {
         }
         e.preventDefault();
         return;
+      }
+      // modifier transitions retarget the hover cursor immediately
+      // (selection-op badges, Ctrl distort/perspective handles)
+      if (['Shift', 'Alt', 'Control', 'Meta'].includes(e.key)) {
+        updateHoverCursor(e);
       }
       // Holding Alt with a painting tool temporarily switches to the
       // eyedropper (which then samples the foreground color), like Photoshop.
@@ -491,6 +534,9 @@ export function CanvasView() {
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
+      if (['Shift', 'Alt', 'Control', 'Meta'].includes(e.key)) {
+        updateHoverCursor(e);
+      }
       if (e.code === 'Space') {
         spaceRef.current = false;
         const s = useStore.getState();
@@ -727,6 +773,43 @@ export function CanvasView() {
       case 'perspective':
         return 'crosshair';
     }
+  }
+
+  /**
+   * Badge cursor for a selection tool when the effective boolean op is not
+   * 'new' — from held modifiers or the options-bar op, like Photoshop.
+   */
+  function selectionModCursor(mods: { shiftKey: boolean; altKey: boolean }): string | null {
+    const s = useStore.getState();
+    if (s.transform || spaceRef.current) return null;
+    if (s.tool !== 'marquee' && s.tool !== 'lasso' && s.tool !== 'polyLasso') return null;
+    // an in-progress polygonal lasso locked its op at the first click
+    const fallback = polyRef.current ? polyOpRef.current : s.selectionOp;
+    const op = selectionOpFromEvent(mods, fallback);
+    return op === 'new' ? null : selectionCursor(op);
+  }
+
+  /**
+   * Recomputes the hover cursor from the pointer position and modifier keys.
+   * Called on pointer moves and on Shift/Alt/Ctrl transitions so the cursor
+   * updates the moment a modifier is pressed, without waiting for movement.
+   */
+  function updateHoverCursor(mods: {
+    shiftKey: boolean;
+    altKey: boolean;
+    ctrlKey: boolean;
+    metaKey: boolean;
+  }) {
+    if (dragRef.current) return;
+    const cur = cursorRef.current;
+    if (!cur.over) {
+      setHoverCursor(null);
+      return;
+    }
+    const screen = { x: cur.x, y: cur.y };
+    setHoverCursor(
+      transformCursorAt(screen, mods.ctrlKey || mods.metaKey) ?? selectionModCursor(mods),
+    );
   }
 
   /**
@@ -1059,9 +1142,7 @@ export function CanvasView() {
   function onPointerMove(e: React.PointerEvent) {
     const screen = eventToScreen(e.nativeEvent);
     cursorRef.current = { ...screen, over: true };
-    if (!dragRef.current) {
-      setHoverCursor(transformCursorAt(screen, e.ctrlKey || e.metaKey));
-    }
+    updateHoverCursor(e);
     const drag = dragRef.current;
     if (polyRef.current) polyPreviewRef.current = screenToDoc(screen);
     if (!drag) return;
@@ -1333,20 +1414,46 @@ export function CanvasView() {
       }
     }
 
-    // brush cursor
+    // brush cursor: an outline of the basic shape of the mark. Sampled and
+    // non-round tips use the traced tip contour; round tips an ellipse. The
+    // transform mirrors the stamp shader: scale y by roundness, mirror for
+    // flips (the shader flips uv, so the mark mirrors), rotate by the static
+    // tip angle (negated to Photoshop's CCW-positive convention).
     const cur = cursorRef.current;
     const t = spaceRef.current ? 'pan' : s.tool;
     if (cur.over && (t === 'brush' || t === 'eraser')) {
-      const settings = t === 'eraser' ? s.eraser : s.brush;
-      const r = (settings.tip.size / 2) * s.view.zoom;
+      const tip = (t === 'eraser' ? s.eraser : s.brush).tip;
+      const r = Math.max((tip.size / 2) * s.view.zoom, 1);
+      const roundness = Math.max(tip.roundness, 0.01);
+      const angle = (-tip.angle / 180) * Math.PI;
+      const ca = Math.cos(angle);
+      const sa = Math.sin(angle);
+      const loops = tip.shape === 'round' ? [] : tipOutline(tip.shape);
+
       ctx.beginPath();
-      ctx.arc(cur.x, cur.y, Math.max(r, 1), 0, Math.PI * 2);
-      ctx.lineWidth = Math.max(1, dpr);
-      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      if (loops.length > 0) {
+        const fx = tip.flipX ? -1 : 1;
+        const fy = tip.flipY ? -1 : 1;
+        for (const loop of loops) {
+          for (let i = 0; i < loop.length; i++) {
+            const lx = loop[i].x * fx * r;
+            const ly = loop[i].y * fy * r * roundness;
+            const x = cur.x + lx * ca - ly * sa;
+            const y = cur.y + lx * sa + ly * ca;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+          ctx.closePath();
+        }
+      } else {
+        ctx.ellipse(cur.x, cur.y, r, Math.max(r * roundness, 1), angle, 0, Math.PI * 2);
+      }
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = Math.max(1, dpr) * 2.4;
+      ctx.strokeStyle = 'rgba(0,0,0,0.65)';
       ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(cur.x, cur.y, Math.max(r - dpr, 0.5), 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+      ctx.lineWidth = Math.max(1, dpr);
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
       ctx.stroke();
       if (r < 4) {
         // crosshair for tiny brushes

@@ -1271,6 +1271,39 @@ await page.keyboard.press('6');
 kbAssert('with airbrush on, digits set flow instead', (await getBrush()).flow === 0.6,
   JSON.stringify(await getBrush()));
 
+// ---- brush-cursor tip outlines ----
+const outline = await page.evaluate(() => {
+  const { tipOutline } = window.__northlight.brush;
+  const loops = tipOutline('chalk');
+  let inRange = true;
+  let pts = 0;
+  for (const loop of loops) {
+    for (const p of loop) {
+      pts++;
+      if (p.x < -1.01 || p.x > 1.01 || p.y < -1.01 || p.y > 1.01) inRange = false;
+    }
+  }
+  return {
+    loops: loops.length,
+    pts,
+    inRange,
+    cached: tipOutline('chalk') === loops,
+    unknown: tipOutline('abr:missing:tip').length,
+    spatter: tipOutline('spatter').length,
+  };
+});
+kbAssert('tip outline: chalk traces at least one loop', outline.loops >= 1,
+  JSON.stringify(outline));
+kbAssert('tip outline: points normalized to the unit square', outline.inRange && outline.pts > 8,
+  JSON.stringify(outline));
+kbAssert('tip outline: result is cached per tip', outline.cached, JSON.stringify(outline));
+// getTip falls back to the round map for unknown ids, so the mark — and
+// therefore the traced cursor outline — is round rather than missing.
+kbAssert('tip outline: unknown tip traces the round fallback mark', outline.unknown >= 1,
+  JSON.stringify(outline));
+kbAssert('tip outline: spatter keeps only meaningful islands', outline.spatter >= 1,
+  JSON.stringify(outline));
+
 console.log(kb.join('\n'));
 
 const all = [...res, ...realResults, ...kb];

@@ -60,17 +60,19 @@ export const MarqueeIcon = ({ size }: IconProps) => (
 
 export const LassoIcon = ({ size }: IconProps) => (
   <svg {...base(size)}>
-    <path d="M12 4c4.7 0 8.5 2.2 8.5 5s-3.8 5-8.5 5c-2 0-3.9-.4-5.3-1.1" strokeDasharray="3 2.4" />
-    <path d="M6.7 12.9C4.7 12 3.5 10.6 3.5 9c0-1.5 1-2.8 2.7-3.7" strokeDasharray="3 2.4" />
-    <path d="M6.5 13a2 2 0 1 0 0 4c1.4 0 2-1 2-2.4C8.5 12.4 7 11 7 11" />
-    <path d="M6.5 17c0 1.7-1 3-2.5 3.5" />
+    <path d="M12 4c4.7 0 8.5 2.3 8.5 5.1s-3.8 5.1-8.5 5.1c-1.3 0-2.6-.2-3.7-.5" />
+    <path d="M5.9 12.4C4.4 11.5 3.5 10.4 3.5 9.1 3.5 6.3 7.3 4 12 4" />
+    <circle cx="7" cy="14" r="1.9" />
+    <path d="M6.3 15.8c-.3 1.9-1.3 3.3-2.9 4" />
   </svg>
 );
 
 export const PolyLassoIcon = ({ size }: IconProps) => (
   <svg {...base(size)}>
-    <path d="M4 15L9 4l7 3 4 6-7 2z" strokeDasharray="3 2.4" />
-    <path d="M13 15l-6.5 2a2 2 0 1 0 2 2.4" />
+    <path d="M9.5 4l10 2.2-1.8 7.3-9 1.6" />
+    <path d="M5.5 12.6L4 8.9l5.5-4.9" />
+    <circle cx="7" cy="14" r="1.9" />
+    <path d="M6.3 15.8c-.3 1.9-1.3 3.3-2.9 4" />
   </svg>
 );
 

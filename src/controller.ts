@@ -7,6 +7,7 @@ import * as brushPatterns from './brush/patterns';
 import * as brushPresets from './brush/presets';
 import * as brushAbr from './brush/abr';
 import { engineStrokeParams } from './brush/engineParams';
+import { tipOutline } from './brush/tipOutline';
 import { StrokeSession } from './gpu/stroke';
 import {
   combineMasks,
@@ -55,6 +56,7 @@ declare global {
         abr: typeof brushAbr;
         engineStrokeParams: typeof engineStrokeParams;
         importAbr: typeof importAbr;
+        tipOutline: typeof tipOutline;
       };
     };
   }
@@ -75,6 +77,7 @@ window.__northlight = {
     abr: brushAbr,
     engineStrokeParams,
     importAbr,
+    tipOutline,
   },
 };
 
