@@ -778,19 +778,6 @@ select {
   border-radius: 3px;
 }
 
-/* fixed-position (anchored in JS) so it floats above the whole app instead
-   of scrolling/clipping inside the options bar */
-.tip-popover {
-  position: fixed;
-  z-index: 1000;
-  width: 300px;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
-  padding: 10px;
-}
-
 .icon-btn.toggle {
   gap: 3px;
   border: 1px solid var(--border);

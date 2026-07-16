@@ -344,7 +344,6 @@ function LabArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
 const C_MAX = 0.4;
 
 function OklchChart({
-  label,
   xMax,
   yMax,
   deps,
@@ -352,7 +351,6 @@ function OklchChart({
   marker,
   onPick,
 }: {
-  label: string;
   xMax: number;
   yMax: number;
   /** cache key: the parameters the field depends on (not the marker) */
@@ -422,7 +420,7 @@ function OklchChart({
 
   return (
     <div className="ok-row">
-      <span className="ch-label">{label}</span>
+      <span className="ch-label" aria-hidden />
       <div className="ok-chart-wrap" {...dragPick(pick)}>
         <canvas ref={ref} className="ok-chart" />
       </div>
@@ -432,6 +430,7 @@ function OklchChart({
 
 /** Regular one-axis slider (like the RGB rows) under each gamut diagram. */
 function OklchSlider({
+  label,
   value,
   min,
   max,
@@ -440,6 +439,7 @@ function OklchSlider({
   colorAt,
   onChange,
 }: {
+  label: string;
   value: number;
   min: number;
   max: number;
@@ -455,7 +455,7 @@ function OklchSlider({
   }
   return (
     <label className="channel-row ok-sub">
-      <span className="ch-label" />
+      <span className="ch-label">{label}</span>
       <input
         type="range"
         min={min}
@@ -492,7 +492,6 @@ function OklchArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
   return (
     <div className="ok-area">
       <OklchChart
-        label="L"
         xMax={1}
         yMax={C_MAX}
         deps={`h${ok.h.toFixed(2)}`}
@@ -501,6 +500,7 @@ function OklchArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
         onPick={(l, c) => apply({ l, c, h: ok.h })}
       />
       <OklchSlider
+        label="L"
         value={ok.l * 100}
         min={0}
         max={100}
@@ -510,7 +510,6 @@ function OklchArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
         onChange={(v) => apply({ ...ok, l: v / 100 })}
       />
       <OklchChart
-        label="C"
         xMax={360}
         yMax={C_MAX}
         deps={`l${ok.l.toFixed(3)}`}
@@ -519,6 +518,7 @@ function OklchArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
         onPick={(h, c) => apply({ l: ok.l, c, h })}
       />
       <OklchSlider
+        label="C"
         value={ok.c}
         min={0}
         max={C_MAX}
@@ -528,7 +528,6 @@ function OklchArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
         onChange={(v) => apply({ ...ok, c: v })}
       />
       <OklchChart
-        label="H"
         xMax={360}
         yMax={1}
         deps={`c${ok.c.toFixed(4)}`}
@@ -537,6 +536,7 @@ function OklchArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
         onPick={(h, l) => apply({ l, c: ok.c, h })}
       />
       <OklchSlider
+        label="H"
         value={ok.h}
         min={0}
         max={360}

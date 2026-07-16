@@ -163,6 +163,24 @@ function constrain45(dx: number, dy: number): [number, number] {
   return [Math.sign(dx) * d, Math.sign(dy) * d];
 }
 
+/** Minimum distance from `p` to the quad's outline (its four segments). */
+function distToQuadEdges(q: Point[], p: Point): number {
+  let best = Infinity;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i];
+    const b = q[(i + 1) % 4];
+    const abx = b.x - a.x;
+    const aby = b.y - a.y;
+    const len2 = abx * abx + aby * aby;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2)) : 0;
+    best = Math.min(best, Math.hypot(p.x - (a.x + abx * t), p.y - (a.y + aby * t)));
+  }
+  return best;
+}
+
+/** How far outside the box the move tool's rotate zone extends (CSS px). */
+const ROTATE_BAND = 22;
+
 function pointInQuad(p: Point, q: Point[]): boolean {
   let inside = false;
   for (let i = 0, j = 3; i < 4; j = i++) {
@@ -676,8 +694,11 @@ export function CanvasView() {
     if (!tr) return null;
     const h = transformHandleAt(tr, screen, ctrl);
     const moveTool = s.tool === 'move' && !tr.engaged;
-    if (moveTool && (!tr.showHandles || h.zone === 'inside' || h.zone === 'outside')) {
-      return 'move';
+    if (moveTool && (!tr.showHandles || h.zone === 'inside')) return 'move';
+    if (moveTool && h.zone === 'outside') {
+      const qs2 = tr.quad.map(docToScreen);
+      if (distToQuadEdges(qs2, screen) > ROTATE_BAND * devicePixelRatio) return 'move';
+      // falls through: rotate cursor for the band just outside the box
     }
     const qs = tr.quad.map(docToScreen);
     const center = {
@@ -926,9 +947,20 @@ export function CanvasView() {
       if (!tr) return;
       let handle = transformHandleAt(tr, screen, e.ctrlKey || e.metaKey);
       if (t === 'move' && !tr.engaged) {
-        if (!tr.showHandles || handle.zone === 'inside' || handle.zone === 'outside') {
-          // plain move-tool drag: translate, never rotate
+        if (!tr.showHandles || handle.zone === 'inside') {
           handle = { op: 'move', index: 0, zone: 'inside' };
+        } else if (handle.zone === 'outside') {
+          // a band just outside the box rotates (and engages the transform,
+          // like Photoshop's transform controls); farther out still moves
+          if (
+            distToQuadEdges(tr.quad.map(docToScreen), screen) <=
+            ROTATE_BAND * devicePixelRatio
+          ) {
+            handle = { op: 'rotate', index: 0, zone: 'outside' };
+            s.patchTransform({ engaged: true });
+          } else {
+            handle = { op: 'move', index: 0, zone: 'inside' };
+          }
         } else {
           // grabbing a handle escalates the float into a full transform
           s.patchTransform({ engaged: true });
