@@ -650,10 +650,12 @@ function mapBrushDescriptor(d: Descriptor): AbrBrush {
       hardness: dualTip.hardness !== undefined ? clamp01(dualTip.hardness / 100) : 1,
       mode: mapBlend(dualDesc['BlnM']),
       size: Math.min(Math.max(dualTip.size ?? 40, 1), 1000),
-      // the panel's spacing slider is dualBrush.Spcn; the tip's inherent
-      // spacing (dualBrush.Brsh.Spcn) is the fallback
+      // The Dual Brush panel's Spacing slider is stored on the nested tip
+      // (dualBrush.Brsh.Spcn) — verified against real Photoshop files. The
+      // outer dualBrush.Spcn holds a stale default (e.g. 100) and is only a
+      // last-resort fallback.
       spacing: Math.max(
-        panelSpacing !== undefined ? panelSpacing / 100 : dualTip.spacing ?? 0.25,
+        dualTip.spacing ?? (panelSpacing !== undefined ? panelSpacing / 100 : 0.25),
         0.01,
       ),
       scatter: Math.min(dualScatter.jitter, 10),

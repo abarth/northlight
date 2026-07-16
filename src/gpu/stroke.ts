@@ -38,17 +38,19 @@ export class StrokeSession {
   private last: PointerSample | null = null;
   private smoothed: PointerSample | null = null;
   private residual = 0; // distance carried since the last stamp
-  private residualDual = 0; // the dual tip walks its own spacing train
   private stepIndex = 0;
   private direction = 0;
   private initialDirection = 0;
   private initialDirectionSet = false;
   private strokeColor: RGB;
+  /** total path length walked so far (drives the dual train positions) */
+  private pathDist = 0;
+  /** path distance at which the next dual mask stamp is due */
+  private dualNext = 0;
   /**
-   * Pending stamp batches in path order. Order matters for the dual brush:
-   * a primary dab is gated by the dual mask as it exists when the dab is
-   * drawn, so dual stamps must land between the dabs that precede and
-   * follow them along the stroke, exactly like Photoshop.
+   * Pending stamp batches in emission order. Order matters for the dual
+   * brush: a primary dab is gated by the dual mask as it exists when the
+   * dab is drawn, so each segment's mask stamps render before its dabs.
    */
   private queue: { target: 'primary' | 'dual'; records: number[] }[] = [];
   private airbrushTimer: ReturnType<typeof setInterval> | null = null;
@@ -118,10 +120,12 @@ export class StrokeSession {
     this.last = sample;
     this.smoothed = sample;
     this.residual = 0;
-    this.residualDual = 0;
     this.stepIndex = 0;
-    // dual mask first so the very first dab is gated by it
+    this.pathDist = 0;
+    // dual mask first so the very first dab is gated by it; the train's
+    // next stamp fires ahead of the pen once a direction exists
     this.emitDual(sample.x, sample.y, sample);
+    this.dualNext = this.dualSpacingPx();
     this.emit(sample.x, sample.y, sample);
     this.flush();
 
@@ -131,7 +135,8 @@ export class StrokeSession {
         const at = this.smoothed;
         if (!at) return;
         this.stepIndex++;
-        this.emitDual(at.x, at.y, at);
+        // build-up dabs reuse the existing dual mask; the train only
+        // advances with pen travel
         this.emit(at.x, at.y, at);
         this.flush();
       }, 40);
@@ -196,51 +201,54 @@ export class StrokeSession {
       twist: a.twist + (b.twist - a.twist) * t,
     });
 
-    // Both spacing trains — the primary dabs and the dual-brush mask stamps —
-    // walk the segment together in path order (a merged two-cursor loop), so
-    // each dab only ever sees the dual coverage laid down BEHIND or AT its
-    // own position, never stamps that lie ahead. This matches Photoshop's
-    // incremental dual-brush painting regardless of pointer-event batching.
-    let travelledP = 0;
-    let doneP = false;
-    let travelledD = 0;
-    let doneD = !this.settings.dual.enabled;
-    // Hard cap so a pathological event can't hang the tab.
-    for (let guard = 0; guard < 20000 && !(doneP && doneD); guard++) {
-      let dP = Infinity;
-      if (!doneP) {
-        const here = lerpSample(travelledP / dist);
-        dP = travelledP + this.spacingPx(here) - this.residual;
-        if (dP > dist) {
-          this.residual += dist - travelledP;
-          doneP = true;
-          dP = Infinity;
+    // The dual mask train runs AHEAD of the pen: a dab at position p paints
+    // fragments up to p + primaryRadius, and every fragment is gated by the
+    // mask as it exists when the dab is drawn — so the stamp covering those
+    // fragments must already be down. Firing each stamp once the pen is
+    // within (primaryRadius + dualRadius) of its train position (stamps
+    // beyond the walked path are extrapolated along the current direction)
+    // keeps painting continuous when the mask stamps abut (spacing <= 100%)
+    // and incremental — later stamps still never reveal old dabs. This is
+    // how Photoshop's dual texture fills in smoothly under the brush.
+    if (this.settings.dual.enabled) {
+      const dual = this.settings.dual;
+      const lookahead = (this.settings.tip.size + dual.size) / 2;
+      const end = this.pathDist + dist;
+      const step = this.dualSpacingPx();
+      for (let guard = 0; guard < 10000 && this.dualNext <= end + lookahead; guard++) {
+        const t = this.dualNext;
+        this.dualNext += step;
+        if (t <= end) {
+          const at = lerpSample((t - this.pathDist) / dist);
+          this.emitDual(at.x, at.y, at);
+        } else {
+          const ahead = t - end;
+          this.emitDual(
+            b.x + Math.cos(this.direction) * ahead,
+            b.y + Math.sin(this.direction) * ahead,
+            b,
+          );
         }
-      }
-      let dD = Infinity;
-      if (!doneD) {
-        dD = travelledD + this.dualSpacingPx() - this.residualDual;
-        if (dD > dist) {
-          this.residualDual += dist - travelledD;
-          doneD = true;
-          dD = Infinity;
-        }
-      }
-      if (dP === Infinity && dD === Infinity) break;
-      if (dD <= dP) {
-        // ties go to the dual mask so the coincident dab is gated by it
-        travelledD = dD;
-        this.residualDual = 0;
-        const at = lerpSample(travelledD / dist);
-        this.emitDual(at.x, at.y, at);
-      } else {
-        travelledP = dP;
-        this.residual = 0;
-        this.stepIndex++;
-        const at = lerpSample(travelledP / dist);
-        this.emit(at.x, at.y, at);
       }
     }
+
+    let travelled = 0;
+    // Hard cap so a pathological event can't hang the tab.
+    for (let guard = 0; guard < 10000; guard++) {
+      const here = lerpSample(travelled / dist);
+      const need = this.spacingPx(here) - this.residual;
+      if (travelled + need > dist) {
+        this.residual += dist - travelled;
+        break;
+      }
+      travelled += need;
+      this.residual = 0;
+      this.stepIndex++;
+      const at = lerpSample(travelled / dist);
+      this.emit(at.x, at.y, at);
+    }
+
+    this.pathDist += dist;
   }
 
   private flush(): void {

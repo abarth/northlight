@@ -205,7 +205,21 @@ export const useStore = create<AppState>((set) => ({
   resetColors: () => set({ fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 } }),
 
   updateBrush: (patch, tool) =>
-    set((s) => ({ [tool]: { ...s[tool], ...patch } }) as Partial<AppState>),
+    set((s) => {
+      const cur = s[tool];
+      const next = { ...cur, ...patch };
+      // Photoshop scales the dual tip proportionally when the primary tip
+      // size changes (explicit dual edits are left alone).
+      const newSize = patch.tip?.size;
+      if (newSize !== undefined && newSize !== cur.tip.size && !patch.dual) {
+        const ratio = newSize / Math.max(cur.tip.size, 0.01);
+        next.dual = {
+          ...cur.dual,
+          size: Math.min(Math.max(cur.dual.size * ratio, 1), 1000),
+        };
+      }
+      return { [tool]: next } as Partial<AppState>;
+    }),
 
   applyPreset: (presetId, tool) =>
     set((s) => {

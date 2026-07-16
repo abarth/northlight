@@ -56,10 +56,13 @@ sections, all evaluated per stamp:
 - **Dual Brush** — a true secondary brush, like Photoshop's: the second tip
   (any shape, with hardness, mode, size, spacing, scatter, both-axes, count)
   stamps its own train along the stroke into a separate GPU coverage mask.
-  Both trains walk each segment interleaved in path order and every primary
-  dab is gated by the mask **as it exists at stamp time**, so painting is
-  incremental exactly like Photoshop — dabs laid before a mask stamp stay
-  gated, and finished areas never change retroactively.
+  The mask train runs **ahead of the pen** (by primary + dual radius,
+  extrapolated along the stroke direction) and every primary dab is gated by
+  the mask as it exists at stamp time — so painting fills in smoothly under
+  the brush, strokes are continuous whenever the mask stamps abut (spacing
+  ≤ 100%), coverage gaps are purely geometric, and finished areas never
+  change retroactively. The dual tip also scales proportionally when the
+  primary size changes, like Photoshop.
 - **Color Dynamics** — foreground/background jitter (with control), hue,
   saturation and brightness jitter, purity, per-tip or per-stroke. Stroke
   accumulation is full-color, so every dab can have its own color.

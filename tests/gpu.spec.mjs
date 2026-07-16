@@ -338,9 +338,11 @@ const TEST = `
   }
 
   // ---- 13c. dual brush paints incrementally, never retroactively ----
-  // Dabs are gated by the dual mask at stamp time. A dab laid before its
-  // mask stamp stays unpainted forever; already-visible paint never changes
-  // as the stroke continues (Photoshop's behavior — no lag-then-snap).
+  // The mask train runs ahead of the pen (by primary radius + dual radius,
+  // extrapolated along the stroke direction), so every dab finds its mask
+  // already in place: painting fills in smoothly under the brush, coverage
+  // gaps are purely geometric (spacing > 100%), and already-visible paint
+  // never changes as the stroke continues (no Photoshop lag-then-snap).
   {
     const settings = makeBrush({
       tip: { size: 10, hardness: 1, spacing: 0.5 },
@@ -348,7 +350,8 @@ const TEST = `
         size: 60, spacing: 2.0, scatter: 0, bothAxes: false, count: 1 },
       smoothing: 0,
     });
-    // dual mask stamps land at x = 80 (down), 200, 320 (spacing 120px)
+    // dual mask stamps at x = 80 (down), 200, 320 -> coverage discs
+    // [50..110], [170..230], [290..350] with geometric gaps between
     eng.beginStroke(NL.brush.engineStrokeParams(settings, 'paint'));
     const session = new NL.StrokeSession(eng, settings,
       { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 } });
@@ -368,14 +371,15 @@ const TEST = `
     }
     assert('dual incremental: painted areas never change behind the brush',
       changed === -1, 'changed at x=' + changed);
-    assert('dual incremental: dab laid before its mask stays unpainted',
-      px(b, 178, 150)[0] >= 250, 'v=' + px(b, 178, 150)[0]);
-    assert('dual incremental: painting resumes after the mask stamp lands',
+    assert('dual incremental: mask stamped ahead keeps coverage continuous',
+      px(b, 178, 150)[0] <= 60, 'v=' + px(b, 178, 150)[0]);
+    assert('dual incremental: geometric gaps between mask stamps stay clear',
+      px(b, 140, 150)[0] >= 250, 'v=' + px(b, 140, 150)[0]);
+    assert('dual incremental: painting continues past the mask stamp',
       px(b, 210, 150)[0] <= 60, 'v=' + px(b, 210, 150)[0]);
     eng.cancelStroke();
 
-    // One giant segment must behave identically to many small moves: the
-    // two spacing trains interleave in path order within a segment.
+    // One giant segment must behave identically to many small moves.
     eng.beginStroke(NL.brush.engineStrokeParams(settings, 'paint'));
     const s2 = new NL.StrokeSession(eng, settings,
       { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 } });
@@ -383,10 +387,33 @@ const TEST = `
     s2.move([samp(320, 220)]);
     s2.up();
     const d2 = await read();
-    assert('dual in-segment: dabs before the mask stamp stay gated',
-      px(d2, 178, 220)[0] >= 250, 'v=' + px(d2, 178, 220)[0]);
-    assert('dual in-segment: dabs after the mask stamp paint',
+    assert('dual in-segment: continuous inside mask coverage',
+      px(d2, 178, 220)[0] <= 60, 'v=' + px(d2, 178, 220)[0]);
+    assert('dual in-segment: geometric gaps preserved',
+      px(d2, 140, 220)[0] >= 250, 'v=' + px(d2, 140, 220)[0]);
+    assert('dual in-segment: paints past the mask stamp',
       px(d2, 210, 220)[0] <= 60, 'v=' + px(d2, 210, 220)[0]);
+    eng.cancelStroke();
+
+    // With abutting mask stamps (spacing 100%, dual larger than primary) the
+    // stroke must be CONTINUOUS — the case that used to leave seams/gaps.
+    const cont = makeBrush({
+      tip: { size: 40, hardness: 1, spacing: 0.1 },
+      dual: { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',
+        size: 60, spacing: 1.0, scatter: 0, bothAxes: false, count: 1 },
+      smoothing: 0,
+    });
+    eng.beginStroke(NL.brush.engineStrokeParams(cont, 'paint'));
+    const s3 = new NL.StrokeSession(eng, cont,
+      { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 } });
+    s3.down(samp(80, 60));
+    for (let x = 90; x <= 320; x += 10) s3.move([samp(x, 60)]);
+    s3.up();
+    const d3 = await read();
+    let worst = 0;
+    for (let x = 95; x <= 305; x += 2) worst = Math.max(worst, px(d3, x, 60)[0]);
+    assert('dual 100% spacing: abutting mask stamps paint a continuous mark',
+      worst <= 60, 'worst=' + worst);
     eng.cancelStroke();
   }
 
@@ -603,6 +630,21 @@ const TEST = `
     const b = NL.store.getState().brush;
     assert('store: applying a preset replaces brush settings',
       b.scatter.enabled && b.noise && NL.store.getState().activePreset.brush === 'pencil', '');
+    NL.store.getState().applyPreset('soft-round', 'brush');
+
+    // Photoshop scales the dual tip proportionally with the primary size
+    const st = NL.store.getState();
+    st.updateBrush({ dual: { ...st.brush.dual, enabled: true, size: 50 } }, 'brush');
+    const size0 = NL.store.getState().brush.tip.size;
+    st.updateBrush(
+      { tip: { ...NL.store.getState().brush.tip, size: size0 * 2 } }, 'brush');
+    assert('store: resizing the tip scales the dual tip proportionally',
+      Math.abs(NL.store.getState().brush.dual.size - 100) < 1e-6,
+      'dual.size=' + NL.store.getState().brush.dual.size);
+    st.updateBrush(
+      { dual: { ...NL.store.getState().brush.dual, size: 80 } }, 'brush');
+    assert('store: explicit dual edits do not rescale',
+      NL.store.getState().brush.dual.size === 80, '');
     NL.store.getState().applyPreset('soft-round', 'brush');
   }
 
@@ -900,7 +942,9 @@ const TEST = `
         JSON.stringify(s.color));
       assert('abr v6: dual brush (nested flag, truncated uuid resolved, CBrn)',
         s.dual.enabled && s.dual.shape === uuidB && s.dual.mode === 'color-burn' &&
-        s.dual.size === 24 && Math.abs(s.dual.spacing - 1.2) < 1e-6 &&
+        // spacing comes from the nested tip's Spcn (the panel value), not
+        // the outer dualBrush.Spcn (120 here, a stale default)
+        s.dual.size === 24 && Math.abs(s.dual.spacing - 0.1) < 1e-6 &&
         Math.abs(s.dual.scatter - 3) < 1e-6 && s.dual.count === 2 &&
         Math.abs(s.dual.countJitter - 0.5) < 1e-6 && s.dual.flip === true &&
         s.dual.bothAxes === false,
