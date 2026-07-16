@@ -250,26 +250,32 @@ const TEST = `
     assert('texture each tip: sponge carves per stamp', s2 >= 60, 'spread=' + s2);
   }
 
-  // ---- 12. dual brush: a true secondary stamp train gates the primary ----
+  // ---- 12. dual brush: each dab is gated by the mask AT STAMP TIME ----
+  // (like Photoshop: the secondary train renders first, and later dual
+  // stamps never retroactively reveal already-gated dabs)
   {
     const dual = { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',
       size: 30, spacing: 0.5, scatter: 0, bothAxes: true, count: 1 };
     eng.beginStroke(sp({ dual }));
-    // big primary footprint...
-    eng.drawStamps(stamps(rec(200, 150, 80, 1)), 1);
-    // ...but the dual tip only stamped at two spots (and one outside).
     // Dual stamps are coverage, written as white (R channel of the mask).
     const cov = { color: [1, 1, 1] };
+    // dual coverage laid down first at two spots (one outside the primary)
     eng.drawStamps(stamps(
-      rec(170, 150, 15, 1, cov), rec(240, 150, 15, 1, cov), rec(340, 150, 15, 1, cov),
-    ), 3, 'dual');
+      rec(170, 150, 15, 1, cov), rec(340, 150, 15, 1, cov),
+    ), 2, 'dual');
+    // then a big primary footprint
+    eng.drawStamps(stamps(rec(200, 150, 80, 1)), 1);
+    // and a dual stamp AFTER the primary dab — it must not reveal anything
+    eng.drawStamps(stamps(rec(240, 150, 15, 1, cov)), 1, 'dual');
     const d = await read();
     const atDual1 = px(d, 170, 150)[0];
-    const atDual2 = px(d, 240, 150)[0];
+    const late = px(d, 240, 150)[0];    // dual arrived after the dab
     const between = px(d, 205, 110)[0]; // inside primary, no dual coverage
     const outside = px(d, 340, 150)[0]; // dual coverage but no primary
-    assert('dual brush: paint lands where both tips overlap',
-      atDual1 <= 2 && atDual2 <= 2, atDual1 + ',' + atDual2);
+    assert('dual brush: dab paints where the mask already exists',
+      atDual1 <= 2, 'atDual1=' + atDual1);
+    assert('dual brush: later dual stamps are not retroactive', late === 255,
+      'late=' + late);
     assert('dual brush: primary alone is masked out', between === 255,
       'between=' + between);
     assert('dual brush: dual alone paints nothing', outside === 255,
@@ -302,6 +308,86 @@ const TEST = `
     eng.cancelStroke();
     assert('dual spacing: dabs with gaps along the stroke (not a solid line)',
       dark >= 10 && light >= 10, 'dark=' + dark + ' light=' + light);
+  }
+
+  // ---- 13b. tip angle sign: positive rotates counter-clockwise (Photoshop) ----
+  {
+    const settings = makeBrush({
+      tip: { size: 80, hardness: 1, roundness: 0.25, angle: 45, spacing: 0.15 },
+    });
+    const recs = [];
+    D.emitStamps(
+      settings,
+      { sample: { x: 200, y: 150, pressure: 1, tiltX: 0, tiltY: 0, twist: 0 },
+        direction: 0, initialDirection: 0, stepIndex: 0 },
+      200, 150,
+      { strokeColor: { r: 0, g: 0, b: 0 }, fg: { h: 0, s: 0, v: 0 },
+        bg: { h: 0, s: 0, v: 1 }, rng: () => 0 },
+      recs,
+    );
+    assert('angle sign: +45° emits -pi/4 radians (y-down rotation)',
+      near(recs[4], -Math.PI / 4, 1e-6), 'angle=' + recs[4]);
+    eng.beginStroke(sp({ hardness: 1 }));
+    eng.drawStamps(new Float32Array(recs), recs.length / D.STAMP_FLOATS);
+    const d = await read();
+    const ccw = px(d, 221, 129)[0]; // up-right: long axis of a +45° ellipse
+    const cw = px(d, 221, 171)[0];  // down-right: long axis if the sign flipped
+    assert('angle sign: +45° tilts the long axis counter-clockwise on screen',
+      ccw <= 40 && cw >= 240, ccw + ',' + cw);
+    eng.cancelStroke();
+  }
+
+  // ---- 13c. dual brush paints incrementally, never retroactively ----
+  // Dabs are gated by the dual mask at stamp time. A dab laid before its
+  // mask stamp stays unpainted forever; already-visible paint never changes
+  // as the stroke continues (Photoshop's behavior — no lag-then-snap).
+  {
+    const settings = makeBrush({
+      tip: { size: 10, hardness: 1, spacing: 0.5 },
+      dual: { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',
+        size: 60, spacing: 2.0, scatter: 0, bothAxes: false, count: 1 },
+      smoothing: 0,
+    });
+    // dual mask stamps land at x = 80 (down), 200, 320 (spacing 120px)
+    eng.beginStroke(NL.brush.engineStrokeParams(settings, 'paint'));
+    const session = new NL.StrokeSession(eng, settings,
+      { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 } });
+    const samp = (x, y) => ({ x, y, pressure: 1, tiltX: 0, tiltY: 0, twist: 0 });
+    session.down(samp(80, 150));
+    for (let x = 90; x <= 190; x += 10) session.move([samp(x, 150)]);
+    const a = await read();
+    for (let x = 200; x <= 320; x += 10) session.move([samp(x, 150)]);
+    session.up();
+    const b = await read();
+    let changed = -1;
+    for (let x = 0; x < 185 && changed < 0; x++) {
+      for (let y = 120; y <= 180; y++) {
+        const i = (y * 400 + x) * 4;
+        if (Math.abs(a[i] - b[i]) > 2) { changed = x; break; }
+      }
+    }
+    assert('dual incremental: painted areas never change behind the brush',
+      changed === -1, 'changed at x=' + changed);
+    assert('dual incremental: dab laid before its mask stays unpainted',
+      px(b, 178, 150)[0] >= 250, 'v=' + px(b, 178, 150)[0]);
+    assert('dual incremental: painting resumes after the mask stamp lands',
+      px(b, 210, 150)[0] <= 60, 'v=' + px(b, 210, 150)[0]);
+    eng.cancelStroke();
+
+    // One giant segment must behave identically to many small moves: the
+    // two spacing trains interleave in path order within a segment.
+    eng.beginStroke(NL.brush.engineStrokeParams(settings, 'paint'));
+    const s2 = new NL.StrokeSession(eng, settings,
+      { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 } });
+    s2.down(samp(80, 220));
+    s2.move([samp(320, 220)]);
+    s2.up();
+    const d2 = await read();
+    assert('dual in-segment: dabs before the mask stamp stay gated',
+      px(d2, 178, 220)[0] >= 250, 'v=' + px(d2, 178, 220)[0]);
+    assert('dual in-segment: dabs after the mask stamp paint',
+      px(d2, 210, 220)[0] <= 60, 'v=' + px(d2, 210, 220)[0]);
+    eng.cancelStroke();
   }
 
   // ---- 13. noise roughens the soft falloff band ----

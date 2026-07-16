@@ -202,7 +202,11 @@ export function emitStamps(
       }
     }
 
-    let angle = (s.tip.angle / 180) * Math.PI;
+    // Photoshop's tip angle is counter-clockwise-positive on screen, while
+    // the stamp rotation runs in y-down coordinates (clockwise-positive), so
+    // the static angle flips sign here. Direction/rotation controls below
+    // already produce y-down angles and stay as they are.
+    let angle = (-s.tip.angle / 180) * Math.PI;
     let roundness = s.tip.roundness;
     let flipX = s.tip.flipX;
     let flipY = s.tip.flipY;

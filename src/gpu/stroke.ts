@@ -44,8 +44,13 @@ export class StrokeSession {
   private initialDirection = 0;
   private initialDirectionSet = false;
   private strokeColor: RGB;
-  private stamps: number[] = [];
-  private dualStamps: number[] = [];
+  /**
+   * Pending stamp batches in path order. Order matters for the dual brush:
+   * a primary dab is gated by the dual mask as it exists when the dab is
+   * drawn, so dual stamps must land between the dabs that precede and
+   * follow them along the stroke, exactly like Photoshop.
+   */
+  private queue: { target: 'primary' | 'dual'; records: number[] }[] = [];
   private airbrushTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(engine: PaintEngine, settings: BrushSettings, opts: StrokeSessionOptions) {
@@ -72,6 +77,15 @@ export class StrokeSession {
     };
   }
 
+  /** Batch records for `target`, merging with the queue tail when possible. */
+  private queueFor(target: 'primary' | 'dual'): number[] {
+    const tail = this.queue[this.queue.length - 1];
+    if (tail && tail.target === target) return tail.records;
+    const batch = { target, records: [] as number[] };
+    this.queue.push(batch);
+    return batch.records;
+  }
+
   private emit(x: number, y: number, sample: PointerSample): void {
     emitStamps(
       this.settings,
@@ -79,14 +93,14 @@ export class StrokeSession {
       x,
       y,
       { strokeColor: this.strokeColor, fg: this.fg, bg: this.bg, rng: this.rng },
-      this.stamps,
+      this.queueFor('primary'),
     );
   }
 
   private emitDual(x: number, y: number, sample: PointerSample): void {
     const dual = this.settings.dual;
     if (!dual.enabled) return;
-    emitDualStamps(dual, this.contextAt(sample), x, y, this.rng, this.dualStamps);
+    emitDualStamps(dual, this.contextAt(sample), x, y, this.rng, this.queueFor('dual'));
   }
 
   /** Spacing distance for the current pen state (control-scaled, no jitter). */
@@ -106,8 +120,9 @@ export class StrokeSession {
     this.residual = 0;
     this.residualDual = 0;
     this.stepIndex = 0;
-    this.emit(sample.x, sample.y, sample);
+    // dual mask first so the very first dab is gated by it
     this.emitDual(sample.x, sample.y, sample);
+    this.emit(sample.x, sample.y, sample);
     this.flush();
 
     if (this.settings.airbrush) {
@@ -116,8 +131,8 @@ export class StrokeSession {
         const at = this.smoothed;
         if (!at) return;
         this.stepIndex++;
-        this.emit(at.x, at.y, at);
         this.emitDual(at.x, at.y, at);
+        this.emit(at.x, at.y, at);
         this.flush();
       }, 40);
     }
@@ -150,8 +165,7 @@ export class StrokeSession {
 
   cancel(): void {
     this.stopAirbrush();
-    this.stamps = [];
-    this.dualStamps = [];
+    this.queue = [];
   }
 
   private stopAirbrush(): void {
@@ -182,52 +196,62 @@ export class StrokeSession {
       twist: a.twist + (b.twist - a.twist) * t,
     });
 
-    let travelled = 0;
+    // Both spacing trains — the primary dabs and the dual-brush mask stamps —
+    // walk the segment together in path order (a merged two-cursor loop), so
+    // each dab only ever sees the dual coverage laid down BEHIND or AT its
+    // own position, never stamps that lie ahead. This matches Photoshop's
+    // incremental dual-brush painting regardless of pointer-event batching.
+    let travelledP = 0;
+    let doneP = false;
+    let travelledD = 0;
+    let doneD = !this.settings.dual.enabled;
     // Hard cap so a pathological event can't hang the tab.
-    for (let guard = 0; guard < 10000; guard++) {
-      const here = lerpSample(travelled / dist);
-      const need = this.spacingPx(here) - this.residual;
-      if (travelled + need > dist) {
-        this.residual += dist - travelled;
-        break;
-      }
-      travelled += need;
-      this.residual = 0;
-      this.stepIndex++;
-      const at = lerpSample(travelled / dist);
-      this.emit(at.x, at.y, at);
-    }
-
-    // The dual brush stamps its own train along the same segment, with its
-    // own spacing, exactly like Photoshop's secondary tip.
-    if (this.settings.dual.enabled) {
-      let t2 = 0;
-      const step = this.dualSpacingPx();
-      for (let guard = 0; guard < 10000; guard++) {
-        const need = step - this.residualDual;
-        if (t2 + need > dist) {
-          this.residualDual += dist - t2;
-          break;
+    for (let guard = 0; guard < 20000 && !(doneP && doneD); guard++) {
+      let dP = Infinity;
+      if (!doneP) {
+        const here = lerpSample(travelledP / dist);
+        dP = travelledP + this.spacingPx(here) - this.residual;
+        if (dP > dist) {
+          this.residual += dist - travelledP;
+          doneP = true;
+          dP = Infinity;
         }
-        t2 += need;
+      }
+      let dD = Infinity;
+      if (!doneD) {
+        dD = travelledD + this.dualSpacingPx() - this.residualDual;
+        if (dD > dist) {
+          this.residualDual += dist - travelledD;
+          doneD = true;
+          dD = Infinity;
+        }
+      }
+      if (dP === Infinity && dD === Infinity) break;
+      if (dD <= dP) {
+        // ties go to the dual mask so the coincident dab is gated by it
+        travelledD = dD;
         this.residualDual = 0;
-        const at = lerpSample(t2 / dist);
+        const at = lerpSample(travelledD / dist);
         this.emitDual(at.x, at.y, at);
+      } else {
+        travelledP = dP;
+        this.residual = 0;
+        this.stepIndex++;
+        const at = lerpSample(travelledP / dist);
+        this.emit(at.x, at.y, at);
       }
     }
   }
 
   private flush(): void {
-    if (this.stamps.length > 0) {
-      const arr = new Float32Array(this.stamps);
-      this.engine.drawStamps(arr, arr.length / STAMP_FLOATS, 'primary');
-      this.stamps = [];
+    // Batches draw in path order (see `queue`), which is what makes per-dab
+    // dual gating behave like Photoshop.
+    for (const batch of this.queue) {
+      if (batch.records.length === 0) continue;
+      const arr = new Float32Array(batch.records);
+      this.engine.drawStamps(arr, arr.length / STAMP_FLOATS, batch.target);
     }
-    if (this.dualStamps.length > 0) {
-      const arr = new Float32Array(this.dualStamps);
-      this.engine.drawStamps(arr, arr.length / STAMP_FLOATS, 'dual');
-      this.dualStamps = [];
-    }
+    this.queue = [];
   }
 }
 

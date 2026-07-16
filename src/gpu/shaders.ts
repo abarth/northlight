@@ -243,14 +243,13 @@ fn hash21(p: vec2f) -> f32 {
 const MERGE_LIB = /* wgsl */ `
 /**
  * Merges the live/committing stroke into a premultiplied layer pixel.
- * st: premultiplied stroke texel. dualCov: the secondary (Dual Brush)
- * coverage mask accumulated by its own stamp train. patRaw: raw pattern
- * sample (whole-stroke texture, i.e. Texture with "texture each tip" off).
+ * st: premultiplied stroke texel. patRaw: raw pattern sample (whole-stroke
+ * texture, i.e. Texture with "texture each tip" off). Dual Brush gating
+ * happens per dab in the stamp shader, not here.
  */
 fn strokeMergeApply(
   l: vec4f,
   st: vec4f,
-  dualCov: f32,
   patRaw: f32,
   mode: u32,        // 1 = paint, 2 = erase
   blend: u32,
@@ -259,14 +258,8 @@ fn strokeMergeApply(
   texOn: f32,
   bci: vec4f,
   texMode: u32,
-  dualOn: f32,
-  dualMode: u32,
 ) -> vec4f {
   var cov = st.a;
-  if (dualOn > 0.5) {
-    // Photoshop dual brush: the secondary tip's coverage gates the primary.
-    cov = applyTexToAlpha(cov, dualCov, dualMode, 1.0);
-  }
   if (texOn > 0.5) {
     cov = applyTexToAlpha(cov, texValue(patRaw, bci), texMode, bci.w);
   }
@@ -305,11 +298,11 @@ struct LayerU {
   texScalePx: f32,
   texBCI: vec4f,       // brightness, contrast, invert, depth
   texMode: u32,
-  dualOn: f32,
-  dualMode: u32,
   _p0: f32,
+  _p1: u32,
+  _p2: f32,
   docSize: vec2f,
-  _p1: vec2f,
+  _p3: vec2f,
 }
 
 @group(0) @binding(0) var samp: sampler;
@@ -319,7 +312,6 @@ struct LayerU {
 @group(0) @binding(4) var<uniform> U: LayerU;
 @group(0) @binding(5) var patternTex: texture_2d<f32>;
 @group(0) @binding(6) var repeatSamp: sampler;
-@group(0) @binding(7) var dualTex: texture_2d<f32>;
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
@@ -328,12 +320,11 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 
   if (U.strokeMode != 0u) {
     let st = textureSampleLevel(strokeTex, samp, in.uv, 0.0);
-    let dualCov = textureSampleLevel(dualTex, samp, in.uv, 0.0).r;
     let patUv = in.uv * U.docSize / max(U.texScalePx, 1.0);
     let patRaw = textureSampleLevel(patternTex, repeatSamp, patUv, 0.0).r;
     l = strokeMergeApply(
-      l, st, dualCov, patRaw, U.strokeMode, U.strokeBlend, U.strokeOpacity,
-      U.wetEdges, U.texOn, U.texBCI, U.texMode, U.dualOn, U.dualMode,
+      l, st, patRaw, U.strokeMode, U.strokeBlend, U.strokeOpacity,
+      U.wetEdges, U.texOn, U.texBCI, U.texMode,
     );
   }
 
@@ -364,6 +355,9 @@ struct StampU {
   noise: f32,
   texMode: u32,
   texBCI: vec4f,       // brightness, contrast, invert, depth
+  dualOn: f32,
+  dualMode: u32,
+  _p0: vec2f,
 }
 
 @group(0) @binding(0) var<uniform> SU: StampU;
@@ -372,6 +366,7 @@ struct StampU {
 @group(0) @binding(3) var tipTex: texture_2d<f32>;
 @group(0) @binding(4) var patternTex: texture_2d<f32>;
 @group(0) @binding(5) var repeatSamp: sampler;
+@group(0) @binding(6) var dualTex: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -448,6 +443,15 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   }
   a = a * in.alpha;
 
+  // Photoshop dual brush: each dab is gated by the secondary tip's coverage
+  // mask as it exists right now (the dual train is drawn first each flush).
+  // Gating at dab time keeps painting incremental — already-painted areas
+  // never change retroactively when later dual stamps land on them.
+  if (SU.dualOn > 0.5) {
+    let cov = textureSampleLevel(dualTex, clampSamp, in.docPos / SU.docSize, 0.0).r;
+    a = applyTexToAlpha(a, cov, SU.dualMode, 1.0);
+  }
+
   if (SU.texEach > 0.5) {
     let v = texValue(
       textureSampleLevel(patternTex, repeatSamp, in.docPos / max(SU.texScalePx, 1.0), 0.0).r,
@@ -482,14 +486,14 @@ struct CommitU {
   texOn: f32,
   texScalePx: f32,
   texMode: u32,
-  dualOn: f32,
-  texBCI: vec4f,
-  dualMode: u32,
   _p0: f32,
-  _p1: f32,
+  texBCI: vec4f,
+  _p1: u32,
   _p2: f32,
+  _p3: f32,
+  _p4: f32,
   docSize: vec2f,
-  _p3: vec2f,
+  _p5: vec2f,
 }
 
 @group(0) @binding(0) var samp: sampler;
@@ -498,18 +502,16 @@ struct CommitU {
 @group(0) @binding(3) var<uniform> U: CommitU;
 @group(0) @binding(4) var patternTex: texture_2d<f32>;
 @group(0) @binding(5) var repeatSamp: sampler;
-@group(0) @binding(6) var dualTex: texture_2d<f32>;
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
   let l = textureSampleLevel(layerTex, samp, in.uv, 0.0);
   let st = textureSampleLevel(strokeTex, samp, in.uv, 0.0);
-  let dualCov = textureSampleLevel(dualTex, samp, in.uv, 0.0).r;
   let patUv = in.uv * U.docSize / max(U.texScalePx, 1.0);
   let patRaw = textureSampleLevel(patternTex, repeatSamp, patUv, 0.0).r;
   return strokeMergeApply(
-    l, st, dualCov, patRaw, U.mode, U.strokeBlend, U.opacity,
-    U.wetEdges, U.texOn, U.texBCI, U.texMode, U.dualOn, U.dualMode,
+    l, st, patRaw, U.mode, U.strokeBlend, U.opacity,
+    U.wetEdges, U.texOn, U.texBCI, U.texMode,
   );
 }
 `;

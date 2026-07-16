@@ -55,8 +55,11 @@ sections, all evaluated per stamp:
   texturing (Photoshop's default), applied at commit time.
 - **Dual Brush** — a true secondary brush, like Photoshop's: the second tip
   (any shape, with hardness, mode, size, spacing, scatter, both-axes, count)
-  stamps its own train along the stroke into a separate GPU coverage mask
-  that gates the primary stroke at merge time.
+  stamps its own train along the stroke into a separate GPU coverage mask.
+  Both trains walk each segment interleaved in path order and every primary
+  dab is gated by the mask **as it exists at stamp time**, so painting is
+  incremental exactly like Photoshop — dabs laid before a mask stamp stay
+  gated, and finished areas never change retroactively.
 - **Color Dynamics** — foreground/background jitter (with control), hue,
   saturation and brightness jitter, purity, per-tip or per-stroke. Stroke
   accumulation is full-color, so every dab can have its own color.
@@ -245,10 +248,11 @@ src/
 Strokes render as instanced quads (position, radius, alpha, angle, roundness,
 color, flips, texture depth per stamp) into a premultiplied RGBA stroke
 texture with OVER accumulation; the dual brush accumulates its own
-single-channel coverage mask the same way. The compositor merges both into
-the active layer live (so previews respect the paint mode, opacity, dual
-gating, wet edges and whole-stroke texture), and pointer-up bakes them into
-the layer texture. Layer
+single-channel coverage mask the same way, drawn interleaved with the dabs
+in path order so each dab samples the mask at stamp time. The compositor
+merges the stroke into the active layer live (so previews respect the paint
+mode, opacity, wet edges and whole-stroke texture), and pointer-up bakes it
+into the layer texture. Layer
 compositing ping-pongs between two accumulation textures, one pass per layer,
 then a present pass applies the viewport transform (nearest-neighbor sampling
 when zoomed in past 200%).
