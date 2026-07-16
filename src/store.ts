@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { BlendMode, HSV, LayerMeta, Point, ToolId, Viewport } from './types';
 import type { BrushSettings } from './brush/types';
+import type { SelectionOp } from './gpu/selection';
 import { defaultBrush, makeBrush } from './brush/defaults';
 import { findPreset } from './brush/presets';
 
@@ -32,6 +33,29 @@ export type EyedropperSampleSize = 1 | 3 | 5 | 11 | 31 | 51 | 101;
 /** Photoshop eyedropper "Sample" scope. */
 export type EyedropperSample = 'all' | 'currentBelow' | 'current';
 
+/** Edit > Transform variants (free = Ctrl+T with all modifier behaviors). */
+export type TransformMode =
+  | 'free'
+  | 'scale'
+  | 'rotate'
+  | 'skew'
+  | 'distort'
+  | 'perspective';
+
+export interface TransformState {
+  /** layer pixels (Free Transform) or the selection outline only */
+  target: 'layer' | 'selection';
+  mode: TransformMode;
+  /** the untransformed reference rectangle R (content/selection bounds) */
+  rect: { x: number; y: number; w: number; h: number };
+  /** current corners of R in document space: TL, TR, BR, BL */
+  quad: Point[];
+  /** Alt-drag move: keep the original pixels too */
+  duplicate: boolean;
+}
+
+export type DialogId = 'new' | 'imageSize' | 'canvasSize' | null;
+
 const initialEraser = makeBrush({ tip: { hardness: 1, size: 30, spacing: 0.15 } });
 
 export interface AppState {
@@ -53,6 +77,19 @@ export interface AppState {
 
   eyedropperSampleSize: EyedropperSampleSize;
   eyedropperSample: EyedropperSample;
+
+  /** default boolean op for the selection tools (modifier keys override) */
+  selectionOp: SelectionOp;
+
+  /** active interactive transform session, or null */
+  transform: TransformState | null;
+
+  /** document metadata mirrored for the UI (pixels + print resolution) */
+  doc: { width: number; height: number; resolution: number };
+  /** bumped to ask the canvas view to re-fit the viewport */
+  fitNonce: number;
+
+  dialog: DialogId;
 
   layers: LayerMeta[]; // bottom -> top
   activeLayerId: string;
@@ -78,12 +115,20 @@ export interface AppState {
   setSideTab: (tab: SideTab) => void;
   setEyedropperSampleSize: (size: EyedropperSampleSize) => void;
   setEyedropperSample: (sample: EyedropperSample) => void;
+  setSelectionOp: (op: SelectionOp) => void;
+  setTransform: (t: TransformState | null) => void;
+  patchTransform: (patch: Partial<TransformState>) => void;
+  setDoc: (doc: { width: number; height: number; resolution: number }) => void;
+  requestFit: () => void;
+  setDialog: (d: DialogId) => void;
 
   addLayerMeta: (meta: LayerMeta, aboveId?: string) => void;
   removeLayerMeta: (id: string) => void;
   patchLayer: (id: string, patch: Partial<LayerMeta>) => void;
   /** Reorders layers to match `ids` (bottom -> top). Must be a permutation. */
   setLayerOrder: (ids: string[]) => void;
+  /** Replaces the whole layer stack (new document / flatten). */
+  setLayers: (layers: LayerMeta[], activeId: string) => void;
   setActiveLayer: (id: string) => void;
   setLayerBlendMode: (id: string, mode: BlendMode) => void;
 
@@ -109,6 +154,12 @@ export const useStore = create<AppState>((set) => ({
 
   eyedropperSampleSize: 1,
   eyedropperSample: 'all',
+
+  selectionOp: 'new',
+  transform: null,
+  doc: { width: DOC_SIZE.width, height: DOC_SIZE.height, resolution: 72 },
+  fitNonce: 0,
+  dialog: null,
 
   layers: [
     {
@@ -153,6 +204,13 @@ export const useStore = create<AppState>((set) => ({
   setSideTab: (sideTab) => set({ sideTab }),
   setEyedropperSampleSize: (eyedropperSampleSize) => set({ eyedropperSampleSize }),
   setEyedropperSample: (eyedropperSample) => set({ eyedropperSample }),
+  setSelectionOp: (selectionOp) => set({ selectionOp }),
+  setTransform: (transform) => set({ transform }),
+  patchTransform: (patch) =>
+    set((s) => (s.transform ? { transform: { ...s.transform, ...patch } } : {})),
+  setDoc: (doc) => set({ doc }),
+  requestFit: () => set((s) => ({ fitNonce: s.fitNonce + 1 })),
+  setDialog: (dialog) => set({ dialog }),
 
   addLayerMeta: (meta, aboveId) =>
     set((s) => {
@@ -186,6 +244,8 @@ export const useStore = create<AppState>((set) => ({
       if (ids.length !== s.layers.length || ids.some((id) => !byId.has(id))) return {};
       return { layers: ids.map((id) => byId.get(id)!) };
     }),
+
+  setLayers: (layers, activeLayerId) => set({ layers, activeLayerId }),
 
   setActiveLayer: (activeLayerId) => set({ activeLayerId }),
   setLayerBlendMode: (id, blendMode) =>

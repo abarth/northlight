@@ -1,4 +1,5 @@
 export type ToolId =
+  | 'move'
   | 'brush'
   | 'eraser'
   | 'eyedropper'

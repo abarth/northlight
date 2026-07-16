@@ -548,6 +548,80 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 `;
 
 /**
+ * Layer transform (move / free transform / image & canvas resize): samples a
+ * pristine source texture through an inverse homography (destination doc px
+ * -> source px) and writes into the target layer. Modes:
+ *   - hasSel: only the selected pixels float and transform; the rest of the
+ *     layer stays put (unless duplicate, which keeps the original too).
+ *   - bgFill: composites the result over an opaque color (Background layer).
+ */
+export const TRANSFORM_SHADER = /* wgsl */ `
+${FULLSCREEN_VS}
+
+struct TransformU {
+  row0: vec4f,      // inverse homography, rows (dst -> src)
+  row1: vec4f,
+  row2: vec4f,
+  dstSize: vec2f,
+  srcSize: vec2f,
+  flags: vec4f,     // x = hasSel, y = duplicate, z = bgFill
+  bgColor: vec4f,   // premultiplied opaque fill
+}
+
+@group(0) @binding(0) var samp: sampler;
+@group(0) @binding(1) var srcTex: texture_2d<f32>;
+@group(0) @binding(2) var selTex: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> U: TransformU;
+
+fn srcAt(p: vec2f) -> vec4f {
+  if (p.x < 0.0 || p.y < 0.0 || p.x >= U.srcSize.x || p.y >= U.srcSize.y) {
+    return vec4f(0.0);
+  }
+  return textureSampleLevel(srcTex, samp, p / U.srcSize, 0.0);
+}
+
+fn selAt(p: vec2f, size: vec2f) -> f32 {
+  if (p.x < 0.0 || p.y < 0.0 || p.x >= size.x || p.y >= size.y) {
+    return 0.0;
+  }
+  return textureSampleLevel(selTex, samp, p / size, 0.0).r;
+}
+
+@fragment
+fn fs(in: VSOut) -> @location(0) vec4f {
+  let p = in.uv * U.dstSize;
+  let w = U.row2.x * p.x + U.row2.y * p.y + U.row2.z;
+  let iw = select(1.0 / w, 0.0, abs(w) < 1e-12);
+  let q = vec2f(
+    (U.row0.x * p.x + U.row0.y * p.y + U.row0.z) * iw,
+    (U.row1.x * p.x + U.row1.y * p.y + U.row1.z) * iw,
+  );
+
+  var out: vec4f;
+  if (U.flags.x > 0.5) {
+    // float only the selected pixels
+    let src = srcAt(q) * selAt(q, U.srcSize);
+    var rem = srcAt(p);
+    if (U.flags.y < 0.5) {
+      rem = rem * (1.0 - selAt(p, U.srcSize)); // cut the original
+    }
+    out = src + rem * (1.0 - src.a);
+  } else {
+    let src = srcAt(q);
+    if (U.flags.y > 0.5) {
+      out = src + srcAt(p) * (1.0 - src.a);
+    } else {
+      out = src;
+    }
+  }
+  if (U.flags.z > 0.5) {
+    out = out + U.bgColor * (1.0 - out.a);
+  }
+  return out;
+}
+`;
+
+/**
  * Final present pass: applies the viewport transform, draws the transparency
  * checkerboard under the document and the pasteboard around it.
  */

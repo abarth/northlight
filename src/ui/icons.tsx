@@ -13,6 +13,13 @@ const base = (size = 18) => ({
   strokeLinejoin: 'round' as const,
 });
 
+export const MoveIcon = ({ size }: IconProps) => (
+  <svg {...base(size)}>
+    <path d="M12 3v18M3 12h18" />
+    <path d="M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3" />
+  </svg>
+);
+
 export const BrushIcon = ({ size }: IconProps) => (
   <svg {...base(size)}>
     <path d="M20.5 3.5c-2.5 0-8 4.5-10.5 8.5l2 2c4-2.5 8.5-8 8.5-10.5z" />

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  cancelTransform,
+  commitTransform,
   deleteSelectionContents,
   exportPng,
   fillActiveLayer,
@@ -7,6 +9,7 @@ import {
   setSelection,
   undo,
 } from '../controller';
+import type { SelectionOp } from '../gpu/selection';
 import {
   useStore,
   type EyedropperSample,
@@ -273,20 +276,85 @@ function EyedropperOptions() {
   );
 }
 
+const SELECTION_OPS: { op: SelectionOp; label: string; title: string }[] = [
+  { op: 'new', label: 'New', title: 'New selection' },
+  { op: 'add', label: 'Add', title: 'Add to selection (Shift)' },
+  { op: 'subtract', label: 'Subtract', title: 'Subtract from selection (Alt)' },
+  { op: 'intersect', label: 'Intersect', title: 'Intersect with selection (Shift+Alt)' },
+];
+
+/** New / Add / Subtract / Intersect toggle group for the selection tools. */
+function SelectionOpButtons() {
+  const op = useStore((s) => s.selectionOp);
+  const setOp = useStore((s) => s.setSelectionOp);
+  return (
+    <div className="opt-group">
+      {SELECTION_OPS.map((o) => (
+        <button
+          key={o.op}
+          className={`icon-btn toggle ${op === o.op ? 'active' : ''}`}
+          title={o.title}
+          onClick={() => setOp(o.op)}
+        >
+          <span className="toggle-tag">{o.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+const TRANSFORM_LABEL: Record<string, string> = {
+  free: 'Free Transform',
+  scale: 'Scale',
+  rotate: 'Rotate',
+  skew: 'Skew',
+  distort: 'Distort',
+  perspective: 'Perspective',
+};
+
 export function OptionsBar() {
   const tool = useStore((s) => s.tool);
   const canUndo = useStore((s) => s.canUndo);
   const canRedo = useStore((s) => s.canRedo);
   const hasSelection = useStore((s) => s.selectionPaths !== null);
+  const transform = useStore((s) => s.transform);
   const view = useStore((s) => s.view);
+
+  if (transform) {
+    return (
+      <div className="options-bar">
+        <div className="options-scroll">
+          <span className="hint">
+            {TRANSFORM_LABEL[transform.mode]}
+            {transform.target === 'selection' ? ' (selection)' : ''} — drag handles;
+            rotate outside; Shift constrains; Alt from center; Ctrl distorts/skews.
+          </span>
+        </div>
+        <div className="options-right">
+          <button className="btn" onClick={commitTransform} title="Apply (Enter)">
+            Apply
+          </button>
+          <button className="btn" onClick={cancelTransform} title="Cancel (Esc)">
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="options-bar">
-      <div className="brand">Northlight</div>
       <div className="options-scroll">
+        {tool === 'move' && (
+          <span className="hint">
+            Drag to move the layer (or selected pixels). Alt-drag duplicates. Shift
+            constrains. Arrow keys nudge (Shift = 10px). Ctrl+T transforms.
+          </span>
+        )}
         {(tool === 'brush' || tool === 'eraser') && <BrushOptions toolKey={tool} />}
         {(tool === 'marquee' || tool === 'lasso' || tool === 'polyLasso') && (
           <>
+            <SelectionOpButtons />
             <span className="hint">
               {tool === 'polyLasso'
                 ? 'Click to add points; click the start point, double-click, or press Enter to close. Esc cancels.'

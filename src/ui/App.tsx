@@ -2,7 +2,9 @@ import { CanvasView } from './CanvasView';
 import { ColorPicker } from './ColorPicker';
 import { BrushesPanel } from './BrushesPanel';
 import { BrushSettingsPanel } from './BrushSettingsPanel';
+import { Dialogs } from './dialogs';
 import { LayersPanel } from './LayersPanel';
+import { MenuBar } from './MenuBar';
 import { OptionsBar } from './OptionsBar';
 import { Toolbar } from './Toolbar';
 import { useStore, type SideTab } from '../store';
@@ -19,6 +21,7 @@ export function App() {
 
   return (
     <div className="app">
+      <MenuBar />
       <OptionsBar />
       <div className="app-body">
         <Toolbar />
@@ -43,6 +46,7 @@ export function App() {
           <LayersPanel />
         </div>
       </div>
+      <Dialogs />
     </div>
   );
 }

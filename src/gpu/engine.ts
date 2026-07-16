@@ -4,7 +4,9 @@ import {
   FILL_SHADER,
   PRESENT_SHADER,
   STAMP_SHADER,
+  TRANSFORM_SHADER,
 } from './shaders';
+import type { Mat3 } from '../transform/matrix';
 import { BLEND_MODE_INDEX, type BlendMode, type LayerMeta, type Viewport } from '../types';
 import {
   TEXTURE_BLEND_INDEX,
@@ -63,8 +65,16 @@ const STAMP_STRIDE = STAMP_FLOATS * 4; // bytes
 
 export class PaintEngine {
   readonly device: GPUDevice;
-  readonly docWidth: number;
-  readonly docHeight: number;
+  private _docWidth: number;
+  private _docHeight: number;
+
+  get docWidth(): number {
+    return this._docWidth;
+  }
+
+  get docHeight(): number {
+    return this._docHeight;
+  }
 
   /**
    * Kept alive on purpose: if the GPUAdapter is garbage-collected, some
@@ -93,6 +103,7 @@ export class PaintEngine {
   private stampPipelineDual: GPURenderPipeline;
   private commitPipeline: GPURenderPipeline;
   private fillPipeline: GPURenderPipeline;
+  private transformPipeline: GPURenderPipeline;
   private presentPipeline: GPURenderPipeline;
 
   private layerUniforms: GPUBuffer;
@@ -100,6 +111,7 @@ export class PaintEngine {
   private dualStampUniforms: GPUBuffer;
   private commitUniforms: GPUBuffer;
   private fillUniforms: GPUBuffer;
+  private transformUniforms: GPUBuffer;
   private viewUniforms: GPUBuffer;
 
   private sampLinear: GPUSampler;
@@ -110,6 +122,10 @@ export class PaintEngine {
   private instanceCapacity = 4096; // stamps
 
   private stroke: EngineStrokeParams | null = null;
+  /** pristine copy of the layer being interactively transformed */
+  private transformSrc: GPUTexture | null = null;
+  private transformLayerId: string | null = null;
+  private transformUndoData: Promise<Uint8Array<ArrayBuffer>> | null = null;
   private strokeTipTex: GPUTexture | null = null;
   private strokePatternTex: GPUTexture | null = null;
   private strokeDualTipTex: GPUTexture | null = null;
@@ -130,25 +146,16 @@ export class PaintEngine {
     this.canvas = canvas;
     this.context = context;
     this.format = format;
-    this.docWidth = docWidth;
-    this.docHeight = docHeight;
+    this._docWidth = docWidth;
+    this._docHeight = docHeight;
 
-    const docTex = (format2: GPUTextureFormat, label: string) =>
-      device.createTexture({
-        label,
-        size: [docWidth, docHeight],
-        format: format2,
-        usage:
-          GPUTextureUsage.TEXTURE_BINDING |
-          GPUTextureUsage.RENDER_ATTACHMENT |
-          GPUTextureUsage.COPY_SRC |
-          GPUTextureUsage.COPY_DST,
-      });
-
-    this.accum = [docTex('rgba8unorm', 'accumA'), docTex('rgba8unorm', 'accumB')];
-    this.scratch = docTex('rgba8unorm', 'scratch');
-    this.strokeTex = docTex('rgba8unorm', 'stroke');
-    this.dualStrokeTex = docTex('r8unorm', 'dualStroke');
+    this.accum = [
+      this.makeDocTexture('rgba8unorm', 'accumA'),
+      this.makeDocTexture('rgba8unorm', 'accumB'),
+    ];
+    this.scratch = this.makeDocTexture('rgba8unorm', 'scratch');
+    this.strokeTex = this.makeDocTexture('rgba8unorm', 'stroke');
+    this.dualStrokeTex = this.makeDocTexture('r8unorm', 'dualStroke');
 
     this.whiteTex = device.createTexture({
       size: [1, 1],
@@ -184,6 +191,10 @@ export class PaintEngine {
     });
     this.fillUniforms = device.createBuffer({
       size: 32,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.transformUniforms = device.createBuffer({
+      size: 112,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.viewUniforms = device.createBuffer({
@@ -292,6 +303,19 @@ export class PaintEngine {
       vertex: { module: fillModule, entryPoint: 'vs' },
       fragment: {
         module: fillModule,
+        entryPoint: 'fs',
+        targets: [{ format: 'rgba8unorm' }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+
+    const transformModule = device.createShaderModule({ code: TRANSFORM_SHADER });
+    this.transformPipeline = device.createRenderPipeline({
+      label: 'transform',
+      layout: 'auto',
+      vertex: { module: transformModule, entryPoint: 'vs' },
+      fragment: {
+        module: transformModule,
         entryPoint: 'fs',
         targets: [{ format: 'rgba8unorm' }],
       },
@@ -427,6 +451,19 @@ export class PaintEngine {
   // -------------------------------------------------------------------------
   // Layer management
   // -------------------------------------------------------------------------
+
+  private makeDocTexture(format: GPUTextureFormat, label: string): GPUTexture {
+    return this.device.createTexture({
+      label,
+      size: [this._docWidth, this._docHeight],
+      format,
+      usage:
+        GPUTextureUsage.TEXTURE_BINDING |
+        GPUTextureUsage.RENDER_ATTACHMENT |
+        GPUTextureUsage.COPY_SRC |
+        GPUTextureUsage.COPY_DST,
+    });
+  }
 
   ensureLayer(id: string): void {
     if (this.layers.has(id)) return;
@@ -767,6 +804,260 @@ export class PaintEngine {
       [this.docWidth, this.docHeight],
     );
     this.device.queue.submit([enc.finish()]);
+  }
+
+  // -------------------------------------------------------------------------
+  // Transforms (move tool, free transform, image/canvas resize)
+  // -------------------------------------------------------------------------
+
+  /** Samples `src` through `hInv` (dst doc px -> src px) into `dst`. */
+  private renderTransform(opts: {
+    src: GPUTexture;
+    srcW: number;
+    srcH: number;
+    dst: GPUTexture;
+    dstW: number;
+    dstH: number;
+    hInv: Mat3;
+    withSelection?: boolean;
+    duplicate?: boolean;
+    bgFill?: [number, number, number] | null;
+  }): void {
+    const u = new ArrayBuffer(96);
+    const f = new Float32Array(u);
+    const h = opts.hInv;
+    f[0] = h[0]; f[1] = h[1]; f[2] = h[2];
+    f[4] = h[3]; f[5] = h[4]; f[6] = h[5];
+    f[8] = h[6]; f[9] = h[7]; f[10] = h[8];
+    f[12] = opts.dstW;
+    f[13] = opts.dstH;
+    f[14] = opts.srcW;
+    f[15] = opts.srcH;
+    f[16] = opts.withSelection && this.selectionTex ? 1 : 0;
+    f[17] = opts.duplicate ? 1 : 0;
+    f[18] = opts.bgFill ? 1 : 0;
+    if (opts.bgFill) {
+      f[20] = opts.bgFill[0];
+      f[21] = opts.bgFill[1];
+      f[22] = opts.bgFill[2];
+      f[23] = 1;
+    }
+    this.uploadBuffer(this.transformUniforms, 0, u);
+
+    const bindGroup = this.device.createBindGroup({
+      layout: this.transformPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: this.sampLinear },
+        { binding: 1, resource: opts.src.createView() },
+        { binding: 2, resource: (this.selectionTex ?? this.whiteTex).createView() },
+        { binding: 3, resource: { buffer: this.transformUniforms, size: 96 } },
+      ],
+    });
+    const enc = this.device.createCommandEncoder();
+    const pass = enc.beginRenderPass({
+      colorAttachments: [
+        { view: opts.dst.createView(), loadOp: 'clear', storeOp: 'store' },
+      ],
+    });
+    pass.setPipeline(this.transformPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.draw(3);
+    pass.end();
+    this.device.queue.submit([enc.finish()]);
+  }
+
+  /**
+   * Starts an interactive transform of a layer: snapshots its pixels so every
+   * preview resamples the pristine source (no cumulative degradation).
+   */
+  beginTransform(layerId: string): boolean {
+    const layer = this.layers.get(layerId);
+    if (!layer || this.transformSrc) return false;
+    this.transformUndoData = this.readLayer(layerId);
+    const src = this.makeDocTexture('rgba8unorm', 'transformSrc');
+    const enc = this.device.createCommandEncoder();
+    enc.copyTextureToTexture({ texture: layer }, { texture: src }, [
+      this._docWidth,
+      this._docHeight,
+    ]);
+    this.device.queue.submit([enc.finish()]);
+    this.transformSrc = src;
+    this.transformLayerId = layerId;
+    return true;
+  }
+
+  get transformActive(): boolean {
+    return this.transformSrc !== null;
+  }
+
+  /** Re-renders the layer from the snapshot through `hInv` (dst -> src). */
+  previewTransform(
+    hInv: Mat3,
+    opts: { withSelection: boolean; duplicate: boolean; bgFill: [number, number, number] | null },
+  ): void {
+    if (!this.transformSrc || !this.transformLayerId) return;
+    const layer = this.layers.get(this.transformLayerId);
+    if (!layer) return;
+    this.renderTransform({
+      src: this.transformSrc,
+      srcW: this._docWidth,
+      srcH: this._docHeight,
+      dst: layer,
+      dstW: this._docWidth,
+      dstH: this._docHeight,
+      hInv,
+      ...opts,
+    });
+  }
+
+  /** Commits (records undo) or cancels (restores the snapshot). */
+  endTransform(commit: boolean): void {
+    if (!this.transformSrc || !this.transformLayerId) return;
+    const layer = this.layers.get(this.transformLayerId);
+    if (!commit && layer) {
+      const enc = this.device.createCommandEncoder();
+      enc.copyTextureToTexture({ texture: this.transformSrc }, { texture: layer }, [
+        this._docWidth,
+        this._docHeight,
+      ]);
+      this.device.queue.submit([enc.finish()]);
+    }
+    if (commit && layer && this.transformUndoData) {
+      this.undoStack.push({ layerId: this.transformLayerId, data: this.transformUndoData });
+      if (this.undoStack.length > MAX_HISTORY) this.undoStack.shift();
+      this.redoStack = [];
+      this.notifyHistory();
+    }
+    this.transformSrc.destroy();
+    this.transformSrc = null;
+    this.transformLayerId = null;
+    this.transformUndoData = null;
+  }
+
+  /**
+   * Resizes the document. `hInv` maps new-document pixels back to old-document
+   * pixels (scale for Image Size, translation for Canvas Size / Crop, rotation
+   * for Image Rotation); null discards the old content. `bgFill` supplies an
+   * opaque backing color per layer (the Background layer's extension color).
+   * History snapshots have the old dimensions, so history is cleared.
+   */
+  resizeDocument(
+    width: number,
+    height: number,
+    hInv: Mat3 | null,
+    bgFill: (layerId: string) => [number, number, number] | null = () => null,
+  ): void {
+    const oldW = this._docWidth;
+    const oldH = this._docHeight;
+    this._docWidth = width;
+    this._docHeight = height;
+
+    // selection mask no longer matches; drop it before transform renders
+    this.selectionTex?.destroy();
+    this.selectionTex = null;
+
+    for (const [id, oldTex] of [...this.layers]) {
+      const newTex = this.makeDocTexture('rgba8unorm', `layer:${id}`);
+      this.layers.set(id, newTex);
+      if (hInv) {
+        this.renderTransform({
+          src: oldTex,
+          srcW: oldW,
+          srcH: oldH,
+          dst: newTex,
+          dstW: width,
+          dstH: height,
+          hInv,
+          bgFill: bgFill(id),
+        });
+      } else {
+        this.clearTexture(newTex);
+      }
+      oldTex.destroy();
+    }
+
+    for (const t of this.accum) t.destroy();
+    this.scratch.destroy();
+    this.strokeTex.destroy();
+    this.dualStrokeTex.destroy();
+    this.accum = [
+      this.makeDocTexture('rgba8unorm', 'accumA'),
+      this.makeDocTexture('rgba8unorm', 'accumB'),
+    ];
+    this.scratch = this.makeDocTexture('rgba8unorm', 'scratch');
+    this.strokeTex = this.makeDocTexture('rgba8unorm', 'stroke');
+    this.dualStrokeTex = this.makeDocTexture('r8unorm', 'dualStroke');
+    this.clearTexture(this.strokeTex);
+    this.clearTexture(this.dualStrokeTex);
+
+    this.undoStack = [];
+    this.redoStack = [];
+    this.notifyHistory();
+  }
+
+  /**
+   * Merges `topId` into `bottomId` using the top layer's blend mode and
+   * opacity (Layer > Merge Down). Records an undo snapshot of the bottom
+   * layer; the top layer should be deleted by the caller afterwards.
+   */
+  mergeDown(topId: string, bottomId: string, opacity: number, blendMode: BlendMode): void {
+    const top = this.layers.get(topId);
+    const bottom = this.layers.get(bottomId);
+    if (!top || !bottom) return;
+    this.pushUndo(bottomId);
+
+    const buf = new ArrayBuffer(UNIFORM_SLICE);
+    const f = new Float32Array(buf, 0, LAYER_U_SIZE / 4);
+    const u = new Uint32Array(buf, 0, LAYER_U_SIZE / 4);
+    u[0] = BLEND_MODE_INDEX[blendMode] ?? 0;
+    f[1] = opacity;
+    u[2] = 0; // no live stroke
+    f[16] = this._docWidth;
+    f[17] = this._docHeight;
+    this.uploadBuffer(this.layerUniforms, 0, buf);
+
+    const white = this.whiteTex.createView();
+    const bindGroup = this.device.createBindGroup({
+      layout: this.compositePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: this.sampNearest },
+        { binding: 1, resource: bottom.createView() },
+        { binding: 2, resource: top.createView() },
+        { binding: 3, resource: this.strokeTex.createView() },
+        { binding: 4, resource: { buffer: this.layerUniforms, size: LAYER_U_SIZE } },
+        { binding: 5, resource: white },
+        { binding: 6, resource: this.sampRepeat },
+        { binding: 7, resource: this.dualStrokeTex.createView() },
+      ],
+    });
+    const enc = this.device.createCommandEncoder();
+    const pass = enc.beginRenderPass({
+      colorAttachments: [
+        { view: this.scratch.createView(), loadOp: 'clear', storeOp: 'store' },
+      ],
+    });
+    pass.setPipeline(this.compositePipeline);
+    pass.setBindGroup(0, bindGroup, [0]);
+    pass.draw(3);
+    pass.end();
+    enc.copyTextureToTexture(
+      { texture: this.scratch },
+      { texture: bottom },
+      [this._docWidth, this._docHeight],
+    );
+    this.device.queue.submit([enc.finish()]);
+  }
+
+  /** Replaces a layer's pixels with doc-sized premultiplied RGBA data. */
+  putLayerImage(id: string, data: Uint8Array, width: number, height: number): void {
+    if (width !== this._docWidth || height !== this._docHeight) return;
+    this.ensureLayer(id);
+    this.uploadTexture(this.layers.get(id)!, data, width, height, 4);
+  }
+
+  /** Raw premultiplied RGBA pixels of one layer (for bounds / flatten). */
+  readLayerPixels(id: string): Promise<Uint8Array<ArrayBuffer>> {
+    return this.readLayer(id);
   }
 
   /**

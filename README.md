@@ -127,9 +127,42 @@ airbrush toggle, **Smoothing**, and the pressure-controls-size button.
 - **Rectangular marquee**, **freehand lasso**, and **polygonal lasso**
   (click to add points; click the first point / double-click / Enter to
   close, Esc to cancel).
+- Boolean combinations like Photoshop: **Shift** adds, **Alt** subtracts,
+  **Shift+Alt** intersects (or pick the mode in the options bar). The mask is
+  the source of truth; marching ants are re-traced from it, so inverse,
+  subtract and transform stay exact.
+- `Ctrl+A` select all, `Ctrl+D` deselect, `Ctrl+Shift+D` reselect,
+  `Ctrl+Shift+I` inverse, and Select > Transform Selection.
 - Selections render as animated marching ants and **clip all painting** (the
   mask multiplies brush coverage on the GPU, with anti-aliased edges).
-- `Ctrl+A` select all, `Ctrl+D` deselect.
+- Fill and clear the selected pixels: `Alt+Backspace` fills the foreground
+  color, `Ctrl+Backspace` the background color, `Delete` clears (transparent,
+  or the background color on the Background layer).
+
+### Move & transform
+- **Move tool (V)**: drags the layer — or just the selected pixels — with
+  live GPU preview; **Alt-drag duplicates**, Shift constrains to 45°, arrow
+  keys nudge (Shift = 10 px).
+- **Free Transform (`Ctrl+T`)** with the full Photoshop mode set: Scale,
+  Rotate (15° snap with Shift), Skew, Distort, Perspective, plus instant
+  Rotate 180°/90° CW/90° CCW and Flip Horizontal/Vertical. Corner/edge
+  handles, rotate outside the box, Alt scales from the center, Ctrl distorts
+  or skews, Enter/double-click applies, Esc cancels.
+- Every preview resamples the pristine snapshot through a single homography
+  on the GPU, so nothing degrades while you drag.
+
+### Document
+- Photoshop-style **menu bar** (File / Edit / Image / Layer / Select).
+- **File > New** with paper presets (Letter, Legal, Tabloid, A3–A6) and
+  screen presets, in pixels / inches / cm / mm at a chosen resolution (ppi).
+- **Image Size** (resample toggle, constrain proportions, percent units) and
+  **Canvas Size** (relative mode, 9-way anchor; the Background layer extends
+  with the background color), **Image Rotation** (180°/90°/flips) and
+  **Crop** to selection.
+- **File > Open / Place** import images (PNG, JPEG, …) as a new document or
+  as a new layer scaled to fit.
+- Layers: drag-and-drop reordering, **Merge Down** (`Ctrl+E`), **Flatten
+  Image**.
 
 ### Color
 - Photoshop-style picker (sidebar tab): saturation/brightness square + hue
@@ -149,8 +182,12 @@ airbrush toggle, **Smoothing**, and the pressure-controls-size button.
 
 | Key | Action |
 | --- | --- |
+| V | Move |
 | B / E | Brush / Eraser |
+| I | Eyedropper (Alt+click picks the background color) |
+| Alt (held with brush/eraser) | Temporary eyedropper |
 | M / L / P | Marquee / Lasso / Polygonal lasso |
+| Shift / Alt / Shift+Alt (drag) | Add / subtract / intersect selection |
 | H / Z / Space | Hand / Zoom / temporary pan |
 | [ / ] | Decrease / increase brush size |
 | Shift+[ / Shift+] | Hardness −25% / +25% |
@@ -158,7 +195,13 @@ airbrush toggle, **Smoothing**, and the pressure-controls-size button.
 | Shift+1…0 | Brush flow (swapped with opacity while airbrush is on) |
 | X / D | Swap / reset colors |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / Redo |
+| Ctrl+T | Free Transform (Enter applies, Esc cancels) |
 | Ctrl+A / Ctrl+D | Select all / Deselect |
+| Ctrl+Shift+D / Ctrl+Shift+I | Reselect / Inverse |
+| Alt+Backspace / Ctrl+Backspace / Delete | Fill foreground / fill background / clear |
+| Arrows (Move tool or transform) | Nudge 1 px (Shift = 10 px) |
+| Ctrl+Shift+N / Ctrl+E | New layer / Merge down |
+| Alt+Ctrl+I / Alt+Ctrl+C | Image Size / Canvas Size |
 | Ctrl+0 / Ctrl+1 | Fit view / 100% |
 
 ## Architecture

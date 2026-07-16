@@ -1,14 +1,28 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  applySelectionShape,
+  applyTransformPreview,
+  beginMove,
   buildRenderState,
+  cancelTransform,
+  commitTransform,
   deleteSelectionContents,
+  endMove,
   fillActiveLayer,
   getEngine,
+  invertSelection,
+  mergeDown,
+  nudgeMove,
+  previewMove,
   redo,
+  reselect,
   sampleCanvasColor,
   setEngine,
   setSelection,
   selectAll,
+  startTransform,
+  transformQuadBy,
+  addLayer,
   undo,
 } from '../controller';
 import { PaintEngine } from '../gpu/engine';
@@ -16,11 +30,29 @@ import { StrokeSession } from '../gpu/stroke';
 import { engineStrokeParams } from '../brush/engineParams';
 import type { PointerSample } from '../brush/dynamics';
 import { rgbToHsv } from '../color/convert';
-import { DOC_SIZE, useStore } from '../store';
+import {
+  apply,
+  homographyFromQuads,
+  rotationAbout,
+  translation,
+  type Mat3,
+} from '../transform/matrix';
+import type { SelectionOp } from '../gpu/selection';
+import { DOC_SIZE, useStore, type TransformState } from '../store';
 import type { Point, ToolId } from '../types';
 
 const MIN_ZOOM = 1 / 32;
 const MAX_ZOOM = 32;
+
+type TransformOp =
+  | 'scale'
+  | 'scaleAxis'
+  | 'rotate'
+  | 'skew'
+  | 'distort'
+  | 'perspective'
+  | 'edgeMove'
+  | 'move';
 
 type Drag =
   | { kind: 'stroke'; session: StrokeSession }
@@ -33,9 +65,63 @@ type Drag =
       anchorDoc: Point;
       moved: boolean;
     }
-  | { kind: 'marquee'; start: Point; end: Point }
-  | { kind: 'lasso'; points: Point[] }
-  | { kind: 'eyedrop' };
+  | { kind: 'marquee'; start: Point; end: Point; op: SelectionOp }
+  | { kind: 'lasso'; points: Point[]; op: SelectionOp }
+  | { kind: 'eyedrop' }
+  | { kind: 'move'; start: Point; dx: number; dy: number; moved: boolean }
+  | {
+      kind: 'transform';
+      op: TransformOp;
+      index: number; // corner/edge index
+      startDoc: Point;
+      startQuad: Point[];
+      /** R-space -> doc at drag start, and its inverse */
+      M: Mat3 | null;
+      Minv: Mat3 | null;
+      rStart: Point;
+      center: Point;
+    };
+
+/** Photoshop-style modifier resolution for the selection tools. */
+function selectionOpFromEvent(
+  e: { shiftKey: boolean; altKey: boolean },
+  fallback: SelectionOp,
+): SelectionOp {
+  if (e.shiftKey && e.altKey) return 'intersect';
+  if (e.shiftKey) return 'add';
+  if (e.altKey) return 'subtract';
+  return fallback;
+}
+
+const rectCorners = (r: { x: number; y: number; w: number; h: number }): Point[] => [
+  { x: r.x, y: r.y },
+  { x: r.x + r.w, y: r.y },
+  { x: r.x + r.w, y: r.y + r.h },
+  { x: r.x, y: r.y + r.h },
+];
+
+/** Shift-drag: snap movement to horizontal / vertical / 45° diagonals. */
+function constrain45(dx: number, dy: number): [number, number] {
+  if (Math.abs(dx) > 2 * Math.abs(dy)) return [dx, 0];
+  if (Math.abs(dy) > 2 * Math.abs(dx)) return [0, dy];
+  const d = (Math.abs(dx) + Math.abs(dy)) / 2;
+  return [Math.sign(dx) * d, Math.sign(dy) * d];
+}
+
+function pointInQuad(p: Point, q: Point[]): boolean {
+  let inside = false;
+  for (let i = 0, j = 3; i < 4; j = i++) {
+    const a = q[i];
+    const b = q[j];
+    if (
+      a.y > p.y !== b.y > p.y &&
+      p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x
+    ) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
 
 export function CanvasView() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -63,6 +149,9 @@ export function CanvasView() {
 
   const tool = useStore((s) => s.tool);
   const gpuError = useStore((s) => s.gpuError);
+  const fitNonce = useStore((s) => s.fitNonce);
+  /** boolean-op override for an in-progress polygonal lasso */
+  const polyOpRef = useRef<SelectionOp>('new');
 
   // --- engine lifecycle + render loop ---
   useEffect(() => {
@@ -100,6 +189,14 @@ export function CanvasView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // re-fit after document size changes (New / Image Size / Canvas Size / ...)
+  useEffect(() => {
+    if (!ready) return;
+    getEngine()?.resize();
+    fitView();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fitNonce, ready]);
+
   // --- keyboard shortcuts ---
   useEffect(() => {
     const isEditable = (t: EventTarget | null) =>
@@ -124,6 +221,7 @@ export function CanvasView() {
       if (e.key === 'Alt') {
         if (
           !e.repeat &&
+          !s.transform &&
           (s.tool === 'brush' || s.tool === 'eraser') &&
           !toolBeforeEyedropRef.current
         ) {
@@ -142,6 +240,43 @@ export function CanvasView() {
       if (mod && e.key.toLowerCase() === 'y') {
         e.preventDefault();
         redo();
+        return;
+      }
+      // Ctrl+Shift+I inverse, Ctrl+Shift+D reselect, Ctrl+Shift+N new layer
+      if (mod && e.shiftKey && e.key.toLowerCase() === 'i') {
+        e.preventDefault();
+        invertSelection();
+        return;
+      }
+      if (mod && e.shiftKey && e.key.toLowerCase() === 'd') {
+        e.preventDefault();
+        reselect();
+        return;
+      }
+      if (mod && e.shiftKey && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        addLayer();
+        return;
+      }
+      // Alt+Ctrl+I / Alt+Ctrl+C open the Image Size / Canvas Size dialogs
+      if (mod && e.altKey && e.key.toLowerCase() === 'i') {
+        e.preventDefault();
+        s.setDialog('imageSize');
+        return;
+      }
+      if (mod && e.altKey && e.key.toLowerCase() === 'c') {
+        e.preventDefault();
+        s.setDialog('canvasSize');
+        return;
+      }
+      if (mod && e.key.toLowerCase() === 't') {
+        e.preventDefault();
+        void startTransform('layer', 'free');
+        return;
+      }
+      if (mod && e.key.toLowerCase() === 'e') {
+        e.preventDefault();
+        mergeDown();
         return;
       }
       if (mod && e.key.toLowerCase() === 'd') {
@@ -172,6 +307,21 @@ export function CanvasView() {
         if (e.altKey) fillActiveLayer('fg');
         else if (mod) fillActiveLayer('bg');
         else if (s.selectionPaths) deleteSelectionContents();
+        return;
+      }
+      // Arrows nudge the transform box, or the layer/selection with Move (V)
+      if (e.key.startsWith('Arrow')) {
+        const step = e.shiftKey ? 10 : 1;
+        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+        const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+        if (dx === 0 && dy === 0) return;
+        if (s.transform) {
+          e.preventDefault();
+          transformQuadBy(translation(dx, dy));
+        } else if (s.tool === 'move') {
+          e.preventDefault();
+          nudgeMove(dx, dy);
+        }
         return;
       }
       if (mod) return;
@@ -213,6 +363,7 @@ export function CanvasView() {
       }
 
       switch (e.key) {
+        case 'v': s.setTool('move'); break;
         case 'b': s.setTool('brush'); break;
         case 'e': s.setTool('eraser'); break;
         case 'i': s.setTool('eyedropper'); break;
@@ -238,10 +389,14 @@ export function CanvasView() {
           break;
         }
         case 'Enter':
-          closePoly();
+          if (s.transform) commitTransform();
+          else closePoly();
           break;
         case 'Escape':
-          if (polyRef.current) {
+          if (s.transform) {
+            dragRef.current = null;
+            cancelTransform();
+          } else if (polyRef.current) {
             polyRef.current = null;
             polyPreviewRef.current = null;
           } else if (dragRef.current?.kind === 'stroke') {
@@ -368,7 +523,159 @@ export function CanvasView() {
     const pts = polyRef.current;
     polyRef.current = null;
     polyPreviewRef.current = null;
-    if (pts && pts.length >= 3) setSelection([pts]);
+    if (pts && pts.length >= 3) applySelectionShape([pts], polyOpRef.current);
+  }
+
+  /**
+   * Maps a pointer position to a transform-box interaction: corner and edge
+   * handles first, then inside (move) / outside (rotate). Which operation a
+   * handle performs depends on the transform mode and Ctrl, like Photoshop.
+   */
+  function transformHandleAt(
+    t: TransformState,
+    screen: Point,
+    ctrl: boolean,
+  ): { op: TransformOp; index: number } | null {
+    const qs = t.quad.map(docToScreen);
+    const tol = 8 * devicePixelRatio;
+    const near = (a: Point) => Math.hypot(a.x - screen.x, a.y - screen.y) <= tol;
+
+    const cornerOp: Record<string, TransformOp> = {
+      free: ctrl ? 'distort' : 'scale',
+      scale: 'scale',
+      rotate: 'rotate',
+      skew: 'distort',
+      distort: 'distort',
+      perspective: 'perspective',
+    };
+    const edgeOp: Record<string, TransformOp> = {
+      free: ctrl ? 'skew' : 'scaleAxis',
+      scale: 'scaleAxis',
+      rotate: 'rotate',
+      skew: 'skew',
+      distort: 'edgeMove',
+      perspective: 'scaleAxis',
+    };
+
+    for (let i = 0; i < 4; i++) {
+      if (near(qs[i])) return { op: cornerOp[t.mode], index: i };
+    }
+    for (let i = 0; i < 4; i++) {
+      const mid = {
+        x: (qs[i].x + qs[(i + 1) % 4].x) / 2,
+        y: (qs[i].y + qs[(i + 1) % 4].y) / 2,
+      };
+      if (near(mid)) return { op: edgeOp[t.mode], index: i };
+    }
+    if (pointInQuad(screen, qs)) return { op: 'move', index: 0 };
+    return { op: 'rotate', index: 0 };
+  }
+
+  /** Applies a transform-handle drag, returning the new quad (or null). */
+  function computeTransformQuad(
+    drag: Extract<Drag, { kind: 'transform' }>,
+    rect: TransformState['rect'],
+    p: Point,
+    shift: boolean,
+    alt: boolean,
+  ): Point[] | null {
+    const { op, index: k, startDoc, startQuad, M, Minv, rStart, center } = drag;
+    const Rc = rectCorners(rect);
+    const rCenter = { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+    const mapR = (pts: Point[]) => (M ? pts.map((q) => apply(M, q)) : null);
+
+    switch (op) {
+      case 'move': {
+        let dx = p.x - startDoc.x;
+        let dy = p.y - startDoc.y;
+        if (shift) [dx, dy] = constrain45(dx, dy);
+        return startQuad.map((q) => ({ x: q.x + dx, y: q.y + dy }));
+      }
+      case 'rotate': {
+        let dth =
+          Math.atan2(p.y - center.y, p.x - center.x) -
+          Math.atan2(startDoc.y - center.y, startDoc.x - center.x);
+        if (shift) dth = Math.round(dth / (Math.PI / 12)) * (Math.PI / 12);
+        const m = rotationAbout(dth, center.x, center.y);
+        return startQuad.map((q) => apply(m, q));
+      }
+      case 'scale': {
+        if (!Minv) return null;
+        const r = apply(Minv, p);
+        const ck = Rc[k];
+        const a = alt ? rCenter : Rc[(k + 2) % 4];
+        let sx = Math.abs(ck.x - a.x) < 1e-6 ? 1 : (r.x - a.x) / (ck.x - a.x);
+        let sy = Math.abs(ck.y - a.y) < 1e-6 ? 1 : (r.y - a.y) / (ck.y - a.y);
+        if (shift) sx = sy = Math.abs(sx) > Math.abs(sy) ? sx : sy;
+        return mapR(
+          Rc.map((c) => ({ x: a.x + (c.x - a.x) * sx, y: a.y + (c.y - a.y) * sy })),
+        );
+      }
+      case 'scaleAxis': {
+        if (!Minv) return null;
+        const r = apply(Minv, p);
+        const mids = Rc.map((c, i) => ({
+          x: (c.x + Rc[(i + 1) % 4].x) / 2,
+          y: (c.y + Rc[(i + 1) % 4].y) / 2,
+        }));
+        const mk = mids[k];
+        const a = alt ? rCenter : mids[(k + 2) % 4];
+        let sx = 1;
+        let sy = 1;
+        if (k === 0 || k === 2) {
+          sy = Math.abs(mk.y - a.y) < 1e-6 ? 1 : (r.y - a.y) / (mk.y - a.y);
+          if (shift) sx = sy;
+        } else {
+          sx = Math.abs(mk.x - a.x) < 1e-6 ? 1 : (r.x - a.x) / (mk.x - a.x);
+          if (shift) sy = sx;
+        }
+        return mapR(
+          Rc.map((c) => ({ x: a.x + (c.x - a.x) * sx, y: a.y + (c.y - a.y) * sy })),
+        );
+      }
+      case 'skew': {
+        if (!Minv) return null;
+        const r = apply(Minv, p);
+        const d = { x: r.x - rStart.x, y: r.y - rStart.y };
+        const nr = Rc.map((c) => ({ ...c }));
+        if (k === 0 || k === 2) {
+          const [i, j] = k === 0 ? [0, 1] : [2, 3];
+          nr[i].x += d.x;
+          nr[j].x += d.x;
+        } else {
+          const [i, j] = k === 1 ? [1, 2] : [3, 0];
+          nr[i].y += d.y;
+          nr[j].y += d.y;
+        }
+        return mapR(nr);
+      }
+      case 'distort': {
+        const quad = startQuad.map((q) => ({ ...q }));
+        quad[k] = { ...p };
+        return quad;
+      }
+      case 'edgeMove': {
+        const dx = p.x - startDoc.x;
+        const dy = p.y - startDoc.y;
+        const quad = startQuad.map((q) => ({ ...q }));
+        quad[k] = { x: quad[k].x + dx, y: quad[k].y + dy };
+        const j = (k + 1) % 4;
+        quad[j] = { x: quad[j].x + dx, y: quad[j].y + dy };
+        return quad;
+      }
+      case 'perspective': {
+        if (!Minv) return null;
+        const r = apply(Minv, p);
+        const d = { x: r.x - rStart.x, y: r.y - rStart.y };
+        const px = [1, 0, 3, 2][k]; // partner across the vertical axis
+        const py = [3, 2, 1, 0][k]; // partner across the horizontal axis
+        const nr = Rc.map((c) => ({ ...c }));
+        nr[k] = { x: nr[k].x + d.x, y: nr[k].y + d.y };
+        nr[px] = { ...nr[px], x: nr[px].x - d.x };
+        nr[py] = { ...nr[py], y: nr[py].y - d.y };
+        return mapR(nr);
+      }
+    }
   }
 
   /**
@@ -408,6 +715,32 @@ export function CanvasView() {
     const s = useStore.getState();
     const t = activeTool(e.nativeEvent);
 
+    // An open transform box captures pointer input (except pan/zoom).
+    if (s.transform && t !== 'pan' && t !== 'zoom') {
+      const handle = transformHandleAt(s.transform, screen, e.ctrlKey || e.metaKey);
+      if (handle) {
+        const Rc = rectCorners(s.transform.rect);
+        const M = homographyFromQuads(Rc, s.transform.quad);
+        const Minv = homographyFromQuads(s.transform.quad, Rc);
+        const q = s.transform.quad;
+        dragRef.current = {
+          kind: 'transform',
+          op: handle.op,
+          index: handle.index,
+          startDoc: doc,
+          startQuad: q.map((pt) => ({ ...pt })),
+          M,
+          Minv,
+          rStart: Minv ? apply(Minv, doc) : doc,
+          center: {
+            x: (q[0].x + q[1].x + q[2].x + q[3].x) / 4,
+            y: (q[0].y + q[1].y + q[2].y + q[3].y) / 4,
+          },
+        };
+      }
+      return;
+    }
+
     switch (t) {
       case 'brush':
       case 'eraser': {
@@ -434,6 +767,12 @@ export function CanvasView() {
         dragRef.current = { kind: 'eyedrop' };
         eyedropAt(doc, e.nativeEvent.altKey);
         break;
+      case 'move':
+        // Alt-drag duplicates the moved pixels, like Photoshop
+        if (beginMove(e.nativeEvent.altKey)) {
+          dragRef.current = { kind: 'move', start: doc, dx: 0, dy: 0, moved: false };
+        }
+        break;
       case 'pan':
         dragRef.current = {
           kind: 'pan',
@@ -454,10 +793,19 @@ export function CanvasView() {
         };
         break;
       case 'marquee':
-        dragRef.current = { kind: 'marquee', start: doc, end: doc };
+        dragRef.current = {
+          kind: 'marquee',
+          start: doc,
+          end: doc,
+          op: selectionOpFromEvent(e.nativeEvent, s.selectionOp),
+        };
         break;
       case 'lasso':
-        dragRef.current = { kind: 'lasso', points: [doc] };
+        dragRef.current = {
+          kind: 'lasso',
+          points: [doc],
+          op: selectionOpFromEvent(e.nativeEvent, s.selectionOp),
+        };
         break;
       case 'polyLasso': {
         const first = polyRef.current?.[0];
@@ -468,8 +816,12 @@ export function CanvasView() {
             break;
           }
         }
-        if (!polyRef.current) polyRef.current = [doc];
-        else polyRef.current.push(doc);
+        if (!polyRef.current) {
+          polyRef.current = [doc];
+          polyOpRef.current = selectionOpFromEvent(e.nativeEvent, s.selectionOp);
+        } else {
+          polyRef.current.push(doc);
+        }
         break;
       }
     }
@@ -532,6 +884,33 @@ export function CanvasView() {
         // keep sampling while dragging, like Photoshop
         eyedropAt(screenToDoc(screen), e.altKey);
         break;
+      case 'move': {
+        const doc = screenToDoc(screen);
+        let dx = doc.x - drag.start.x;
+        let dy = doc.y - drag.start.y;
+        if (e.shiftKey) [dx, dy] = constrain45(dx, dy);
+        drag.dx = dx;
+        drag.dy = dy;
+        drag.moved = drag.moved || Math.hypot(dx, dy) >= 0.5;
+        previewMove(dx, dy);
+        break;
+      }
+      case 'transform': {
+        const t = s.transform;
+        if (!t) break;
+        const quad = computeTransformQuad(
+          drag,
+          t.rect,
+          screenToDoc(screen),
+          e.shiftKey,
+          e.altKey,
+        );
+        if (quad) {
+          s.patchTransform({ quad });
+          applyTransformPreview();
+        }
+        break;
+      }
     }
   }
 
@@ -554,29 +933,36 @@ export function CanvasView() {
         }
         break;
       case 'marquee': {
-        const { start, end } = drag;
+        const { start, end, op } = drag;
         const w = Math.abs(end.x - start.x);
         const h = Math.abs(end.y - start.y);
         if (w * s.view.zoom < 3 && h * s.view.zoom < 3) {
-          setSelection(null);
+          if (op === 'new') setSelection(null); // click deselects
         } else {
-          setSelection([
+          applySelectionShape(
             [
-              { x: start.x, y: start.y },
-              { x: end.x, y: start.y },
-              { x: end.x, y: end.y },
-              { x: start.x, y: end.y },
+              [
+                { x: start.x, y: start.y },
+                { x: end.x, y: start.y },
+                { x: end.x, y: end.y },
+                { x: start.x, y: end.y },
+              ],
             ],
-          ]);
+            op,
+          );
         }
         break;
       }
       case 'lasso':
-        if (drag.points.length >= 3) setSelection([drag.points]);
-        else setSelection(null);
+        if (drag.points.length >= 3) applySelectionShape([drag.points], drag.op);
+        else if (drag.op === 'new') setSelection(null);
+        break;
+      case 'move':
+        endMove(drag.dx, drag.dy, drag.moved);
         break;
       case 'pan':
       case 'eyedrop':
+      case 'transform':
         break;
     }
   }
@@ -627,8 +1013,18 @@ export function CanvasView() {
       ctx.setLineDash([]);
     };
 
-    // committed selection
-    if (s.selectionPaths) ants(s.selectionPaths, true, true);
+    // committed selection (mapped through an in-progress transform)
+    if (s.selectionPaths) {
+      let paths = s.selectionPaths;
+      if (s.transform) {
+        const H = homographyFromQuads(
+          rectCorners(s.transform.rect),
+          s.transform.quad,
+        );
+        if (H) paths = paths.map((path) => path.map((pt) => apply(H, pt)));
+      }
+      ants(paths, true, true);
+    }
 
     // in-progress previews
     const drag = dragRef.current;
@@ -662,6 +1058,32 @@ export function CanvasView() {
       ctx.stroke();
     }
 
+    // transform box + handles
+    if (s.transform) {
+      const qs = s.transform.quad.map(docToScreen);
+      ctx.beginPath();
+      ctx.moveTo(qs[0].x, qs[0].y);
+      for (let i = 1; i < 4; i++) ctx.lineTo(qs[i].x, qs[i].y);
+      ctx.closePath();
+      ctx.lineWidth = Math.max(1, dpr);
+      ctx.strokeStyle = '#3d8bff';
+      ctx.stroke();
+      const handles = [...qs];
+      for (let i = 0; i < 4; i++) {
+        handles.push({
+          x: (qs[i].x + qs[(i + 1) % 4].x) / 2,
+          y: (qs[i].y + qs[(i + 1) % 4].y) / 2,
+        });
+      }
+      const hs = 3.5 * dpr;
+      for (const p of handles) {
+        ctx.fillStyle = '#fff';
+        ctx.strokeStyle = '#3d8bff';
+        ctx.fillRect(p.x - hs, p.y - hs, hs * 2, hs * 2);
+        ctx.strokeRect(p.x - hs, p.y - hs, hs * 2, hs * 2);
+      }
+    }
+
     // brush cursor
     const cur = cursorRef.current;
     const t = spaceRef.current ? 'pan' : s.tool;
@@ -691,6 +1113,7 @@ export function CanvasView() {
   }
 
   const cursorStyle: Record<string, string> = {
+    move: 'move',
     brush: 'none',
     eraser: 'none',
     eyedropper: 'crosshair',
@@ -712,7 +1135,10 @@ export function CanvasView() {
       onPointerLeave={() => {
         cursorRef.current.over = false;
       }}
-      onDoubleClick={closePoly}
+      onDoubleClick={() => {
+        if (useStore.getState().transform) commitTransform();
+        else closePoly();
+      }}
       onContextMenu={(e) => e.preventDefault()}
     >
       <canvas ref={canvasRef} className="gpu-canvas" />

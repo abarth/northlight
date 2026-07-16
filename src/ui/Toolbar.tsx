@@ -8,11 +8,13 @@ import {
   HandIcon,
   LassoIcon,
   MarqueeIcon,
+  MoveIcon,
   PolyLassoIcon,
   ZoomIcon,
 } from './icons';
 
 const TOOLS: { id: ToolId; label: string; shortcut: string; icon: JSX.Element }[] = [
+  { id: 'move', label: 'Move', shortcut: 'V', icon: <MoveIcon /> },
   { id: 'marquee', label: 'Rectangular Marquee', shortcut: 'M', icon: <MarqueeIcon /> },
   { id: 'lasso', label: 'Lasso', shortcut: 'L', icon: <LassoIcon /> },
   { id: 'polyLasso', label: 'Polygonal Lasso', shortcut: 'P', icon: <PolyLassoIcon /> },

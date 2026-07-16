@@ -39,6 +39,212 @@ body,
   min-height: 0;
 }
 
+/* ---------- menu bar ---------- */
+
+.menubar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 10px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  min-height: 28px;
+}
+
+.menubar .brand {
+  border-right: none;
+  padding-right: 10px;
+}
+
+.menubar-entry {
+  position: relative;
+}
+
+.menubar-btn {
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text);
+  padding: 4px 9px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.menubar-btn:hover,
+.menubar-btn.open {
+  background: var(--bg-3);
+}
+
+.menu-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 1200;
+  min-width: 230px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  padding: 4px;
+}
+
+.menu-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.menu-item:hover {
+  background: var(--bg-3);
+}
+
+.menu-item.disabled {
+  color: var(--text-dim);
+  opacity: 0.5;
+  cursor: default;
+}
+
+.menu-item.disabled:hover {
+  background: transparent;
+}
+
+.menu-label {
+  flex: 1;
+}
+
+.menu-shortcut {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.menu-arrow {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.menu-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 8px;
+}
+
+.menu-sub {
+  display: none;
+  position: absolute;
+  top: -5px;
+  left: calc(100% - 4px);
+  z-index: 1201;
+  min-width: 230px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  padding: 4px;
+}
+
+.menu-item.has-sub:hover > .menu-sub {
+  display: block;
+}
+
+/* ---------- dialogs ---------- */
+
+.dlg-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.dlg {
+  width: 340px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  padding: 14px;
+}
+
+.dlg-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.dlg-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.dlg-label {
+  width: 80px;
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+
+.dlg-row select {
+  flex: 1;
+  min-width: 0;
+}
+
+input.dlg-num {
+  width: 80px;
+}
+
+.dlg-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 8px 88px;
+  cursor: pointer;
+}
+
+.dlg-info {
+  color: var(--text-dim);
+  font-size: 11px;
+  margin: 8px 0;
+}
+
+.dlg-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.anchor-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 22px);
+  gap: 3px;
+}
+
+.anchor-cell {
+  width: 22px;
+  height: 22px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.anchor-cell:hover {
+  background: var(--bg-3);
+}
+
+.anchor-cell.active {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
 /* ---------- options bar ---------- */
 
 .options-bar {
@@ -718,13 +924,13 @@ select {
 
 /* layers */
 
-/* min-height 0 so short windows shrink the scrolling list instead of pushing
-   the bottom buttons off screen */
+/* The default min-height:auto keeps the panel at least min-content tall
+   (list shrinks to 40px, buttons stay visible); the tab content above
+   absorbs the rest of the squeeze in short windows. */
 .layers-panel {
   display: flex;
   flex-direction: column;
   flex: 1 1 45%;
-  min-height: 0;
 }
 
 .layers-controls {
