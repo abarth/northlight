@@ -2,24 +2,23 @@ import { useEffect, useRef, useState } from 'react';
 import {
   applySelectionShape,
   applyTransformPreview,
-  beginMove,
+  autoSelectMoveTarget,
   buildRenderState,
   cancelTransform,
   commitTransform,
   deleteSelectionContents,
-  endMove,
   fillActiveLayer,
   getEngine,
   invertSelection,
   mergeDown,
-  nudgeMove,
-  previewMove,
+  nudgeMoveSession,
   redo,
   reselect,
   sampleCanvasColor,
   setEngine,
   setSelection,
   selectAll,
+  startMoveSession,
   startTransform,
   transformQuadBy,
   addLayer,
@@ -68,7 +67,8 @@ type Drag =
   | { kind: 'marquee'; start: Point; end: Point; op: SelectionOp }
   | { kind: 'lasso'; points: Point[]; op: SelectionOp }
   | { kind: 'eyedrop' }
-  | { kind: 'move'; start: Point; dx: number; dy: number; moved: boolean }
+  /** move click waiting for async Auto-Select before the float opens */
+  | { kind: 'movePending'; start: Point; last: Point; done: boolean }
   | {
       kind: 'transform';
       op: TransformOp;
@@ -320,7 +320,7 @@ export function CanvasView() {
           transformQuadBy(translation(dx, dy));
         } else if (s.tool === 'move') {
           e.preventDefault();
-          nudgeMove(dx, dy);
+          nudgeMoveSession(dx, dy);
         }
         return;
       }
@@ -535,7 +535,7 @@ export function CanvasView() {
     t: TransformState,
     screen: Point,
     ctrl: boolean,
-  ): { op: TransformOp; index: number } | null {
+  ): { op: TransformOp; index: number; zone: 'corner' | 'edge' | 'inside' | 'outside' } {
     const qs = t.quad.map(docToScreen);
     const tol = 8 * devicePixelRatio;
     const near = (a: Point) => Math.hypot(a.x - screen.x, a.y - screen.y) <= tol;
@@ -558,17 +558,44 @@ export function CanvasView() {
     };
 
     for (let i = 0; i < 4; i++) {
-      if (near(qs[i])) return { op: cornerOp[t.mode], index: i };
+      if (near(qs[i])) return { op: cornerOp[t.mode], index: i, zone: 'corner' };
     }
     for (let i = 0; i < 4; i++) {
       const mid = {
         x: (qs[i].x + qs[(i + 1) % 4].x) / 2,
         y: (qs[i].y + qs[(i + 1) % 4].y) / 2,
       };
-      if (near(mid)) return { op: edgeOp[t.mode], index: i };
+      if (near(mid)) return { op: edgeOp[t.mode], index: i, zone: 'edge' };
     }
-    if (pointInQuad(screen, qs)) return { op: 'move', index: 0 };
-    return { op: 'rotate', index: 0 };
+    if (pointInQuad(screen, qs)) return { op: 'move', index: 0, zone: 'inside' };
+    return { op: 'rotate', index: 0, zone: 'outside' };
+  }
+
+  /** Builds the drag record for a transform-box interaction. */
+  function makeTransformDrag(
+    tr: TransformState,
+    op: TransformOp,
+    index: number,
+    doc: Point,
+  ): Extract<Drag, { kind: 'transform' }> {
+    const Rc = rectCorners(tr.rect);
+    const M = homographyFromQuads(Rc, tr.quad);
+    const Minv = homographyFromQuads(tr.quad, Rc);
+    const q = tr.quad;
+    return {
+      kind: 'transform',
+      op,
+      index,
+      startDoc: doc,
+      startQuad: q.map((pt) => ({ ...pt })),
+      M,
+      Minv,
+      rStart: Minv ? apply(Minv, doc) : doc,
+      center: {
+        x: (q[0].x + q[1].x + q[2].x + q[3].x) / 4,
+        y: (q[0].y + q[1].y + q[2].y + q[3].y) / 4,
+      },
+    };
   }
 
   /** Applies a transform-handle drag, returning the new quad (or null). */
@@ -589,6 +616,9 @@ export function CanvasView() {
         let dx = p.x - startDoc.x;
         let dy = p.y - startDoc.y;
         if (shift) [dx, dy] = constrain45(dx, dy);
+        // whole-pixel steps keep translated content crisp
+        dx = Math.round(dx);
+        dy = Math.round(dy);
         return startQuad.map((q) => ({ x: q.x + dx, y: q.y + dy }));
       }
       case 'rotate': {
@@ -715,29 +745,52 @@ export function CanvasView() {
     const s = useStore.getState();
     const t = activeTool(e.nativeEvent);
 
-    // An open transform box captures pointer input (except pan/zoom).
-    if (s.transform && t !== 'pan' && t !== 'zoom') {
-      const handle = transformHandleAt(s.transform, screen, e.ctrlKey || e.metaKey);
-      if (handle) {
-        const Rc = rectCorners(s.transform.rect);
-        const M = homographyFromQuads(Rc, s.transform.quad);
-        const Minv = homographyFromQuads(s.transform.quad, Rc);
-        const q = s.transform.quad;
-        dragRef.current = {
-          kind: 'transform',
-          op: handle.op,
-          index: handle.index,
-          startDoc: doc,
-          startQuad: q.map((pt) => ({ ...pt })),
-          M,
-          Minv,
-          rStart: Minv ? apply(Minv, doc) : doc,
-          center: {
-            x: (q[0].x + q[1].x + q[2].x + q[3].x) / 4,
-            y: (q[0].y + q[1].y + q[2].y + q[3].y) / 4,
-          },
-        };
+    // An open transform box (or the move tool, which opens a float on
+    // demand) captures pointer input, except while panning/zooming.
+    if ((s.transform || t === 'move') && t !== 'pan' && t !== 'zoom') {
+      if (t === 'move' && !s.transform) {
+        const alt = e.nativeEvent.altKey;
+        if (s.moveAutoSelect) {
+          // pick the layer under the cursor first, then open the float
+          const drag: Extract<Drag, { kind: 'movePending' }> = {
+            kind: 'movePending',
+            start: doc,
+            last: doc,
+            done: false,
+          };
+          dragRef.current = drag;
+          void autoSelectMoveTarget(doc.x, doc.y).then(() => {
+            if (!startMoveSession(alt)) {
+              if (dragRef.current === drag) dragRef.current = null;
+              return;
+            }
+            const dx = Math.round(drag.last.x - drag.start.x);
+            const dy = Math.round(drag.last.y - drag.start.y);
+            if (dx !== 0 || dy !== 0) transformQuadBy(translation(dx, dy));
+            const tr = useStore.getState().transform;
+            if (!drag.done && dragRef.current === drag && tr) {
+              dragRef.current = makeTransformDrag(tr, 'move', 0, drag.last);
+            } else if (dragRef.current === drag) {
+              dragRef.current = null;
+            }
+          });
+          return;
+        }
+        if (!startMoveSession(alt)) return;
       }
+      const tr = useStore.getState().transform;
+      if (!tr) return;
+      let handle = transformHandleAt(tr, screen, e.ctrlKey || e.metaKey);
+      if (t === 'move' && !tr.engaged) {
+        if (!tr.showHandles || handle.zone === 'inside' || handle.zone === 'outside') {
+          // plain move-tool drag: translate, never rotate
+          handle = { op: 'move', index: 0, zone: 'inside' };
+        } else {
+          // grabbing a handle escalates the float into a full transform
+          s.patchTransform({ engaged: true });
+        }
+      }
+      dragRef.current = makeTransformDrag(tr, handle.op, handle.index, doc);
       return;
     }
 
@@ -766,12 +819,6 @@ export function CanvasView() {
       case 'eyedropper':
         dragRef.current = { kind: 'eyedrop' };
         eyedropAt(doc, e.nativeEvent.altKey);
-        break;
-      case 'move':
-        // Alt-drag duplicates the moved pixels, like Photoshop
-        if (beginMove(e.nativeEvent.altKey)) {
-          dragRef.current = { kind: 'move', start: doc, dx: 0, dy: 0, moved: false };
-        }
         break;
       case 'pan':
         dragRef.current = {
@@ -884,17 +931,9 @@ export function CanvasView() {
         // keep sampling while dragging, like Photoshop
         eyedropAt(screenToDoc(screen), e.altKey);
         break;
-      case 'move': {
-        const doc = screenToDoc(screen);
-        let dx = doc.x - drag.start.x;
-        let dy = doc.y - drag.start.y;
-        if (e.shiftKey) [dx, dy] = constrain45(dx, dy);
-        drag.dx = dx;
-        drag.dy = dy;
-        drag.moved = drag.moved || Math.hypot(dx, dy) >= 0.5;
-        previewMove(dx, dy);
+      case 'movePending':
+        drag.last = screenToDoc(screen);
         break;
-      }
       case 'transform': {
         const t = s.transform;
         if (!t) break;
@@ -957,8 +996,9 @@ export function CanvasView() {
         if (drag.points.length >= 3) applySelectionShape([drag.points], drag.op);
         else if (drag.op === 'new') setSelection(null);
         break;
-      case 'move':
-        endMove(drag.dx, drag.dy, drag.moved);
+      case 'movePending':
+        // the float stays open; the Auto-Select continuation sees `done`
+        drag.done = true;
         break;
       case 'pan':
       case 'eyedrop':
@@ -1059,8 +1099,7 @@ export function CanvasView() {
     }
 
     // transform box + handles
-    if (s.transform) {
-      const qs = s.transform.quad.map(docToScreen);
+    const drawBox = (qs: Point[]) => {
       ctx.beginPath();
       ctx.moveTo(qs[0].x, qs[0].y);
       for (let i = 1; i < 4; i++) ctx.lineTo(qs[i].x, qs[i].y);
@@ -1081,6 +1120,31 @@ export function CanvasView() {
         ctx.strokeStyle = '#3d8bff';
         ctx.fillRect(p.x - hs, p.y - hs, hs * 2, hs * 2);
         ctx.strokeRect(p.x - hs, p.y - hs, hs * 2, hs * 2);
+      }
+    };
+    if (s.transform) {
+      if (s.transform.showHandles) drawBox(s.transform.quad.map(docToScreen));
+    } else if (s.tool === 'move' && s.moveShowTransform && s.selectionPaths) {
+      // idle transform controls around the selection, like Photoshop's
+      // "Show Transform Controls" (dragging a handle opens the float)
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const path of s.selectionPaths) {
+        for (const p of path) {
+          if (p.x < minX) minX = p.x;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.y > maxY) maxY = p.y;
+        }
+      }
+      if (Number.isFinite(minX)) {
+        drawBox(
+          rectCorners({ x: minX, y: minY, w: maxX - minX, h: maxY - minY }).map(
+            docToScreen,
+          ),
+        );
       }
     }
 

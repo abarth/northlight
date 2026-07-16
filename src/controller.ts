@@ -16,7 +16,6 @@ import {
   rasterizeSelection,
   traceContours,
   transformMask,
-  translateMask,
   type SelectionOp,
 } from './gpu/selection';
 import {
@@ -119,6 +118,8 @@ export function addLayer(): void {
 
 export function deleteLayer(id: string): void {
   const s = useStore.getState();
+  if (s.transform?.layerId === id) cancelTransform();
+  else commitTransform();
   if (s.layers.length <= 1) return;
   s.removeLayerMeta(id);
   engine?.deleteLayer(id);
@@ -151,6 +152,7 @@ function commitSelectionMask(mask: Uint8Array<ArrayBuffer> | null): void {
 }
 
 export function setSelection(paths: Point[][] | null): void {
+  commitTransform(); // changing the selection ends any open float
   if (!paths || paths.every((p) => p.length < 3)) {
     commitSelectionMask(null);
     return;
@@ -161,16 +163,19 @@ export function setSelection(paths: Point[][] | null): void {
 /** Combines a marquee/lasso shape into the selection (Shift/Alt modifiers). */
 export function applySelectionShape(paths: Point[][], op: SelectionOp): void {
   if (paths.every((p) => p.length < 3)) return;
+  commitTransform();
   const shape = rasterizeSelection(paths, DOC_SIZE.width, DOC_SIZE.height);
   commitSelectionMask(combineMasks(selectionMask, shape, op));
 }
 
 export function invertSelection(): void {
+  commitTransform();
   if (!selectionMask) return;
   commitSelectionMask(invertMask(selectionMask));
 }
 
 export function reselect(): void {
+  commitTransform();
   if (selectionMask || !lastSelectionMask) return;
   commitSelectionMask(lastSelectionMask);
 }
@@ -186,6 +191,7 @@ export function selectionBounds(): { x: number; y: number; w: number; h: number 
  * the current selection when one exists (Alt+Backspace / Ctrl+Backspace).
  */
 export function fillActiveLayer(which: 'fg' | 'bg'): void {
+  commitTransform();
   const s = useStore.getState();
   const rgb = color.hsvToRgb(which === 'fg' ? s.fg : s.bg);
   engine?.fillRegion(s.activeLayerId, [rgb.r, rgb.g, rgb.b]);
@@ -196,6 +202,7 @@ export function fillActiveLayer(which: 'fg' | 'bg'): void {
  * Background layer where they fill with the background color instead.
  */
 export function deleteSelectionContents(): void {
+  commitTransform();
   const s = useStore.getState();
   if (!s.selectionPaths) return;
   if (s.activeLayerId === 'background') {
@@ -296,7 +303,8 @@ export async function startTransform(
 ): Promise<boolean> {
   const s = useStore.getState();
   if (s.transform) {
-    s.patchTransform({ mode });
+    // e.g. Ctrl+T during a move float: engage it as a full transform
+    s.patchTransform({ mode, showHandles: true, engaged: true });
     return true;
   }
   let rect = selectionBounds();
@@ -313,49 +321,127 @@ export async function startTransform(
   useStore.getState().setTransform({
     target,
     mode,
+    layerId: s.activeLayerId,
     rect,
     quad: rectCorners(rect),
     duplicate: false,
+    showHandles: true,
+    engaged: true,
   });
   return true;
 }
 
+/**
+ * Opens a move-tool float: like a transform session, but synchronous (box on
+ * the selection bounds, or the whole document) and initially un-engaged. The
+ * float persists across drags and nudges — pixels bake down only when the
+ * sequence ends (tool/layer switch, Enter, or another operation) — so the
+ * selection's anti-aliased boundary is cut exactly once.
+ */
+export function startMoveSession(duplicate: boolean): boolean {
+  const s = useStore.getState();
+  if (s.transform) return true;
+  if (!engine || engine.transformActive) return false;
+  const rect = selectionBounds() ?? { x: 0, y: 0, w: DOC_SIZE.width, h: DOC_SIZE.height };
+  if (!engine.beginTransform(s.activeLayerId)) return false;
+  rect.w = Math.max(rect.w, 1);
+  rect.h = Math.max(rect.h, 1);
+  s.setTransform({
+    target: 'layer',
+    mode: 'free',
+    layerId: s.activeLayerId,
+    rect,
+    quad: rectCorners(rect),
+    duplicate,
+    showHandles: s.moveShowTransform,
+    engaged: false,
+  });
+  return true;
+}
+
+/** Arrow-key nudge for the move tool: opens/extends the float. */
+export function nudgeMoveSession(dx: number, dy: number): void {
+  const s = useStore.getState();
+  if (!s.transform && !startMoveSession(false)) return;
+  transformQuadBy(translation(dx, dy));
+}
+
+/**
+ * Move-tool Auto-Select: activates the topmost visible layer with an opaque
+ * pixel under the pointer, like Photoshop's Auto-Select: Layer.
+ */
+export async function autoSelectMoveTarget(x: number, y: number): Promise<void> {
+  if (!engine) return;
+  const s = useStore.getState();
+  for (let i = s.layers.length - 1; i >= 0; i--) {
+    const l = s.layers[i];
+    if (!l.visible) continue;
+    const c = await engine.sampleColor(x, y, 1, { layerId: l.id });
+    if (c && c.a > 0.1) {
+      if (l.id !== s.activeLayerId) s.setActiveLayer(l.id);
+      return;
+    }
+  }
+}
+
 /** Re-renders the layer preview from the current quad. */
 export function applyTransformPreview(): void {
-  const s = useStore.getState();
-  const t = s.transform;
+  const t = useStore.getState().transform;
   if (!t || t.target !== 'layer' || !engine) return;
   const hInv = homographyFromQuads(t.quad, rectCorners(t.rect));
   if (!hInv) return;
   engine.previewTransform(hInv, {
     withSelection: !!selectionMask,
     duplicate: t.duplicate,
-    bgFill: bgFillFor(s.activeLayerId),
+    bgFill: bgFillFor(t.layerId),
   });
+}
+
+function quadMatchesRect(
+  quad: Point[],
+  rect: { x: number; y: number; w: number; h: number },
+): boolean {
+  const rc = rectCorners(rect);
+  return quad.every(
+    (p, i) => Math.abs(p.x - rc[i].x) < 1e-3 && Math.abs(p.y - rc[i].y) < 1e-3,
+  );
 }
 
 export function commitTransform(): void {
   const s = useStore.getState();
   const t = s.transform;
   if (!t) return;
+  // Clear first so nested selection/layer updates can't re-enter the commit.
+  s.setTransform(null);
+  const identity = quadMatchesRect(t.quad, t.rect);
   const hInv = homographyFromQuads(t.quad, rectCorners(t.rect));
   if (t.target === 'layer') {
-    applyTransformPreview();
-    engine?.endTransform(true);
+    if (!identity && hInv && engine) {
+      // one final resample of the pristine snapshot, then bake
+      engine.previewTransform(hInv, {
+        withSelection: !!selectionMask,
+        duplicate: t.duplicate,
+        bgFill: bgFillFor(t.layerId),
+      });
+      engine.endTransform(true);
+    } else {
+      // nothing changed: restore the snapshot bit-for-bit, no undo entry
+      engine?.endTransform(false);
+    }
   }
-  if (hInv && selectionMask) {
+  if (!identity && hInv && selectionMask) {
     commitSelectionMask(
       transformMask(selectionMask, DOC_SIZE.width, DOC_SIZE.height, hInv),
     );
   }
-  s.setTransform(null);
 }
 
 export function cancelTransform(): void {
   const s = useStore.getState();
-  if (!s.transform) return;
-  if (s.transform.target === 'layer') engine?.endTransform(false);
+  const t = s.transform;
+  if (!t) return;
   s.setTransform(null);
+  if (t.target === 'layer') engine?.endTransform(false);
 }
 
 /** Applies a matrix to the current transform quad and refreshes the preview. */
@@ -397,49 +483,6 @@ export async function transformImmediate(op: TransformImmediateOp): Promise<void
             : scaleAbout(1, -1, cx, cy);
   transformQuadBy(m);
   if (!hadSession) commitTransform();
-}
-
-// ---------------------------------------------------------------------------
-// Move tool: a translation transform (selection contents when one exists,
-// the whole layer otherwise). Alt duplicates instead of cutting.
-// ---------------------------------------------------------------------------
-
-let moveDuplicate = false;
-
-export function beginMove(duplicate: boolean): boolean {
-  const s = useStore.getState();
-  if (!engine || engine.transformActive || s.transform) return false;
-  moveDuplicate = duplicate;
-  return engine.beginTransform(s.activeLayerId);
-}
-
-export function previewMove(dx: number, dy: number): void {
-  const s = useStore.getState();
-  engine?.previewTransform(translation(-dx, -dy), {
-    withSelection: !!selectionMask,
-    duplicate: moveDuplicate,
-    bgFill: bgFillFor(s.activeLayerId),
-  });
-}
-
-export function endMove(dx: number, dy: number, commit: boolean): void {
-  if (!engine) return;
-  engine.endTransform(commit);
-  const ix = Math.round(dx);
-  const iy = Math.round(dy);
-  if (commit && selectionMask && (ix !== 0 || iy !== 0)) {
-    commitSelectionMask(
-      translateMask(selectionMask, DOC_SIZE.width, DOC_SIZE.height, ix, iy),
-    );
-  }
-}
-
-/** Arrow-key nudge for the move tool (Shift = 10px). */
-export function nudgeMove(dx: number, dy: number): void {
-  if (beginMove(false)) {
-    previewMove(dx, dy);
-    endMove(dx, dy, true);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -489,7 +532,7 @@ export function newDocument(
 /** Image > Image Size: resamples every layer to the new pixel dimensions. */
 export function resizeImage(width: number, height: number, resolution: number): void {
   if (!engine) return;
-  cancelTransform();
+  commitTransform();
   const { width: ow, height: oh } = DOC_SIZE;
   if (width === ow && height === oh) {
     setDocMeta(width, height, resolution);
@@ -511,7 +554,7 @@ export function resizeCanvas(
   anchorY: number,
 ): void {
   if (!engine) return;
-  cancelTransform();
+  commitTransform();
   resetSelectionState();
   const s = useStore.getState();
   const offX = Math.round((width - DOC_SIZE.width) * anchorX);
@@ -525,7 +568,7 @@ export type CanvasRotation = 'rotate180' | 'rotate90cw' | 'rotate90ccw' | 'flipH
 /** Image > Image Rotation: rotates/flips every layer and the canvas. */
 export function rotateCanvas(op: CanvasRotation): void {
   if (!engine) return;
-  cancelTransform();
+  commitTransform();
   resetSelectionState();
   const s = useStore.getState();
   const { width: w, height: h } = DOC_SIZE;
@@ -561,7 +604,7 @@ export function rotateCanvas(op: CanvasRotation): void {
 export function cropToSelection(): void {
   const b = selectionBounds();
   if (!b || !engine) return;
-  cancelTransform();
+  commitTransform();
   resetSelectionState();
   const s = useStore.getState();
   engine.resizeDocument(b.w, b.h, translation(b.x, b.y));
@@ -679,12 +722,13 @@ export async function openImageFile(file: File): Promise<void> {
 // Switching tools while a transform is open applies it, like Photoshop.
 // Spacebar panning is exempt so you can reposition the view mid-transform.
 useStore.subscribe((state, prev) => {
-  if (
-    state.transform &&
-    state.tool !== prev.tool &&
-    state.tool !== 'pan' &&
-    prev.tool !== 'pan'
-  ) {
+  if (!state.transform) return;
+  // Switching to another layer ends the float/transform too.
+  if (state.activeLayerId !== prev.activeLayerId) {
+    commitTransform();
+    return;
+  }
+  if (state.tool !== prev.tool && state.tool !== 'pan' && prev.tool !== 'pan') {
     commitTransform();
   }
 });
@@ -744,10 +788,12 @@ export function importAbr(fileName: string, buffer: ArrayBuffer): number {
 }
 
 export function undo(): void {
+  commitTransform(); // undoing right after reverts the just-baked float
   void engine?.undo();
 }
 
 export function redo(): void {
+  commitTransform();
   void engine?.redo();
 }
 

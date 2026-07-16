@@ -46,12 +46,21 @@ export interface TransformState {
   /** layer pixels (Free Transform) or the selection outline only */
   target: 'layer' | 'selection';
   mode: TransformMode;
+  /** layer being transformed (layer targets), pinned at session start */
+  layerId: string;
   /** the untransformed reference rectangle R (content/selection bounds) */
   rect: { x: number; y: number; w: number; h: number };
   /** current corners of R in document space: TL, TR, BR, BL */
   quad: Point[];
   /** Alt-drag move: keep the original pixels too */
   duplicate: boolean;
+  /** draw the transform box + handles */
+  showHandles: boolean;
+  /**
+   * A move-tool float starts un-engaged (options bar keeps the move options);
+   * grabbing a handle or invoking Free Transform engages it (Apply/Cancel).
+   */
+  engaged: boolean;
 }
 
 export type DialogId = 'new' | 'imageSize' | 'canvasSize' | null;
@@ -80,6 +89,11 @@ export interface AppState {
 
   /** default boolean op for the selection tools (modifier keys override) */
   selectionOp: SelectionOp;
+
+  /** move tool: click picks the topmost layer with pixels under the cursor */
+  moveAutoSelect: boolean;
+  /** move tool: show the transform box around the moved content */
+  moveShowTransform: boolean;
 
   /** active interactive transform session, or null */
   transform: TransformState | null;
@@ -116,6 +130,8 @@ export interface AppState {
   setEyedropperSampleSize: (size: EyedropperSampleSize) => void;
   setEyedropperSample: (sample: EyedropperSample) => void;
   setSelectionOp: (op: SelectionOp) => void;
+  setMoveAutoSelect: (v: boolean) => void;
+  setMoveShowTransform: (v: boolean) => void;
   setTransform: (t: TransformState | null) => void;
   patchTransform: (patch: Partial<TransformState>) => void;
   setDoc: (doc: { width: number; height: number; resolution: number }) => void;
@@ -156,6 +172,8 @@ export const useStore = create<AppState>((set) => ({
   eyedropperSample: 'all',
 
   selectionOp: 'new',
+  moveAutoSelect: false,
+  moveShowTransform: true,
   transform: null,
   doc: { width: DOC_SIZE.width, height: DOC_SIZE.height, resolution: 72 },
   fitNonce: 0,
@@ -205,6 +223,8 @@ export const useStore = create<AppState>((set) => ({
   setEyedropperSampleSize: (eyedropperSampleSize) => set({ eyedropperSampleSize }),
   setEyedropperSample: (eyedropperSample) => set({ eyedropperSample }),
   setSelectionOp: (selectionOp) => set({ selectionOp }),
+  setMoveAutoSelect: (moveAutoSelect) => set({ moveAutoSelect }),
+  setMoveShowTransform: (moveShowTransform) => set({ moveShowTransform }),
   setTransform: (transform) => set({ transform }),
   patchTransform: (patch) =>
     set((s) => (s.transform ? { transform: { ...s.transform, ...patch } } : {})),

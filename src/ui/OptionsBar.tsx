@@ -3,11 +3,8 @@ import {
   cancelTransform,
   commitTransform,
   deleteSelectionContents,
-  exportPng,
   fillActiveLayer,
-  redo,
   setSelection,
-  undo,
 } from '../controller';
 import type { SelectionOp } from '../gpu/selection';
 import {
@@ -17,7 +14,7 @@ import {
   type PaintToolId,
 } from '../store';
 import { BLEND_MODES, type BlendMode } from '../types';
-import { AirbrushIcon, PenIcon, RedoIcon, SettingsIcon, UndoIcon } from './icons';
+import { AirbrushIcon, PenIcon, SettingsIcon } from './icons';
 import { PctSlider, ValSlider } from './controls';
 import { drawBrushPreview } from './brushPreview';
 
@@ -312,15 +309,53 @@ const TRANSFORM_LABEL: Record<string, string> = {
   perspective: 'Perspective',
 };
 
+/** Photoshop-style move options: Auto-Select and Show Transform Controls. */
+function MoveOptions() {
+  const autoSelect = useStore((s) => s.moveAutoSelect);
+  const showTransform = useStore((s) => s.moveShowTransform);
+  const setAutoSelect = useStore((s) => s.setMoveAutoSelect);
+  const setShowTransform = useStore((s) => s.setMoveShowTransform);
+  return (
+    <>
+      <label
+        className="opt-check"
+        title="Clicking activates the topmost layer with pixels under the cursor"
+      >
+        <input
+          type="checkbox"
+          checked={autoSelect}
+          onChange={(e) => setAutoSelect(e.target.checked)}
+        />
+        Auto-Select
+      </label>
+      <label
+        className="opt-check"
+        title="Show the transform box around the moved content; dragging a handle transforms"
+      >
+        <input
+          type="checkbox"
+          checked={showTransform}
+          onChange={(e) => setShowTransform(e.target.checked)}
+        />
+        Show Transform Controls
+      </label>
+      <span className="hint">
+        Drag to move the layer or selected pixels (Enter applies, Esc cancels).
+        Alt-drag duplicates. Arrows nudge (Shift = 10px).
+      </span>
+    </>
+  );
+}
+
 export function OptionsBar() {
   const tool = useStore((s) => s.tool);
-  const canUndo = useStore((s) => s.canUndo);
-  const canRedo = useStore((s) => s.canRedo);
   const hasSelection = useStore((s) => s.selectionPaths !== null);
   const transform = useStore((s) => s.transform);
   const view = useStore((s) => s.view);
 
-  if (transform) {
+  // An engaged transform shows Apply/Cancel; an un-engaged move-tool float
+  // keeps the regular move options, like Photoshop.
+  if (transform && transform.engaged) {
     return (
       <div className="options-bar">
         <div className="options-scroll">
@@ -345,12 +380,7 @@ export function OptionsBar() {
   return (
     <div className="options-bar">
       <div className="options-scroll">
-        {tool === 'move' && (
-          <span className="hint">
-            Drag to move the layer (or selected pixels). Alt-drag duplicates. Shift
-            constrains. Arrow keys nudge (Shift = 10px). Ctrl+T transforms.
-          </span>
-        )}
+        {tool === 'move' && <MoveOptions />}
         {(tool === 'brush' || tool === 'eraser') && <BrushOptions toolKey={tool} />}
         {(tool === 'marquee' || tool === 'lasso' || tool === 'polyLasso') && (
           <>
@@ -391,20 +421,6 @@ export function OptionsBar() {
       </div>
       <div className="options-right">
         <span className="zoom-label">{Math.round(view.zoom * 100)}%</span>
-        <button className="icon-btn" disabled={!canUndo} onClick={undo} title="Undo (Ctrl+Z)">
-          <UndoIcon size={16} />
-        </button>
-        <button
-          className="icon-btn"
-          disabled={!canRedo}
-          onClick={redo}
-          title="Redo (Ctrl+Shift+Z)"
-        >
-          <RedoIcon size={16} />
-        </button>
-        <button className="btn" onClick={() => void exportPng()} title="Export flattened PNG">
-          Export PNG
-        </button>
       </div>
     </div>
   );

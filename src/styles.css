@@ -309,6 +309,14 @@ input.dlg-num {
   border-left: 1px solid var(--border);
 }
 
+.opt-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
 input.num {
   width: 46px;
   background: var(--bg-1);

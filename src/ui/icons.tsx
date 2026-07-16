@@ -107,20 +107,6 @@ export const EyedropperIcon = ({ size }: IconProps) => (
   </svg>
 );
 
-export const UndoIcon = ({ size }: IconProps) => (
-  <svg {...base(size)}>
-    <path d="M8 5L3 10l5 5" />
-    <path d="M3 10h11a7 7 0 0 1 7 7v2" />
-  </svg>
-);
-
-export const RedoIcon = ({ size }: IconProps) => (
-  <svg {...base(size)}>
-    <path d="M16 5l5 5-5 5" />
-    <path d="M21 10H10a7 7 0 0 0-7 7v2" />
-  </svg>
-);
-
 export const PenIcon = ({ size }: IconProps) => (
   <svg {...base(size)}>
     <path d="M12 2l3 6-3 13-3-13z" />

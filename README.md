@@ -140,9 +140,15 @@ airbrush toggle, **Smoothing**, and the pressure-controls-size button.
   or the background color on the Background layer).
 
 ### Move & transform
-- **Move tool (V)**: drags the layer — or just the selected pixels — with
-  live GPU preview; **Alt-drag duplicates**, Shift constrains to 45°, arrow
-  keys nudge (Shift = 10 px).
+- **Move tool (V)**: drags the layer — or just the selected pixels — as a
+  persistent floating selection: repeated drags and nudges accumulate and
+  the pixels (and marching ants) bake down only when the sequence ends
+  (Enter, tool/layer switch, or another operation; Esc cancels), so the
+  anti-aliased boundary is cut exactly once. **Alt-drag duplicates**, Shift
+  constrains to 45°, arrow keys nudge (Shift = 10 px). Options bar has
+  Photoshop's **Auto-Select** (click activates the topmost layer under the
+  cursor) and **Show Transform Controls** (drag a handle to scale/rotate
+  without pressing Ctrl+T).
 - **Free Transform (`Ctrl+T`)** with the full Photoshop mode set: Scale,
   Rotate (15° snap with Shift), Skew, Distort, Perspective, plus instant
   Rotate 180°/90° CW/90° CCW and Flip Horizontal/Vertical. Corner/edge
