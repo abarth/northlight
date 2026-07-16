@@ -10,6 +10,7 @@ import {
   rgbToHsv,
   rgbToLab,
   rgbToOklch,
+  type Lab,
   type OKLCH,
   type RGB,
 } from '../color/convert';
@@ -18,94 +19,8 @@ import type { HSV } from '../types';
 
 type Mode = 'hsb' | 'rgb' | 'lab' | 'oklch';
 
-interface ChannelSpec {
-  label: string;
-  min: number;
-  max: number;
-  get: (hsv: HSV) => number;
-  set: (hsv: HSV, value: number) => HSV;
-}
-
 function fromRgb(rgb: RGB, hueHint: number): HSV {
   return rgbToHsv(rgb, hueHint);
-}
-
-const CHANNELS: Record<Exclude<Mode, 'oklch'>, ChannelSpec[]> = {
-  hsb: [
-    { label: 'H', min: 0, max: 360, get: (c) => c.h, set: (c, v) => ({ ...c, h: v }) },
-    {
-      label: 'S',
-      min: 0,
-      max: 100,
-      get: (c) => c.s * 100,
-      set: (c, v) => ({ ...c, s: v / 100 }),
-    },
-    {
-      label: 'B',
-      min: 0,
-      max: 100,
-      get: (c) => c.v * 100,
-      set: (c, v) => ({ ...c, v: v / 100 }),
-    },
-  ],
-  rgb: [
-    {
-      label: 'R',
-      min: 0,
-      max: 255,
-      get: (c) => hsvToRgb(c).r * 255,
-      set: (c, v) => fromRgb({ ...hsvToRgb(c), r: v / 255 }, c.h),
-    },
-    {
-      label: 'G',
-      min: 0,
-      max: 255,
-      get: (c) => hsvToRgb(c).g * 255,
-      set: (c, v) => fromRgb({ ...hsvToRgb(c), g: v / 255 }, c.h),
-    },
-    {
-      label: 'B',
-      min: 0,
-      max: 255,
-      get: (c) => hsvToRgb(c).b * 255,
-      set: (c, v) => fromRgb({ ...hsvToRgb(c), b: v / 255 }, c.h),
-    },
-  ],
-  lab: [
-    {
-      label: 'L',
-      min: 0,
-      max: 100,
-      get: (c) => rgbToLab(hsvToRgb(c)).l,
-      set: (c, v) => fromRgb(labToRgb({ ...rgbToLab(hsvToRgb(c)), l: v }), c.h),
-    },
-    {
-      label: 'a',
-      min: -128,
-      max: 127,
-      get: (c) => rgbToLab(hsvToRgb(c)).a,
-      set: (c, v) => fromRgb(labToRgb({ ...rgbToLab(hsvToRgb(c)), a: v }), c.h),
-    },
-    {
-      label: 'b',
-      min: -128,
-      max: 127,
-      get: (c) => rgbToLab(hsvToRgb(c)).b,
-      set: (c, v) => fromRgb(labToRgb({ ...rgbToLab(hsvToRgb(c)), b: v }), c.h),
-    },
-  ],
-};
-
-/** CSS gradient for a slider by sweeping one channel across its range. */
-function channelGradient(spec: ChannelSpec, color: HSV): string {
-  const stops: string[] = [];
-  const n = 12;
-  for (let i = 0; i <= n; i++) {
-    const v = spec.min + ((spec.max - spec.min) * i) / n;
-    const rgb = hsvToRgb(spec.set(color, v));
-    stops.push(`#${rgbToHex(rgb)} ${(i / n) * 100}%`);
-  }
-  return `linear-gradient(to right, ${stops.join(', ')})`;
 }
 
 const dragPick =
@@ -126,8 +41,72 @@ function fraction(e: React.PointerEvent, el: HTMLElement): { fx: number; fy: num
   };
 }
 
+/**
+ * Keeps the active color model as the view's internal representation: local
+ * state holds the (possibly out-of-sRGB-gamut) model values, edits export a
+ * clamped color to the store, and only *external* changes to the foreground
+ * color re-derive the local values. This is what keeps e.g. Lab a=110 from
+ * being pulled back by the sRGB clamp on the next render.
+ */
+function useModelState<T>(
+  fg: HSV,
+  setFg: (c: HSV) => void,
+  derive: (fg: HSV) => T,
+  toRgb: (value: T) => RGB,
+): [T, (next: T) => void] {
+  const [value, setValue] = useState<T>(() => derive(fg));
+  const exportedRef = useRef<HSV | null>(null);
+  const lastFgRef = useRef(fg);
+  if (fg !== lastFgRef.current) {
+    lastFgRef.current = fg;
+    if (exportedRef.current !== fg) setValue(derive(fg));
+  }
+  const apply = (next: T) => {
+    setValue(next);
+    const hsv = fromRgb(toRgb(next), fg.h);
+    exportedRef.current = hsv;
+    setFg(hsv);
+  };
+  return [value, apply];
+}
+
+/** One labeled numeric field of a values row. */
+interface NumSpec {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  digits?: number;
+  onChange: (v: number) => void;
+}
+
+function ValuesRow({ items }: { items: NumSpec[] }) {
+  return (
+    <div className="values-row">
+      {items.map((it) => (
+        <label key={it.label} className="values-field">
+          <span className="ch-label">{it.label}</span>
+          <input
+            className="num"
+            type="number"
+            min={it.min}
+            max={it.max}
+            step={it.step ?? 1}
+            value={Number(it.value.toFixed(it.digits ?? 0))}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v)) it.onChange(clamp(v, it.min, it.max));
+            }}
+          />
+        </label>
+      ))}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
-// HSB: saturation/brightness square + hue strip
+// HSB: saturation/brightness square + hue strip + numeric readouts
 // ---------------------------------------------------------------------------
 
 function HsbArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
@@ -180,17 +159,97 @@ function HsbArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
       >
         <div className="hue-marker" style={{ left: `${(fg.h / 360) * 100}%` }} />
       </div>
+      <ValuesRow
+        items={[
+          { label: 'H', value: fg.h, min: 0, max: 360, onChange: (v) => setFg({ ...fg, h: v }) },
+          {
+            label: 'S',
+            value: fg.s * 100,
+            min: 0,
+            max: 100,
+            onChange: (v) => setFg({ ...fg, s: v / 100 }),
+          },
+          {
+            label: 'B',
+            value: fg.v * 100,
+            min: 0,
+            max: 100,
+            onChange: (v) => setFg({ ...fg, v: v / 100 }),
+          },
+        ]}
+      />
     </>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Lab: a/b square (a right, b up) + L strip
+// RGB: three gradient sliders
+// ---------------------------------------------------------------------------
+
+function RgbArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
+  const rgb = hsvToRgb(fg);
+  const channels: { label: string; key: keyof RGB }[] = [
+    { label: 'R', key: 'r' },
+    { label: 'G', key: 'g' },
+    { label: 'B', key: 'b' },
+  ];
+  return (
+    <>
+      {channels.map((ch) => {
+        const lo = { ...rgb, [ch.key]: 0 };
+        const hi = { ...rgb, [ch.key]: 1 };
+        return (
+          <label className="channel-row" key={ch.label}>
+            <span className="ch-label">{ch.label}</span>
+            <input
+              type="range"
+              min={0}
+              max={255}
+              step={1}
+              value={Math.round(rgb[ch.key] * 255)}
+              style={{
+                background: `linear-gradient(to right, #${rgbToHex(lo)}, #${rgbToHex(hi)})`,
+              }}
+              onChange={(e) =>
+                setFg(fromRgb({ ...rgb, [ch.key]: Number(e.target.value) / 255 }, fg.h))
+              }
+            />
+            <input
+              className="num"
+              type="number"
+              min={0}
+              max={255}
+              value={Math.round(rgb[ch.key] * 255)}
+              onChange={(e) =>
+                setFg(
+                  fromRgb(
+                    { ...rgb, [ch.key]: clamp(Number(e.target.value), 0, 255) / 255 },
+                    fg.h,
+                  ),
+                )
+              }
+            />
+          </label>
+        );
+      })}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Lab: a/b plane (a right, b up) + L strip + numeric readouts.
+// Lab is the internal representation while this mode is active, so values
+// outside the sRGB gamut hold steady instead of drifting through the clamp.
 // ---------------------------------------------------------------------------
 
 function LabArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
   const abRef = useRef<HTMLCanvasElement>(null);
-  const lab = rgbToLab(hsvToRgb(fg));
+  const [lab, apply] = useModelState<Lab>(
+    fg,
+    setFg,
+    (c) => rgbToLab(hsvToRgb(c)),
+    (v) => labToRgb(v),
+  );
 
   useEffect(() => {
     const canvas = abRef.current;
@@ -213,19 +272,25 @@ function LabArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
     }
     ctx.putImageData(img, 0, 0);
     ctx.beginPath();
-    ctx.arc(((lab.a + 128) / 255) * w, ((127 - lab.b) / 255) * h, 5, 0, Math.PI * 2);
+    ctx.arc(
+      (clamp(lab.a, -128, 127) + 128) / 255 * w,
+      ((127 - clamp(lab.b, -128, 127)) / 255) * h,
+      5,
+      0,
+      Math.PI * 2,
+    );
     ctx.strokeStyle = lab.l > 50 ? '#000' : '#fff';
     ctx.lineWidth = 1.5;
     ctx.stroke();
-  }, [fg, lab.l, lab.a, lab.b]);
+  }, [lab.l, lab.a, lab.b]);
 
   const abPick = (e: React.PointerEvent) => {
     const { fx, fy } = fraction(e, abRef.current!);
-    setFg(fromRgb(labToRgb({ l: lab.l, a: -128 + fx * 255, b: 127 - fy * 255 }), fg.h));
+    apply({ l: lab.l, a: -128 + fx * 255, b: 127 - fy * 255 });
   };
   const lPick = (e: React.PointerEvent) => {
     const { fx } = fraction(e, e.currentTarget as HTMLElement);
-    setFg(fromRgb(labToRgb({ ...lab, l: fx * 100 }), fg.h));
+    apply({ ...lab, l: fx * 100 });
   };
 
   const stops: string[] = [];
@@ -242,90 +307,124 @@ function LabArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
         style={{ background: `linear-gradient(to right, ${stops.join(', ')})` }}
         {...dragPick(lPick)}
       >
-        <div className="hue-marker" style={{ left: `${lab.l}%` }} />
+        <div className="hue-marker" style={{ left: `${clamp(lab.l, 0, 100)}%` }} />
       </div>
+      <ValuesRow
+        items={[
+          { label: 'L', value: lab.l, min: 0, max: 100, onChange: (v) => apply({ ...lab, l: v }) },
+          {
+            label: 'a',
+            value: lab.a,
+            min: -128,
+            max: 127,
+            onChange: (v) => apply({ ...lab, a: v }),
+          },
+          {
+            label: 'b',
+            value: lab.b,
+            min: -128,
+            max: 127,
+            onChange: (v) => apply({ ...lab, b: v }),
+          },
+        ]}
+      />
     </>
   );
 }
 
 // ---------------------------------------------------------------------------
-// OKLCH: gamut-aware L/C/H strips in the style of oklch.com — each strip
-// sweeps one channel with the others held, rendering only the slice that is
-// inside the sRGB gamut (out-of-gamut regions show the dark checker).
+// OKLCH, in the style of oklch.com: each component gets a two-dimensional
+// gamut diagram (rendered per-pixel; the checker marks out-of-sRGB regions):
+//   L — x: lightness, y: chroma (at the current hue)
+//   C — x: hue,       y: chroma (at the current lightness)
+//   H — x: hue,       y: lightness (at the current chroma)
+// Dragging a diagram picks both of its axes; the numbers give exact entry.
 // ---------------------------------------------------------------------------
 
 const C_MAX = 0.4;
 
-function OklchStrip({
+function OklchChart({
   label,
-  value,
-  max,
-  display,
+  xMax,
+  yMax,
   colorAt,
+  marker,
   onPick,
-  step,
+  num,
 }: {
   label: string;
-  value: number; // 0..max
-  max: number;
-  display: { digits: number; scale: number };
-  colorAt: (v: number) => OKLCH;
-  onPick: (v: number) => void;
-  step: number;
+  xMax: number;
+  yMax: number;
+  colorAt: (xv: number, yv: number) => OKLCH;
+  marker: { x: number; y: number };
+  onPick: (xv: number, yv: number) => void;
+  num: NumSpec;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     const canvas = ref.current;
     if (!canvas) return;
-    const w = (canvas.width = canvas.clientWidth || 200);
-    const h = (canvas.height = canvas.clientHeight || 16);
+    // render at reduced resolution; CSS scales it up
+    const w = (canvas.width = Math.max(80, Math.floor((canvas.clientWidth || 200) / 2)));
+    const h = (canvas.height = 36);
     const ctx = canvas.getContext('2d')!;
-    // dark checker background = out-of-gamut
-    ctx.fillStyle = '#26262b';
-    ctx.fillRect(0, 0, w, h);
-    ctx.fillStyle = '#333338';
-    for (let x = 0; x < w; x += 8) {
-      ctx.fillRect(x + (Math.floor(x / 8) % 2 ? 0 : 4), 0, 4, h);
-    }
-    const img = ctx.getImageData(0, 0, w, h);
-    for (let x = 0; x < w; x++) {
-      const ok = colorAt((x / (w - 1)) * max);
-      if (!oklchInGamut(ok)) continue;
-      const rgb = oklchToRgb(ok);
-      for (let y = 0; y < h; y++) {
+    const img = ctx.createImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      const yv = yMax * (1 - y / (h - 1));
+      for (let x = 0; x < w; x++) {
+        const ok = colorAt((x / (w - 1)) * xMax, yv);
         const i = (y * w + x) * 4;
-        img.data[i] = rgb.r * 255;
-        img.data[i + 1] = rgb.g * 255;
-        img.data[i + 2] = rgb.b * 255;
+        if (oklchInGamut(ok)) {
+          const rgb = oklchToRgb(ok);
+          img.data[i] = rgb.r * 255;
+          img.data[i + 1] = rgb.g * 255;
+          img.data[i + 2] = rgb.b * 255;
+        } else {
+          // dark checker = outside the sRGB gamut
+          const dark = (x >> 2) % 2 === (y >> 2) % 2;
+          img.data[i] = img.data[i + 1] = dark ? 38 : 51;
+          img.data[i + 2] = dark ? 43 : 56;
+        }
         img.data[i + 3] = 255;
       }
     }
     ctx.putImageData(img, 0, 0);
+    const mx = clamp(marker.x / xMax, 0, 1) * (w - 1);
+    const my = (1 - clamp(marker.y / yMax, 0, 1)) * (h - 1);
+    ctx.beginPath();
+    ctx.arc(mx, my, 3.5, 0, Math.PI * 2);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(mx, my, 4.6, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
   });
 
   const pick = (e: React.PointerEvent) => {
-    const { fx } = fraction(e, ref.current!);
-    onPick(fx * max);
+    const { fx, fy } = fraction(e, ref.current!);
+    onPick(fx * xMax, (1 - fy) * yMax);
   };
 
   return (
     <div className="ok-row">
       <span className="ch-label">{label}</span>
-      <div className="ok-strip-wrap" {...dragPick(pick)}>
-        <canvas ref={ref} className="ok-strip" />
-        <div className="hue-marker" style={{ left: `${(value / max) * 100}%` }} />
+      <div className="ok-chart-wrap" {...dragPick(pick)}>
+        <canvas ref={ref} className="ok-chart" />
       </div>
       <input
         className="num ok-num"
         type="number"
-        min={0}
-        max={max * display.scale}
-        step={step}
-        value={Number((value * display.scale).toFixed(display.digits))}
+        min={num.min}
+        max={num.max}
+        step={num.step ?? 1}
+        value={Number(num.value.toFixed(num.digits ?? 0))}
         onChange={(e) => {
           const v = Number(e.target.value);
-          if (Number.isFinite(v)) onPick(clamp(v / display.scale, 0, max));
+          if (Number.isFinite(v)) num.onChange(clamp(v, num.min, num.max));
         }}
       />
     </div>
@@ -333,48 +432,65 @@ function OklchStrip({
 }
 
 function OklchArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
-  // hue/chroma survive achromatic round-trips through the HSV store color
-  const hueRef = useRef(0);
-  const ok = rgbToOklch(hsvToRgb(fg), hueRef.current);
-  if (ok.c > 1e-3) hueRef.current = ok.h;
-
-  const apply = (next: OKLCH) => {
-    hueRef.current = next.h;
-    setFg(fromRgb(oklchToRgb(next), fg.h));
-  };
+  const [ok, apply] = useModelState<OKLCH>(
+    fg,
+    setFg,
+    (c) => rgbToOklch(hsvToRgb(c)),
+    (v) => oklchToRgb(v),
+  );
 
   return (
     <div className="ok-area">
-      <OklchStrip
+      <OklchChart
         label="L"
-        value={ok.l}
-        max={1}
-        display={{ digits: 1, scale: 100 }}
-        step={1}
-        colorAt={(l) => ({ ...ok, l })}
-        onPick={(l) => apply({ ...ok, l })}
+        xMax={1}
+        yMax={C_MAX}
+        colorAt={(l, c) => ({ l, c, h: ok.h })}
+        marker={{ x: ok.l, y: ok.c }}
+        onPick={(l, c) => apply({ l, c, h: ok.h })}
+        num={{
+          label: 'L',
+          value: ok.l * 100,
+          min: 0,
+          max: 100,
+          digits: 1,
+          onChange: (v) => apply({ ...ok, l: v / 100 }),
+        }}
       />
-      <OklchStrip
+      <OklchChart
         label="C"
-        value={Math.min(ok.c, C_MAX)}
-        max={C_MAX}
-        display={{ digits: 3, scale: 1 }}
-        step={0.005}
-        colorAt={(c) => ({ ...ok, c })}
-        onPick={(c) => apply({ ...ok, c })}
+        xMax={360}
+        yMax={C_MAX}
+        colorAt={(h, c) => ({ l: ok.l, c, h })}
+        marker={{ x: ok.h, y: ok.c }}
+        onPick={(h, c) => apply({ l: ok.l, c, h })}
+        num={{
+          label: 'C',
+          value: ok.c,
+          min: 0,
+          max: C_MAX,
+          step: 0.005,
+          digits: 3,
+          onChange: (v) => apply({ ...ok, c: v }),
+        }}
       />
-      <OklchStrip
+      <OklchChart
         label="H"
-        value={ok.h}
-        max={360}
-        display={{ digits: 1, scale: 1 }}
-        step={1}
-        colorAt={(h) => ({ ...ok, h })}
-        onPick={(h) => apply({ ...ok, h })}
+        xMax={360}
+        yMax={1}
+        colorAt={(h, l) => ({ l, c: ok.c, h })}
+        marker={{ x: ok.h, y: ok.l }}
+        onPick={(h, l) => apply({ l, c: ok.c, h })}
+        num={{
+          label: 'H',
+          value: ok.h,
+          min: 0,
+          max: 360,
+          digits: 1,
+          onChange: (v) => apply({ ...ok, h: v }),
+        }}
       />
-      {!oklchInGamut(ok) && (
-        <div className="ok-warn">outside sRGB — shown clamped</div>
-      )}
+      {!oklchInGamut(ok) && <div className="ok-warn">outside sRGB — shown clamped</div>}
     </div>
   );
 }
@@ -387,8 +503,7 @@ export function ColorPicker() {
   const [mode, setMode] = useState<Mode>('hsb');
   const [hexDraft, setHexDraft] = useState<string | null>(null);
 
-  const rgb = hsvToRgb(fg);
-  const hex = rgbToHex(rgb);
+  const hex = rgbToHex(hsvToRgb(fg));
 
   return (
     <div className="panel color-panel">
@@ -408,37 +523,9 @@ export function ColorPicker() {
       </div>
 
       {mode === 'hsb' && <HsbArea fg={fg} setFg={setFg} />}
+      {mode === 'rgb' && <RgbArea fg={fg} setFg={setFg} />}
       {mode === 'lab' && <LabArea fg={fg} setFg={setFg} />}
       {mode === 'oklch' && <OklchArea fg={fg} setFg={setFg} />}
-
-      {mode !== 'oklch' &&
-        CHANNELS[mode].map((spec) => {
-          const value = spec.get(fg);
-          return (
-            <label className="channel-row" key={`${mode}-${spec.label}`}>
-              <span className="ch-label">{spec.label}</span>
-              <input
-                type="range"
-                min={spec.min}
-                max={spec.max}
-                step={1}
-                value={Math.round(value)}
-                style={{ background: channelGradient(spec, fg) }}
-                onChange={(e) => setFg(spec.set(fg, Number(e.target.value)))}
-              />
-              <input
-                className="num"
-                type="number"
-                min={spec.min}
-                max={spec.max}
-                value={Math.round(value)}
-                onChange={(e) =>
-                  setFg(spec.set(fg, clamp(Number(e.target.value), spec.min, spec.max)))
-                }
-              />
-            </label>
-          );
-        })}
 
       <label className="channel-row hex-row">
         <span className="ch-label">#</span>

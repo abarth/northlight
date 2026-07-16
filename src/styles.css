@@ -961,30 +961,45 @@ select {
   margin: 6px 0;
 }
 
-.ok-strip-wrap {
+.ok-chart-wrap {
   position: relative;
   flex: 1;
-  height: 18px;
+  height: 52px;
   border-radius: 4px;
   overflow: hidden;
-  cursor: ew-resize;
+  cursor: crosshair;
   touch-action: none;
 }
 
-.ok-strip {
+.ok-chart {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
-}
-
-.ok-strip-wrap .hue-marker {
-  top: 0;
-  height: 18px;
+  image-rendering: auto;
 }
 
 input.ok-num {
   width: 52px;
+}
+
+/* compact numeric readouts (HSB / Lab) */
+.values-row {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+
+.values-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+}
+
+.values-field .num {
+  width: 100%;
+  min-width: 0;
 }
 
 .ok-warn {

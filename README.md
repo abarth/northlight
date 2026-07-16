@@ -182,11 +182,14 @@ airbrush toggle, **Smoothing**, and the pressure-controls-size button.
 - Model-specific pickers (tabs at the top of the panel): **HSB** with the
   saturation/brightness square + hue strip; **RGB** with gradient sliders;
   **Lab** with an a/b plane and an L strip (CIE Lab, D50 with Bradford
-  adaptation — same setup as Photoshop/CSS; out-of-gamut values clamp to
-  sRGB); and **OKLCH** with oklch.com-style gamut-aware L/C/H strips that
-  render only the slice inside the sRGB gamut (out-of-gamut regions show a
-  checker), with an out-of-gamut warning when the current color clips.
-- Numeric channels + hex input in every mode, foreground/background
+  adaptation — same setup as Photoshop/CSS); and **OKLCH** with
+  oklch.com-style two-dimensional gamut diagrams per component (L: chroma
+  by lightness, C: chroma by hue, H: lightness by hue — out-of-sRGB regions
+  show a checker, and a warning appears when the current color clips).
+- The active model is the picker's internal representation: Lab/OKLCH
+  values outside the sRGB gamut hold steady while you edit (the exported
+  paint color clamps), instead of drifting through an RGB round-trip.
+- Numeric readouts + hex input in every mode, foreground/background
   swatches (`X` swap, `D` reset).
 
 ### Navigation & workflow
