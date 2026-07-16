@@ -5,18 +5,19 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Deploys by force-pushing dist/ to the gh-pages branch. Unlike the
+# actions/deploy-pages flow, this needs no pre-enabled Pages site: creating
+# a gh-pages branch auto-enables Pages, and the default workflow token can
+# push branches (it cannot call the "create Pages site" admin API).
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
-# Allow one concurrent deployment; don't cancel in-flight production deploys.
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,30 +30,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Configure GitHub Pages
-        id: pages
-        uses: actions/configure-pages@v5
-        with:
-          enablement: true
-
       - name: Build
         env:
-          # e.g. "/northlight/" for project pages, "/" for a custom domain.
-          BASE_PATH: ${{ steps.pages.outputs.base_path }}/
+          # Project pages are served from /<repo>/
+          BASE_PATH: /${{ github.event.repository.name }}/
         run: npm run build
 
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Publish dist to gh-pages
+        run: |
+          cd dist
+          touch .nojekyll
+          git init -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Deploy ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
