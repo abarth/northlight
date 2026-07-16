@@ -208,7 +208,7 @@ function RgbArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
               step={1}
               value={Math.round(rgb[ch.key] * 255)}
               style={{
-                background: `linear-gradient(to right, #${rgbToHex(lo)}, #${rgbToHex(hi)})`,
+                backgroundImage: `linear-gradient(to right, #${rgbToHex(lo)}, #${rgbToHex(hi)})`,
               }}
               onChange={(e) =>
                 setFg(fromRgb({ ...rgb, [ch.key]: Number(e.target.value) / 255 }, fg.h))
@@ -304,7 +304,7 @@ function LabArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
       <div
         className="hue-slider"
         title="L (lightness)"
-        style={{ background: `linear-gradient(to right, ${stops.join(', ')})` }}
+        style={{ backgroundImage: `linear-gradient(to right, ${stops.join(', ')})` }}
         {...dragPick(lPick)}
       >
         <div className="hue-marker" style={{ left: `${clamp(lab.l, 0, 100)}%` }} />
@@ -347,60 +347,71 @@ function OklchChart({
   label,
   xMax,
   yMax,
+  deps,
   colorAt,
   marker,
   onPick,
-  num,
 }: {
   label: string;
   xMax: number;
   yMax: number;
+  /** cache key: the parameters the field depends on (not the marker) */
+  deps: string;
   colorAt: (xv: number, yv: number) => OKLCH;
   marker: { x: number; y: number };
   onPick: (xv: number, yv: number) => void;
-  num: NumSpec;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
+  const cacheRef = useRef<{ key: string; img: ImageData } | null>(null);
 
   useEffect(() => {
     const canvas = ref.current;
     if (!canvas) return;
-    // render at reduced resolution; CSS scales it up
-    const w = (canvas.width = Math.max(80, Math.floor((canvas.clientWidth || 200) / 2)));
-    const h = (canvas.height = 36);
+    // Render at the device pixel ratio so the field is crisp on high-DPI
+    // displays, and draw the marker in device pixels so it stays circular.
+    const dpr = devicePixelRatio || 1;
+    const w = Math.max(2, Math.round((canvas.clientWidth || 200) * dpr));
+    const h = Math.max(2, Math.round((canvas.clientHeight || 52) * dpr));
+    if (canvas.width !== w) canvas.width = w;
+    if (canvas.height !== h) canvas.height = h;
     const ctx = canvas.getContext('2d')!;
-    const img = ctx.createImageData(w, h);
-    for (let y = 0; y < h; y++) {
-      const yv = yMax * (1 - y / (h - 1));
-      for (let x = 0; x < w; x++) {
-        const ok = colorAt((x / (w - 1)) * xMax, yv);
-        const i = (y * w + x) * 4;
-        if (oklchInGamut(ok)) {
+
+    // The gamut field only depends on `deps`, so drags that just move the
+    // marker reuse the cached pixels.
+    const key = `${deps}|${w}x${h}`;
+    let cache = cacheRef.current;
+    if (!cache || cache.key !== key) {
+      const img = ctx.createImageData(w, h);
+      for (let y = 0; y < h; y++) {
+        const yv = yMax * (1 - y / (h - 1));
+        for (let x = 0; x < w; x++) {
+          const ok = colorAt((x / (w - 1)) * xMax, yv);
+          if (!oklchInGamut(ok)) continue; // out of gamut stays transparent
           const rgb = oklchToRgb(ok);
+          const i = (y * w + x) * 4;
           img.data[i] = rgb.r * 255;
           img.data[i + 1] = rgb.g * 255;
           img.data[i + 2] = rgb.b * 255;
-        } else {
-          // dark checker = outside the sRGB gamut
-          const dark = (x >> 2) % 2 === (y >> 2) % 2;
-          img.data[i] = img.data[i + 1] = dark ? 38 : 51;
-          img.data[i + 2] = dark ? 43 : 56;
+          img.data[i + 3] = 255;
         }
-        img.data[i + 3] = 255;
       }
+      cache = { key, img };
+      cacheRef.current = cache;
     }
-    ctx.putImageData(img, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    ctx.putImageData(cache.img, 0, 0);
+
     const mx = clamp(marker.x / xMax, 0, 1) * (w - 1);
     const my = (1 - clamp(marker.y / yMax, 0, 1)) * (h - 1);
     ctx.beginPath();
-    ctx.arc(mx, my, 3.5, 0, Math.PI * 2);
+    ctx.arc(mx, my, 4.5 * dpr, 0, Math.PI * 2);
+    ctx.lineWidth = 1.5 * dpr;
     ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 1.4;
     ctx.stroke();
     ctx.beginPath();
-    ctx.arc(mx, my, 4.6, 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-    ctx.lineWidth = 1;
+    ctx.arc(mx, my, 5.6 * dpr, 0, Math.PI * 2);
+    ctx.lineWidth = 1 * dpr;
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
     ctx.stroke();
   });
 
@@ -415,19 +426,58 @@ function OklchChart({
       <div className="ok-chart-wrap" {...dragPick(pick)}>
         <canvas ref={ref} className="ok-chart" />
       </div>
+    </div>
+  );
+}
+
+/** Regular one-axis slider (like the RGB rows) under each gamut diagram. */
+function OklchSlider({
+  value,
+  min,
+  max,
+  step,
+  digits,
+  colorAt,
+  onChange,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  digits: number;
+  colorAt: (v: number) => OKLCH;
+  onChange: (v: number) => void;
+}) {
+  const stops: string[] = [];
+  for (let i = 0; i <= 12; i++) {
+    const v = min + ((max - min) * i) / 12;
+    stops.push(`#${rgbToHex(oklchToRgb(colorAt(v)))} ${(i / 12) * 100}%`);
+  }
+  return (
+    <label className="channel-row ok-sub">
+      <span className="ch-label" />
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        style={{ backgroundImage: `linear-gradient(to right, ${stops.join(', ')})` }}
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
       <input
         className="num ok-num"
         type="number"
-        min={num.min}
-        max={num.max}
-        step={num.step ?? 1}
-        value={Number(num.value.toFixed(num.digits ?? 0))}
+        min={min}
+        max={max}
+        step={step}
+        value={Number(value.toFixed(digits))}
         onChange={(e) => {
           const v = Number(e.target.value);
-          if (Number.isFinite(v)) num.onChange(clamp(v, num.min, num.max));
+          if (Number.isFinite(v)) onChange(clamp(v, min, max));
         }}
       />
-    </div>
+    </label>
   );
 }
 
@@ -445,52 +495,56 @@ function OklchArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
         label="L"
         xMax={1}
         yMax={C_MAX}
+        deps={`h${ok.h.toFixed(2)}`}
         colorAt={(l, c) => ({ l, c, h: ok.h })}
         marker={{ x: ok.l, y: ok.c }}
         onPick={(l, c) => apply({ l, c, h: ok.h })}
-        num={{
-          label: 'L',
-          value: ok.l * 100,
-          min: 0,
-          max: 100,
-          digits: 1,
-          onChange: (v) => apply({ ...ok, l: v / 100 }),
-        }}
+      />
+      <OklchSlider
+        value={ok.l * 100}
+        min={0}
+        max={100}
+        step={0.5}
+        digits={1}
+        colorAt={(v) => ({ ...ok, l: v / 100 })}
+        onChange={(v) => apply({ ...ok, l: v / 100 })}
       />
       <OklchChart
         label="C"
         xMax={360}
         yMax={C_MAX}
+        deps={`l${ok.l.toFixed(3)}`}
         colorAt={(h, c) => ({ l: ok.l, c, h })}
         marker={{ x: ok.h, y: ok.c }}
         onPick={(h, c) => apply({ l: ok.l, c, h })}
-        num={{
-          label: 'C',
-          value: ok.c,
-          min: 0,
-          max: C_MAX,
-          step: 0.005,
-          digits: 3,
-          onChange: (v) => apply({ ...ok, c: v }),
-        }}
+      />
+      <OklchSlider
+        value={ok.c}
+        min={0}
+        max={C_MAX}
+        step={0.002}
+        digits={3}
+        colorAt={(v) => ({ ...ok, c: v })}
+        onChange={(v) => apply({ ...ok, c: v })}
       />
       <OklchChart
         label="H"
         xMax={360}
         yMax={1}
+        deps={`c${ok.c.toFixed(4)}`}
         colorAt={(h, l) => ({ l, c: ok.c, h })}
         marker={{ x: ok.h, y: ok.l }}
         onPick={(h, l) => apply({ l, c: ok.c, h })}
-        num={{
-          label: 'H',
-          value: ok.h,
-          min: 0,
-          max: 360,
-          digits: 1,
-          onChange: (v) => apply({ ...ok, h: v }),
-        }}
       />
-      {!oklchInGamut(ok) && <div className="ok-warn">outside sRGB — shown clamped</div>}
+      <OklchSlider
+        value={ok.h}
+        min={0}
+        max={360}
+        step={1}
+        digits={1}
+        colorAt={(v) => ({ ...ok, h: v })}
+        onChange={(v) => apply({ ...ok, h: v })}
+      />
     </div>
   );
 }
@@ -507,8 +561,6 @@ export function ColorPicker() {
 
   return (
     <div className="panel color-panel">
-      <div className="panel-title">Color</div>
-
       {/* model tabs stay at the top so they don't move as panel height changes */}
       <div className="mode-tabs">
         {(['hsb', 'rgb', 'lab', 'oklch'] as Mode[]).map((m) => (

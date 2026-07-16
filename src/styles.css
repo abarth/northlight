@@ -904,6 +904,9 @@ select {
   border-radius: 5px;
   border: 1px solid rgba(0, 0, 0, 0.4);
   outline: none;
+  /* keep the gradient tile from wrapping into the border pixels */
+  background-clip: padding-box;
+  background-repeat: no-repeat;
 }
 
 .channel-row input[type='range']::-webkit-slider-thumb {
@@ -958,7 +961,7 @@ select {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 6px 0;
+  margin: 6px 0 0;
 }
 
 .ok-chart-wrap {
@@ -983,6 +986,11 @@ input.ok-num {
   width: 52px;
 }
 
+/* the slider sits directly under its gamut diagram */
+.channel-row.ok-sub {
+  margin: 2px 0 10px;
+}
+
 /* compact numeric readouts (HSB / Lab) */
 .values-row {
   display: flex;
@@ -1000,12 +1008,6 @@ input.ok-num {
 .values-field .num {
   width: 100%;
   min-width: 0;
-}
-
-.ok-warn {
-  color: #e2b054;
-  font-size: 10px;
-  margin: 2px 0 4px;
 }
 
 /* layers */

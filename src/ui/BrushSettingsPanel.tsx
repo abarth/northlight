@@ -111,9 +111,11 @@ export function BrushSettingsPanel() {
 
   return (
     <div className="panel brush-settings-panel">
-      <div className="panel-title">
-        Brush Settings {toolKey === 'eraser' ? '(Eraser)' : ''}
-      </div>
+      {toolKey === 'eraser' && (
+        <div className="hint" style={{ marginBottom: 6 }}>
+          Editing the eraser
+        </div>
+      )}
 
       <PanelSection title="Brush Tip Shape" open={open === 'tip'} onOpen={() => openIt('tip')}>
         {tipRow('Tip', s.tip.shape, (v) => sect('tip', { shape: v }))}

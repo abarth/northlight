@@ -54,7 +54,7 @@ export function BrushesPanel() {
   return (
     <div className="panel brushes-panel">
       <div className="panel-title-row">
-        <div className="panel-title">Brushes {toolKey === 'eraser' ? '(Eraser)' : ''}</div>
+        <span className="hint">{toolKey === 'eraser' ? 'Editing the eraser' : ''}</span>
         <button
           className="btn small"
           title="Import brushes from a Photoshop .abr file"
