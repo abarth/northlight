@@ -159,7 +159,9 @@ airbrush toggle, **Smoothing**, and the pressure-controls-size button.
   Rotate (15° snap with Shift), Skew, Distort, Perspective, plus instant
   Rotate 180°/90° CW/90° CCW and Flip Horizontal/Vertical. Corner/edge
   handles, rotate outside the box, Alt scales from the center, Ctrl distorts
-  or skews, Enter/double-click applies, Esc cancels.
+  or skews, Enter/double-click applies, Esc cancels. The pointer shows what
+  a drag will do — rotation-aware resize arrows on the handles (a box
+  rotated 45° shows diagonal arrows) and curved rotate arrows outside.
 - Every preview resamples the pristine snapshot through a single homography
   on the GPU, so nothing degrades while you drag.
 
@@ -177,12 +179,15 @@ airbrush toggle, **Smoothing**, and the pressure-controls-size button.
   Image**.
 
 ### Color
-- Photoshop-style picker (sidebar tab): saturation/brightness square + hue
-  slider.
-- Numeric editing in **HSB**, **RGB**, and **Lab** (CIE Lab, D50 with
-  Bradford adaptation — same setup as Photoshop/CSS; out-of-gamut Lab values
-  clamp to sRGB), plus hex input and foreground/background swatches
-  (`X` swap, `D` reset).
+- Model-specific pickers (tabs at the top of the panel): **HSB** with the
+  saturation/brightness square + hue strip; **RGB** with gradient sliders;
+  **Lab** with an a/b plane and an L strip (CIE Lab, D50 with Bradford
+  adaptation — same setup as Photoshop/CSS; out-of-gamut values clamp to
+  sRGB); and **OKLCH** with oklch.com-style gamut-aware L/C/H strips that
+  render only the slice inside the sRGB gamut (out-of-gamut regions show a
+  checker), with an out-of-gamut warning when the current color clips.
+- Numeric channels + hex input in every mode, foreground/background
+  swatches (`X` swap, `D` reset).
 
 ### Navigation & workflow
 - Pan tool (or hold **Space**), zoom tool (click / Alt-click / scrubby drag),

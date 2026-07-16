@@ -1122,6 +1122,26 @@ const TEST = `
       JSON.stringify(rt));
     assert('hex: parse + format', C.rgbToHex(C.hexToRgb('#3d8bff')) === '3d8bff',
       C.rgbToHex(C.hexToRgb('#3d8bff')));
+
+    // OKLCH (reference values from Ottosson / CSS Color 4)
+    const okWhite = C.rgbToOklch({ r: 1, g: 1, b: 1 });
+    assert('OKLCH: white is L=1, C=0',
+      near(okWhite.l, 1, 1e-3) && near(okWhite.c, 0, 1e-4), JSON.stringify(okWhite));
+    const okRed = C.rgbToOklch({ r: 1, g: 0, b: 0 });
+    assert('OKLCH: sRGB red matches reference (0.628, 0.258, 29.2)',
+      near(okRed.l, 0.628, 0.002) && near(okRed.c, 0.2577, 0.002) &&
+      near(okRed.h, 29.23, 0.3),
+      JSON.stringify(okRed));
+    const okRt = C.oklchToRgb(okRed);
+    assert('OKLCH: red round-trips',
+      near(okRt.r, 1, 0.002) && near(okRt.g, 0, 0.004) && near(okRt.b, 0, 0.004),
+      JSON.stringify(okRt));
+    assert('OKLCH: gamut test rejects impossible chroma',
+      C.oklchInGamut({ l: 0.6, c: 0.1, h: 30 }) === true &&
+      C.oklchInGamut({ l: 0.6, c: 0.35, h: 30 }) === false, '');
+    const maxC = C.oklchMaxChroma(okRed.l, okRed.h);
+    assert('OKLCH: max chroma at reds L/H equals reds chroma',
+      near(maxC, okRed.c, 0.003), 'maxC=' + maxC);
   }
 
   results.push(lost ? 'DEVICE-LOST ' + lost : 'device: alive');

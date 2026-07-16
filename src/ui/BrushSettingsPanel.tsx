@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore, type PaintToolId } from '../store';
-import type { BrushSettings } from '../brush/types';
+import type { BrushSettings, TipShape } from '../brush/types';
 import { PATTERNS, TEXTURE_BLENDS, TIP_SHAPES } from '../brush/types';
 import { registeredPatternOptions } from '../brush/patterns';
+import { tipCanvas } from './brushPreview';
 import {
   CheckRow,
   ControlRow,
@@ -11,6 +12,65 @@ import {
   SelectRow,
   ValSlider,
 } from './controls';
+
+/** Thumbnail of a brush tip: the alpha bitmap for sampled/textured tips. */
+function TipThumb({ shape }: { shape: TipShape }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+    const s = (canvas.width = canvas.height = 36);
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = '#f2f2f2';
+    ctx.fillRect(0, 0, s, s);
+    if (shape === 'round') {
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.arc(s / 2, s / 2, s * 0.38, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      try {
+        ctx.drawImage(tipCanvas(shape), 2, 2, s - 4, s - 4);
+      } catch {
+        // unknown tip id: leave the blank swatch
+      }
+    }
+  }, [shape]);
+
+  return <canvas ref={ref} className="tip-shape-thumb" title={String(shape)} />;
+}
+
+/** Tip selector with a live thumbnail of the tip texture. */
+function TipRow({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: TipShape;
+  options: { id: string; label: string }[];
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="ctl-row">
+      <span className="ctl-label">{label}</span>
+      <TipThumb shape={value} />
+      <select
+        className="ctl-grow"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      >
+        {options.map((o) => (
+          <option key={o.id} value={o.id}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
 
 /**
  * Photoshop-style Brush Settings panel: Brush Tip Shape plus the dynamics
@@ -34,6 +94,10 @@ export function BrushSettingsPanel() {
       ? TIP_SHAPES
       : [...TIP_SHAPES, { id: current, label: `Imported (${current.split(':')[1] ?? '?'})` }];
 
+  const tipRow = (label: string, value: TipShape, onChange: (v: string) => void) => (
+    <TipRow label={label} value={value} options={tipOptions(value)} onChange={onChange} />
+  );
+
   /** Builtin patterns plus everything imported from ABR files. */
   const patternOptions = (current: string) => {
     const opts = [
@@ -52,12 +116,7 @@ export function BrushSettingsPanel() {
       </div>
 
       <PanelSection title="Brush Tip Shape" open={open === 'tip'} onOpen={() => openIt('tip')}>
-        <SelectRow
-          label="Tip"
-          value={s.tip.shape}
-          options={tipOptions(s.tip.shape)}
-          onChange={(v) => sect('tip', { shape: v })}
-        />
+        {tipRow('Tip', s.tip.shape, (v) => sect('tip', { shape: v }))}
         <ValSlider
           label="Size"
           value={s.tip.size}
@@ -273,12 +332,7 @@ export function BrushSettingsPanel() {
         open={open === 'dual'}
         onOpen={() => openIt('dual')}
       >
-        <SelectRow
-          label="Tip"
-          value={s.dual.shape}
-          options={tipOptions(s.dual.shape)}
-          onChange={(v) => sect('dual', { shape: v })}
-        />
+        {tipRow('Tip', s.dual.shape, (v) => sect('dual', { shape: v }))}
         <PctSlider
           label="Hardness"
           value={s.dual.hardness}

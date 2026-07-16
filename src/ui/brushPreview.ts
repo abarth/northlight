@@ -5,7 +5,7 @@ import type { BrushSettings, TipShape } from '../brush/types';
 /** Black-tinted canvas of a tip's alpha map, for preview stamping. */
 const tipCanvasCache = new Map<string, HTMLCanvasElement>();
 
-function tipCanvas(shape: TipShape): HTMLCanvasElement {
+export function tipCanvas(shape: TipShape): HTMLCanvasElement {
   let c = tipCanvasCache.get(shape);
   if (!c) {
     const map = getTip(shape);

@@ -100,6 +100,61 @@ const rectCorners = (r: { x: number; y: number; w: number; h: number }): Point[]
   { x: r.x, y: r.y + r.h },
 ];
 
+/**
+ * Resize cursor for an on-screen axis, quantized to the four CSS resize
+ * cursors. Because the axis comes from the live quad geometry, a box rotated
+ * 90° swaps horizontal/vertical arrows and ~45° rotations show diagonals,
+ * like Photoshop.
+ */
+function resizeCursorFor(dx: number, dy: number): string {
+  let ang = (Math.atan2(dy, dx) * 180) / Math.PI; // y-down screen space
+  ang = ((ang % 180) + 180) % 180;
+  if (ang < 22.5 || ang >= 157.5) return 'ew-resize';
+  if (ang < 67.5) return 'nwse-resize';
+  if (ang < 112.5) return 'ns-resize';
+  return 'nesw-resize';
+}
+
+const rotateCursorCache = new Map<number, string>();
+
+/**
+ * Curved double-arrow rotation cursor, oriented for a pointer sitting at
+ * `angle` (radians) from the transform box center; the arc bows away from
+ * the box. Built as an SVG data URI and cached per 45° step.
+ */
+function rotateCursor(angle: number): string {
+  const deg =
+    ((Math.round((angle * 180) / Math.PI / 45) * 45) % 360 + 360) % 360;
+  let cur = rotateCursorCache.get(deg);
+  if (cur) return cur;
+
+  // arc from (16,4) to (16,20), radius 9, bowing toward +x
+  const head = (px: number, py: number, dx: number, dy: number) => {
+    const leg = (rot: number) => {
+      const ca = Math.cos(rot);
+      const sa = Math.sin(rot);
+      const hx = dx * ca - dy * sa;
+      const hy = dx * sa + dy * ca;
+      return `M${px} ${py} l${(hx * 6).toFixed(1)} ${(hy * 6).toFixed(1)}`;
+    };
+    return leg(0.45) + leg(-0.45);
+  };
+  // arrowhead legs point back along the arc so the tips point outward
+  const paths =
+    '<path d="M16 4 A 9 9 0 0 1 16 20"/>' +
+    `<path d="${head(16, 4, 0.894, 0.447)}"/>` +
+    `<path d="${head(16, 20, 0.894, -0.447)}"/>`;
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24">` +
+    `<g transform="rotate(${deg} 12 12)" fill="none" stroke-linecap="round">` +
+    `<g stroke="%23fff" stroke-width="4.5">${paths}</g>` +
+    `<g stroke="%23000" stroke-width="1.8">${paths}</g>` +
+    `</g></svg>`;
+  cur = `url("data:image/svg+xml,${svg.replace(/"/g, "'")}") 12 12, auto`;
+  rotateCursorCache.set(deg, cur);
+  return cur;
+}
+
 /** Shift-drag: snap movement to horizontal / vertical / 45° diagonals. */
 function constrain45(dx: number, dy: number): [number, number] {
   if (Math.abs(dx) > 2 * Math.abs(dy)) return [dx, 0];
@@ -150,6 +205,9 @@ export function CanvasView() {
   const tool = useStore((s) => s.tool);
   const gpuError = useStore((s) => s.gpuError);
   const fitNonce = useStore((s) => s.fitNonce);
+  const hasTransform = useStore((s) => s.transform !== null);
+  /** cursor for the transform overlay element under the pointer */
+  const [hoverCursor, setHoverCursor] = useState<string | null>(null);
   /** boolean-op override for an in-progress polygonal lasso */
   const polyOpRef = useRef<SelectionOp>('new');
 
@@ -188,6 +246,10 @@ export function CanvasView() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!hasTransform) setHoverCursor(null);
+  }, [hasTransform, tool]);
 
   // re-fit after document size changes (New / Image Size / Canvas Size / ...)
   useEffect(() => {
@@ -571,6 +633,88 @@ export function CanvasView() {
     return { op: 'rotate', index: 0, zone: 'outside' };
   }
 
+  /**
+   * Cursor for the transform overlay under the pointer: rotation-aware
+   * resize arrows on the handles (axes come from the live quad geometry, so
+   * a rotated box shows rotated arrows), curved rotate arrows outside, and
+   * a move cursor inside. Also covers the move tool's idle selection box.
+   */
+  function transformCursorAt(screen: Point, ctrl: boolean): string | null {
+    const s = useStore.getState();
+    let tr = s.transform;
+    if (!tr && s.tool === 'move' && s.moveShowTransform && s.selectionPaths) {
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const path of s.selectionPaths) {
+        for (const p of path) {
+          if (p.x < minX) minX = p.x;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.y > maxY) maxY = p.y;
+        }
+      }
+      if (!Number.isFinite(minX)) return null;
+      const rect = {
+        x: minX,
+        y: minY,
+        w: Math.max(maxX - minX, 1),
+        h: Math.max(maxY - minY, 1),
+      };
+      tr = {
+        target: 'layer',
+        mode: 'free',
+        layerId: s.activeLayerId,
+        rect,
+        quad: rectCorners(rect),
+        duplicate: false,
+        showHandles: true,
+        engaged: false,
+      };
+    }
+    if (!tr) return null;
+    const h = transformHandleAt(tr, screen, ctrl);
+    const moveTool = s.tool === 'move' && !tr.engaged;
+    if (moveTool && (!tr.showHandles || h.zone === 'inside' || h.zone === 'outside')) {
+      return 'move';
+    }
+    const qs = tr.quad.map(docToScreen);
+    const center = {
+      x: (qs[0].x + qs[1].x + qs[2].x + qs[3].x) / 4,
+      y: (qs[0].y + qs[1].y + qs[2].y + qs[3].y) / 4,
+    };
+    const mid = (i: number) => ({
+      x: (qs[i].x + qs[(i + 1) % 4].x) / 2,
+      y: (qs[i].y + qs[(i + 1) % 4].y) / 2,
+    });
+    switch (h.op) {
+      case 'move':
+      case 'edgeMove':
+        return 'move';
+      case 'rotate':
+        return rotateCursor(Math.atan2(screen.y - center.y, screen.x - center.x));
+      case 'scale': {
+        const o = qs[(h.index + 2) % 4];
+        return resizeCursorFor(qs[h.index].x - o.x, qs[h.index].y - o.y);
+      }
+      case 'scaleAxis': {
+        const m1 = mid(h.index);
+        const m2 = mid((h.index + 2) % 4);
+        return resizeCursorFor(m1.x - m2.x, m1.y - m2.y);
+      }
+      case 'skew': {
+        // skew slides along the edge, so the arrows follow the edge itself
+        const a2 = qs[h.index];
+        const b2 = qs[(h.index + 1) % 4];
+        return resizeCursorFor(b2.x - a2.x, b2.y - a2.y);
+      }
+      case 'distort':
+      case 'perspective':
+        return 'crosshair';
+    }
+  }
+
   /** Builds the drag record for a transform-box interaction. */
   function makeTransformDrag(
     tr: TransformState,
@@ -877,6 +1021,9 @@ export function CanvasView() {
   function onPointerMove(e: React.PointerEvent) {
     const screen = eventToScreen(e.nativeEvent);
     cursorRef.current = { ...screen, over: true };
+    if (!dragRef.current) {
+      setHoverCursor(transformCursorAt(screen, e.ctrlKey || e.metaKey));
+    }
     const drag = dragRef.current;
     if (polyRef.current) polyPreviewRef.current = screenToDoc(screen);
     if (!drag) return;
@@ -1192,12 +1339,13 @@ export function CanvasView() {
     <div
       ref={wrapRef}
       className="canvas-wrap"
-      style={{ cursor: cursorStyle[tool] ?? 'default', touchAction: 'none' }}
+      style={{ cursor: hoverCursor ?? cursorStyle[tool] ?? 'default', touchAction: 'none' }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerLeave={() => {
         cursorRef.current.over = false;
+        setHoverCursor(null);
       }}
       onDoubleClick={() => {
         if (useStore.getState().transform) commitTransform();
