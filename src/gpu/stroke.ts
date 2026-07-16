@@ -48,6 +48,12 @@ export class StrokeSession {
   /** path distance at which the next dual mask stamp is due */
   private dualNext = 0;
   /**
+   * Ahead-of-pen mask stamps placed at PREDICTED positions (path
+   * extrapolation). If the stroke turns away from the prediction, the stamp
+   * is re-placed so the walked path never loses mask coverage.
+   */
+  private pendingDual: { t: number; x: number; y: number }[] = [];
+  /**
    * Pending stamp batches in emission order. Order matters for the dual
    * brush: a primary dab is gated by the dual mask as it exists when the
    * dab is drawn, so each segment's mask stamps render before its dabs.
@@ -122,6 +128,7 @@ export class StrokeSession {
     this.residual = 0;
     this.stepIndex = 0;
     this.pathDist = 0;
+    this.pendingDual = [];
     // dual mask first so the very first dab is gated by it; the train's
     // next stamp fires ahead of the pen once a direction exists
     this.emitDual(sample.x, sample.y, sample);
@@ -215,19 +222,43 @@ export class StrokeSession {
       const lookahead = (this.settings.tip.size + dual.size) / 2;
       const end = this.pathDist + dist;
       const step = this.dualSpacingPx();
+      // On-path position for train distance t, or the straight-line
+      // prediction beyond the walked path.
+      const posAt = (t: number): { x: number; y: number } => {
+        if (t <= end) {
+          const f = Math.max(t - this.pathDist, 0) / dist;
+          return { x: a.x + dx * f, y: a.y + dy * f };
+        }
+        const ahead = t - end;
+        return {
+          x: b.x + Math.cos(this.direction) * ahead,
+          y: b.y + Math.sin(this.direction) * ahead,
+        };
+      };
+      // Predictions are provisional: whenever the actual path (or a fresher
+      // prediction) diverges from where a pending stamp was placed, stamp
+      // again — the mask only ever gains coverage, so a wrong guess after a
+      // direction reversal can't leave the real path without its mask.
+      const tol = dual.size * 0.25;
+      for (const rec of this.pendingDual) {
+        const p = posAt(rec.t);
+        if (Math.hypot(p.x - rec.x, p.y - rec.y) > tol) {
+          const at = rec.t <= end ? lerpSample(Math.max(rec.t - this.pathDist, 0) / dist) : b;
+          this.emitDual(p.x, p.y, at);
+          rec.x = p.x;
+          rec.y = p.y;
+        }
+      }
+      this.pendingDual = this.pendingDual.filter((rec) => rec.t > end);
       for (let guard = 0; guard < 10000 && this.dualNext <= end + lookahead; guard++) {
         const t = this.dualNext;
         this.dualNext += step;
+        const p = posAt(t);
         if (t <= end) {
-          const at = lerpSample((t - this.pathDist) / dist);
-          this.emitDual(at.x, at.y, at);
+          this.emitDual(p.x, p.y, lerpSample((t - this.pathDist) / dist));
         } else {
-          const ahead = t - end;
-          this.emitDual(
-            b.x + Math.cos(this.direction) * ahead,
-            b.y + Math.sin(this.direction) * ahead,
-            b,
-          );
+          this.emitDual(p.x, p.y, b);
+          this.pendingDual.push({ t, ...p });
         }
       }
     }

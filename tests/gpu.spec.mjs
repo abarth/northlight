@@ -395,6 +395,32 @@ const TEST = `
       px(d2, 210, 220)[0] <= 60, 'v=' + px(d2, 210, 220)[0]);
     eng.cancelStroke();
 
+    // Direction reversal: stamps predicted ahead along the initial (upward)
+    // direction must be re-placed when the stroke turns around — otherwise
+    // the downward leg is missing a band of mask (a rectangular hole).
+    const rev = makeBrush({
+      tip: { size: 40, hardness: 1, spacing: 0.1 },
+      dual: { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',
+        size: 60, spacing: 1.0, scatter: 0, bothAxes: false, count: 1 },
+      smoothing: 0,
+    });
+    eng.beginStroke(NL.brush.engineStrokeParams(rev, 'paint'));
+    const sr = new NL.StrokeSession(eng, rev,
+      { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 } });
+    sr.down(samp(200, 150));
+    sr.move([samp(200, 140)]);
+    sr.move([samp(200, 130)]); // small upward start...
+    for (let y = 140; y <= 290; y += 10) sr.move([samp(200, y)]); // ...then reverse
+    sr.up();
+    const dr = await read();
+    let holes = 0;
+    for (let y = 155; y <= 260; y += 1) {
+      if (px(dr, 200, y)[0] >= 250) holes++;
+    }
+    assert('dual reversal: no missing band after reversing direction',
+      holes === 0, 'unpainted rows=' + holes);
+    eng.cancelStroke();
+
     // With abutting mask stamps (spacing 100%, dual larger than primary) the
     // stroke must be CONTINUOUS — the case that used to leave seams/gaps.
     const cont = makeBrush({
