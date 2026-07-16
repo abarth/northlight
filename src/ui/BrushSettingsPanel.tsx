@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useStore, type PaintToolId } from '../store';
 import type { BrushSettings } from '../brush/types';
 import { PATTERNS, TEXTURE_BLENDS, TIP_SHAPES } from '../brush/types';
+import { registeredPatternOptions } from '../brush/patterns';
 import {
   CheckRow,
   ControlRow,
@@ -32,6 +33,17 @@ export function BrushSettingsPanel() {
     TIP_SHAPES.some((t) => t.id === current)
       ? TIP_SHAPES
       : [...TIP_SHAPES, { id: current, label: `Imported (${current.split(':')[1] ?? '?'})` }];
+
+  /** Builtin patterns plus everything imported from ABR files. */
+  const patternOptions = (current: string) => {
+    const opts = [
+      ...PATTERNS,
+      ...registeredPatternOptions().map((p) => ({ id: p.id, label: `${p.label} (imported)` })),
+    ];
+    return opts.some((p) => p.id === current)
+      ? opts
+      : [...opts, { id: current, label: 'Imported' }];
+  };
 
   return (
     <div className="panel brush-settings-panel">
@@ -195,7 +207,7 @@ export function BrushSettingsPanel() {
         <SelectRow
           label="Pattern"
           value={s.texture.pattern}
-          options={PATTERNS}
+          options={patternOptions(s.texture.pattern)}
           onChange={(v) => sect('texture', { pattern: v })}
         />
         <PctSlider
@@ -311,6 +323,17 @@ export function BrushSettingsPanel() {
           min={1}
           max={16}
           onChange={(v) => sect('dual', { count: Math.round(v) })}
+        />
+        <PctSlider
+          label="Count Jitter"
+          value={s.dual.countJitter}
+          onChange={(v) => sect('dual', { countJitter: v })}
+        />
+        <CheckRow
+          label="Flip"
+          checked={s.dual.flip}
+          onChange={(v) => sect('dual', { flip: v })}
+          title="Randomly mirror the secondary tip per stamp"
         />
       </PanelSection>
 

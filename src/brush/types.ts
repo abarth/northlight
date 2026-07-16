@@ -30,10 +30,32 @@ export interface DynamicControl {
  */
 export type TipShape = 'round' | 'chalk' | 'spatter' | 'grain' | (string & {});
 
-export type PatternId = 'paper' | 'canvas' | 'sponge' | 'clouds' | 'speckle';
+/**
+ * Texture patterns. The five names are built-in procedural patterns; any
+ * other string is a pattern registered at runtime (e.g. imported from a
+ * Photoshop .abr file's patt section).
+ */
+export type PatternId =
+  | 'paper'
+  | 'canvas'
+  | 'sponge'
+  | 'clouds'
+  | 'speckle'
+  | (string & {});
 
 /** How texture/dual-brush values combine with brush coverage. */
-export type TextureBlend = 'multiply' | 'subtract' | 'darken' | 'overlay' | 'height';
+export type TextureBlend =
+  | 'multiply'
+  | 'subtract'
+  | 'darken'
+  | 'overlay'
+  | 'height'
+  | 'lighten'
+  | 'screen'
+  | 'color-dodge'
+  | 'color-burn'
+  | 'linear-burn'
+  | 'hard-mix';
 
 export interface BrushTip {
   shape: TipShape;
@@ -122,6 +144,10 @@ export interface DualBrush {
   bothAxes: boolean;
   /** 1..16 */
   count: number;
+  /** 0..1 random reduction of count */
+  countJitter: number;
+  /** randomly mirror the secondary tip per stamp */
+  flip: boolean;
 }
 
 export interface ColorDynamics {
@@ -205,14 +231,27 @@ export const TEXTURE_BLENDS: { id: TextureBlend; label: string }[] = [
   { id: 'darken', label: 'Darken' },
   { id: 'overlay', label: 'Overlay' },
   { id: 'height', label: 'Height' },
+  { id: 'lighten', label: 'Lighten' },
+  { id: 'screen', label: 'Screen' },
+  { id: 'color-dodge', label: 'Color Dodge' },
+  { id: 'color-burn', label: 'Color Burn' },
+  { id: 'linear-burn', label: 'Linear Burn' },
+  { id: 'hard-mix', label: 'Hard Mix' },
 ];
 
+/** Order matches the switch in the shaders' applyTexToAlpha. */
 export const TEXTURE_BLEND_INDEX: Record<TextureBlend, number> = {
   multiply: 0,
   subtract: 1,
   darken: 2,
   overlay: 3,
   height: 4,
+  lighten: 5,
+  screen: 6,
+  'color-dodge': 7,
+  'color-burn': 8,
+  'linear-burn': 9,
+  'hard-mix': 10,
 };
 
 export const TIP_SHAPES: { id: TipShape; label: string }[] = [

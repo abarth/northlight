@@ -269,7 +269,11 @@ export function emitDualStamps(
   rng: () => number,
   out: number[],
 ): void {
-  for (let i = 0; i < dual.count; i++) {
+  let count = dual.count;
+  if (dual.countJitter > 0) {
+    count = Math.max(1, Math.round(count * (1 - dual.countJitter * rng())));
+  }
+  for (let i = 0; i < count; i++) {
     let sx = x;
     let sy = y;
     if (dual.scatter > 0) {
@@ -284,6 +288,11 @@ export function emitDualStamps(
         sy += Math.sin(n) * dist;
       }
     }
-    out.push(sx, sy, dual.size / 2, 1, 0, 1, 1, 1, 1, 0, 1);
+    let flags = 0;
+    if (dual.flip) {
+      if (rng() < 0.5) flags += FLAG_FLIP_X;
+      if (rng() < 0.5) flags += FLAG_FLIP_Y;
+    }
+    out.push(sx, sy, dual.size / 2, 1, 0, 1, 1, 1, 1, flags, 1);
   }
 }

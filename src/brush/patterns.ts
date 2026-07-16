@@ -239,14 +239,34 @@ const patternCache = new Map<PatternId, GrayMap>();
 const tipCache = new Map<TipShape, GrayMap>();
 /** Sampled tips registered at runtime (e.g. imported from .abr files). */
 const registeredTips = new Map<string, GrayMap>();
+/** Patterns registered at runtime (e.g. imported from .abr patt sections). */
+const registeredPatterns = new Map<string, { map: GrayMap; label: string }>();
+
+const BUILTIN_PATTERNS: PatternId[] = ['paper', 'canvas', 'sponge', 'clouds', 'speckle'];
 
 export function getPattern(id: PatternId): GrayMap {
+  const registered = registeredPatterns.get(id);
+  if (registered) return registered.map;
   let p = patternCache.get(id);
   if (!p) {
-    p = makePattern(id);
+    p = makePattern(BUILTIN_PATTERNS.includes(id) ? id : 'paper');
     patternCache.set(id, p);
   }
   return p;
+}
+
+/** Registers an imported pattern (square grayscale map) under an id. */
+export function registerPattern(id: string, map: GrayMap, label: string): void {
+  registeredPatterns.set(id, { map, label });
+}
+
+export function isRegisteredPattern(id: string): boolean {
+  return registeredPatterns.has(id);
+}
+
+/** UI options for all registered (imported) patterns. */
+export function registeredPatternOptions(): { id: string; label: string }[] {
+  return [...registeredPatterns].map(([id, { label }]) => ({ id, label }));
 }
 
 const BUILTIN_TIPS: TipShape[] = ['round', 'chalk', 'spatter', 'grain'];

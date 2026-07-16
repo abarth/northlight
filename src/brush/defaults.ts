@@ -59,6 +59,8 @@ export function defaultBrush(): BrushSettings {
       scatter: 0,
       bothAxes: true,
       count: 1,
+      countJitter: 0,
+      flip: false,
     },
     color: {
       enabled: false,

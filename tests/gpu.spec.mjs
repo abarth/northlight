@@ -520,7 +520,22 @@ const TEST = `
     NL.store.getState().applyPreset('soft-round', 'brush');
   }
 
-  // ---- 21b. ABR import: legacy v2, modern v6.2 with descriptor, painting ----
+  // ---- 21b. ABR import ----
+  //
+  // The synthesized fixtures below replicate the descriptor schema observed
+  // in real Photoshop ABR files. Files analyzed while building the parser
+  // (all fetched from public GitHub repositories):
+  //   https://raw.githubusercontent.com/MaousamaQAQ/Nopressure/main/brushes/Spray_Brush_1.abr   (v6.2)
+  //   https://raw.githubusercontent.com/MaousamaQAQ/Nopressure/main/brushes/Spray_Brush_2.abr   (v6.2)
+  //   https://raw.githubusercontent.com/igdiaysu/Photoshop/main/Brushes/MB%20Starter%20Pack%202021v4.abr (v6.2, texture+dual+patt)
+  //   https://raw.githubusercontent.com/igdiaysu/Photoshop/main/Brushes/Selected.abr            (v6.2, texture+dual+toolOptions)
+  //   https://raw.githubusercontent.com/igdiaysu/Photoshop/main/Brushes/Evenant-Concept-Art-Brush-Pack.abr (v10.2, 117 brushes)
+  //   https://raw.githubusercontent.com/igdiaysu/Photoshop/main/Brushes/Special%20Brushes.abr   (v10.2)
+  //   https://raw.githubusercontent.com/igdiaysu/Photoshop/main/Brushes/Perspective%20Grid.abr  (v10.2)
+  //   https://raw.githubusercontent.com/igdiaysu/Photoshop/main/Brushes/Architect%20Photoshop%20Brushes%205.abr (v6.2)
+  // Format cross-references: GIMP app/core/gimpbrush-load.c (samp header
+  // sizes 47/301), github.com/SonyStone/ABR-Viewer research.md, and
+  // github.com/jlai/brush-viewer ABR.ksy.
   {
     // big-endian binary writer for synthesizing fixture files
     class W {
@@ -541,6 +556,26 @@ const TEST = `
       buffer() { return new Uint8Array(this.b).buffer; }
       get length() { return this.b.length; }
     }
+
+    // Tiny DSL for Actions-format descriptors.
+    const writeDesc = (w, items) => {
+      w.unicode(''); w.dkey('null'); w.u32(items.length);
+      for (const [k, fn] of items) { w.dkey(k); fn(w); }
+    };
+    const T = {
+      untf: (unit, v) => (w) => w.ascii('UntF').ascii(unit).f64(v),
+      text: (s) => (w) => { w.ascii('TEXT'); w.unicode(s); },
+      bool: (b) => (w) => w.ascii('bool').u8(b ? 1 : 0),
+      long: (n) => (w) => { w.ascii('long'); w.u32(n); },
+      enm: (t, v) => (w) => { w.ascii('enum'); w.dkey(t); w.dkey(v); },
+      objc: (items) => (w) => { w.ascii('Objc'); writeDesc(w, items); },
+      list: (items) => (w) => { w.ascii('VlLs'); w.u32(items.length); for (const fn of items) fn(w); },
+    };
+    // dynamics variance object: {bVTy, fStp, jitter%, Mnm%}
+    const dyn = (bVTy, jitter, mnm = 0, fStp = 25) => T.objc([
+      ['bVTy', T.long(bVTy)], ['fStp', T.long(fStp)],
+      ['jitter', T.untf('#Prc', jitter)], ['Mnm ', T.untf('#Prc', mnm)],
+    ]);
 
     // --- v2 fixture: one 16x16 RLE-compressed sampled brush named "Old" ---
     {
@@ -572,108 +607,328 @@ const TEST = `
         tip.size === 16 && tip.data[8 * 16 + 3] === 255 && tip.data[8 * 16 + 12] === 0, '');
     }
 
-    // --- v6.2 fixture: samp bitmap + full descriptor ---
+    // --- v6.2 fixture with the full real-world schema ---
     {
-      const uuid = '01234567-89ab-cdef-0123-456789abcdef'; // 36 chars
-      const w = 8, h = 8;
-      const pixels = [];
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) pixels.push(x < w / 2 ? 255 : 0);
-      }
-      const samp = new W();
-      samp.u8(36).ascii(uuid);
-      samp.raw(new Array(264).fill(0)); // subversion-2 header padding
-      samp.u32(0).u32(0).u32(h).u32(w); // rect
-      samp.u16(8).u8(0); // depth 8, raw
-      samp.raw(pixels);
-      while (samp.length % 4 !== 0) samp.u8(0);
+      const uuidA = '01234567-89ab-cdef-0123-456789abcdef'; // primary tip
+      const uuidB = 'aaaabbbb-cccc-dddd-eeee-ffff00001111'; // dual tip
+      const pattG = 'deadbeef-0000-1111-2222-333344445555'; // gray pattern
+      const pattC = 'cafebabe-9999-8888-7777-666655554444'; // RGB pattern
 
-      // descriptor: Brsh list with one brushPreset
+      // samp: two 8x8 raw tips. Tip A: left half opaque. Tip B: all opaque.
+      const sampEntry = (uuid, pixels) => {
+        const e = new W();
+        e.u8(36).ascii(uuid);
+        e.raw(new Array(301 - 37).fill(0)); // pad header to 301 total
+        e.u32(0).u32(0).u32(8).u32(8);
+        e.u16(8).u8(0);
+        e.raw(pixels);
+        while (e.length % 4 !== 0) e.u8(0);
+        return e;
+      };
+      const pxA = [];
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) pxA.push(x < 4 ? 255 : 0);
+      const sampA = sampEntry(uuidA, pxA);
+      const sampB = sampEntry(uuidB, new Array(64).fill(255));
+
+      // patt: entry 1 = grayscale raw 8x8 vertical gradient; entry 2 = RGB
+      // 4x4 with RLE channels (constant R=200, G=100, B=50 -> luma 127).
+      const pattEntry = (uuid, name, mode, w2, h2, channels) => {
+        const e = new W();
+        e.u32(1).u32(mode).u16(h2).u16(w2);
+        e.unicode(name);
+        e.u8(uuid.length).ascii(uuid);
+        const vma = new W();
+        vma.u32(0).u32(0).u32(h2).u32(w2); // rect
+        vma.u32(24); // max channels
+        let written = 0;
+        for (const ch of channels) {
+          vma.u32(1); // written
+          const chBody = new W();
+          chBody.u32(8); // depth
+          chBody.u32(0).u32(0).u32(h2).u32(w2);
+          chBody.u16(8); // pixel depth
+          if (ch.rle) {
+            chBody.u8(1);
+            for (let y = 0; y < h2; y++) chBody.u16(2); // per-row byte counts
+            for (let y = 0; y < h2; y++) { chBody.u8(256 - (w2 - 1)); chBody.u8(ch.value); } // run of w2
+          } else {
+            chBody.u8(0);
+            chBody.raw(ch.data);
+          }
+          vma.u32(chBody.length); // channel length = 23-byte header + data
+          vma.raw(chBody.b);
+          written++;
+        }
+        for (let i = written; i < 26; i++) vma.u32(0); // unwritten channels
+        e.u32(3).u32(vma.length); // VMAL version + length
+        e.raw(vma.b);
+        return e;
+      };
+      const gradient = [];
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) gradient.push(y * 32);
+      const patt1 = pattEntry(pattG, 'GrayGrad', 1, 8, 8, [{ data: gradient }]);
+      const patt2 = pattEntry(pattC, 'RGBFlat', 3, 4, 4,
+        [{ rle: true, value: 200 }, { rle: true, value: 100 }, { rle: true, value: 50 }]);
+
+      // desc: one brush exercising every mapped section. Note useDualBrush
+      // nested inside dualBrush and the dual tip UUID truncated to 35 chars,
+      // both as observed in real files.
       const desc = new W();
-      desc.u32(16); // versioned descriptor
-      desc.unicode('').dkey('null').u32(1);
-      desc.dkey('Brsh').ascii('VlLs').u32(1).ascii('Objc');
-      desc.unicode('').dkey('brsh').u32(9);
-      desc.dkey('Nm  ').ascii('TEXT').unicode('Fancy');
-      desc.dkey('Brsh').ascii('Objc');
-      {
-        desc.unicode('').dkey('brsh').u32(5);
-        desc.dkey('Dmtr').ascii('UntF').ascii('#Pxl').f64(40);
-        desc.dkey('Spcn').ascii('UntF').ascii('#Prc').f64(30);
-        desc.dkey('Angl').ascii('UntF').ascii('#Ang').f64(15);
-        desc.dkey('Rndn').ascii('UntF').ascii('#Prc').f64(80);
-        desc.dkey('sampledData').ascii('TEXT').unicode(uuid);
-      }
-      desc.dkey('useTipDynamics').ascii('bool').u8(1);
-      desc.dkey('szVr').ascii('Objc');
-      {
-        desc.unicode('').dkey('brVr').u32(3);
-        desc.dkey('bVTy').ascii('long').u32(2); // pen pressure
-        desc.dkey('fStp').ascii('long').u32(25);
-        desc.dkey('jitter').ascii('UntF').ascii('#Prc').f64(30);
-      }
-      desc.dkey('minimumDiameter').ascii('UntF').ascii('#Prc').f64(40);
-      desc.dkey('useScatter').ascii('bool').u8(1);
-      desc.dkey('scatterDynamics').ascii('Objc');
-      {
-        desc.unicode('').dkey('brVr').u32(2);
-        desc.dkey('bVTy').ascii('long').u32(0);
-        desc.dkey('jitter').ascii('UntF').ascii('#Prc').f64(150);
-      }
-      desc.dkey('Cnt ').ascii('long').u32(3);
-      desc.dkey('Wtdg').ascii('bool').u8(1);
+      desc.u32(16); // versioned descriptor prefix
+      writeDesc(desc, [
+        ['Brsh', T.list([
+          T.objc([
+            ['Nm  ', T.text('Fancy')],
+            ['Brsh', T.objc([
+              ['Dmtr', T.untf('#Pxl', 40)],
+              ['Angl', T.untf('#Ang', 15)],
+              ['Rndn', T.untf('#Prc', 80)],
+              ['Spcn', T.untf('#Prc', 30)],
+              ['Intr', T.bool(true)],
+              ['flipX', T.bool(false)],
+              ['flipY', T.bool(false)],
+              ['sampledData', T.text(uuidA)],
+            ])],
+            ['useTipDynamics', T.bool(true)],
+            ['flipX', T.bool(true)], // flip X *jitter*
+            ['flipY', T.bool(false)],
+            ['minimumDiameter', T.untf('#Prc', 40)],
+            ['minimumRoundness', T.untf('#Prc', 30)],
+            ['tiltScale', T.untf('#Prc', 200)],
+            ['szVr', dyn(2, 30)],            // pen pressure
+            ['angleDynamics', dyn(5, 0)],    // direction
+            ['roundnessDynamics', dyn(7, 0)],// rotation
+            ['useScatter', T.bool(true)],
+            ['bothAxes', T.bool(true)],
+            ['Spcn', T.untf('#Prc', 100)],
+            ['Cnt ', T.long(3)],
+            ['scatterDynamics', dyn(0, 150)],
+            ['countDynamics', dyn(0, 25)],
+            ['useTexture', T.bool(true)],
+            ['interpretation', T.bool(true)],
+            ['textureScale', T.untf('#Prc', 178)],
+            ['textureBlendMode', T.enm('BlnM', 'linearHeight')],
+            ['textureDepth', T.untf('#Prc', 60)],
+            ['minimumDepth', T.untf('#Prc', 0)],
+            ['InvT', T.bool(true)],
+            ['TxtC', T.bool(true)],
+            ['textureBrightness', T.long(-75)],
+            ['textureContrast', T.long(50)],
+            ['textureDepthDynamics', dyn(2, 40)],
+            ['Txtr', T.objc([['Nm  ', T.text('GrayGrad')], ['Idnt', T.text(pattG)]])],
+            ['usePaintDynamics', T.bool(true)],
+            ['opVr', dyn(2, 0, 25)],
+            ['prVr', dyn(1, 10, 0, 40)],     // fade over 40 steps
+            ['useColorDynamics', T.bool(true)],
+            ['colorDynamicsPerTip', T.bool(false)],
+            ['clVr', dyn(0, 20)],
+            ['H   ', T.untf('#Prc', 10)],
+            ['Strt', T.untf('#Prc', 15)],
+            ['Brgh', T.untf('#Prc', 5)],
+            ['purity', T.untf('#Prc', -30)],
+            ['dualBrush', T.objc([
+              ['useDualBrush', T.bool(true)],
+              ['Flip', T.bool(true)],
+              ['Brsh', T.objc([
+                ['Dmtr', T.untf('#Pxl', 24)],
+                ['Spcn', T.untf('#Prc', 10)],
+                ['sampledData', T.text(uuidB.slice(0, 35))], // truncated!
+              ])],
+              ['BlnM', T.enm('BlnM', 'CBrn')],
+              ['useScatter', T.bool(true)],
+              ['Spcn', T.untf('#Prc', 120)],
+              ['Cnt ', T.long(2)],
+              ['bothAxes', T.bool(false)],
+              ['countDynamics', dyn(0, 50)],
+              ['scatterDynamics', dyn(0, 300)],
+            ])],
+            ['toolOptions', T.objc([
+              ['Opct', T.long(80)],
+              ['flow', T.long(65)],
+              ['smoothingValue', T.long(35)],
+              ['Md  ', T.enm('BlnM', 'Mltp')],
+              ['usePressureOverridesSize', T.bool(true)],
+              ['usePressureOverridesOpacity', T.bool(true)],
+            ])],
+            ['Wtdg', T.bool(true)],
+            ['Nose', T.bool(false)],
+            ['Rpt ', T.bool(true)],
+          ]),
+        ])],
+      ]);
 
       const file = new W();
       file.u16(6).u16(2); // version 6, subversion 2
-      file.ascii('8BIM').ascii('samp').u32(4 + samp.length);
-      file.u32(samp.length).raw(samp.b);
+      const sampBody = new W();
+      sampBody.u32(sampA.length).raw(sampA.b);
+      sampBody.u32(sampB.length).raw(sampB.b);
+      file.ascii('8BIM').ascii('samp').u32(sampBody.length).raw(sampBody.b);
+      const pattBody = new W();
+      pattBody.u32(patt1.length).raw(patt1.b);
+      while (pattBody.length % 4 !== 0) pattBody.u8(0);
+      pattBody.u32(patt2.length).raw(patt2.b);
+      while (pattBody.length % 4 !== 0) pattBody.u8(0);
+      file.ascii('8BIM').ascii('patt').u32(pattBody.length).raw(pattBody.b);
       file.ascii('8BIM').ascii('desc').u32(desc.length).raw(desc.b);
 
       const res = NL.brush.abr.parseAbr(file.buffer());
       const b = res.brushes[0];
-      assert('abr v6: descriptor names and tip geometry mapped',
-        res.brushes.length === 1 && b.name === 'Fancy' && b.tipId === uuid &&
-        b.settings.tip.size === 40 && Math.abs(b.settings.tip.spacing - 0.3) < 1e-6 &&
-        b.settings.tip.angle === 15 && Math.abs(b.settings.tip.roundness - 0.8) < 1e-6,
-        JSON.stringify(b));
-      assert('abr v6: shape dynamics mapped (pressure size, 30% jitter, 40% min)',
-        b.settings.shape.enabled && b.settings.shape.sizeControl.source === 'pressure' &&
-        Math.abs(b.settings.shape.sizeJitter - 0.3) < 1e-6 &&
-        Math.abs(b.settings.shape.minDiameter - 0.4) < 1e-6,
-        JSON.stringify(b.settings.shape));
-      assert('abr v6: scatter (150% -> 1.5) + count and wet edges mapped',
-        b.settings.scatter.enabled && Math.abs(b.settings.scatter.scatter - 1.5) < 1e-6 &&
-        b.settings.scatter.count === 3 && b.settings.wetEdges === true,
-        JSON.stringify(b.settings.scatter));
-      assert('abr v6: sampled tip bitmap decoded',
-        res.tips.get(uuid).size === 8 && res.tips.get(uuid).data[4 * 8 + 1] === 255, '');
+      const s = b.settings;
+      assert('abr v6: names, tip geometry, and tip bitmap',
+        res.brushes.length === 1 && b.name === 'Fancy' && b.tipId === uuidA &&
+        s.tip.size === 40 && Math.abs(s.tip.spacing - 0.3) < 1e-6 &&
+        s.tip.angle === 15 && Math.abs(s.tip.roundness - 0.8) < 1e-6 &&
+        res.tips.get(uuidA).data[4 * 8 + 1] === 255 && res.tips.get(uuidA).data[4 * 8 + 6] === 0,
+        JSON.stringify({ n: b.name, tip: s.tip }));
+      assert('abr v6: shape dynamics (pressure size, direction angle, rotation roundness)',
+        s.shape.enabled && s.shape.sizeControl.source === 'pressure' &&
+        Math.abs(s.shape.sizeJitter - 0.3) < 1e-6 &&
+        Math.abs(s.shape.minDiameter - 0.4) < 1e-6 &&
+        s.shape.angleControl.source === 'direction' &&
+        s.shape.roundnessControl.source === 'rotation' &&
+        Math.abs(s.shape.minRoundness - 0.3) < 1e-6 && s.shape.flipXJitter === true,
+        JSON.stringify(s.shape));
+      assert('abr v6: scattering (150% both axes, count 3, count jitter 25%)',
+        s.scatter.enabled && Math.abs(s.scatter.scatter - 1.5) < 1e-6 &&
+        s.scatter.bothAxes && s.scatter.count === 3 &&
+        Math.abs(s.scatter.countJitter - 0.25) < 1e-6,
+        JSON.stringify(s.scatter));
+      assert('abr v6: texture block (linearHeight -> height, each tip, BCI)',
+        s.texture.enabled && s.texture.mode === 'height' &&
+        Math.abs(s.texture.scale - 1.78) < 1e-6 && Math.abs(s.texture.depth - 0.6) < 1e-6 &&
+        s.texture.invert === true && s.texture.textureEachTip === true &&
+        Math.abs(s.texture.brightness + 0.5) < 1e-6 && Math.abs(s.texture.contrast - 0.5) < 1e-6 &&
+        Math.abs(s.texture.depthJitter - 0.4) < 1e-6 &&
+        s.texture.depthControl.source === 'pressure' && b.texturePatternId === pattG,
+        JSON.stringify(s.texture) + ' pat=' + b.texturePatternId);
+      assert('abr v6: transfer (opVr pressure+min, prVr fade 40)',
+        s.transfer.enabled && s.transfer.opacityControl.source === 'pressure' &&
+        Math.abs(s.transfer.opacityMin - 0.25) < 1e-6 &&
+        s.transfer.flowControl.source === 'fade' && s.transfer.flowControl.fadeSteps === 40 &&
+        Math.abs(s.transfer.flowJitter - 0.1) < 1e-6,
+        JSON.stringify(s.transfer));
+      assert('abr v6: color dynamics (per-tip off, jitters, purity)',
+        s.color.enabled && s.color.applyPerTip === false &&
+        Math.abs(s.color.fgBgJitter - 0.2) < 1e-6 && Math.abs(s.color.hueJitter - 0.1) < 1e-6 &&
+        Math.abs(s.color.satJitter - 0.15) < 1e-6 && Math.abs(s.color.purity + 0.3) < 1e-6,
+        JSON.stringify(s.color));
+      assert('abr v6: dual brush (nested flag, truncated uuid resolved, CBrn)',
+        s.dual.enabled && s.dual.shape === uuidB && s.dual.mode === 'color-burn' &&
+        s.dual.size === 24 && Math.abs(s.dual.spacing - 1.2) < 1e-6 &&
+        Math.abs(s.dual.scatter - 3) < 1e-6 && s.dual.count === 2 &&
+        Math.abs(s.dual.countJitter - 0.5) < 1e-6 && s.dual.flip === true &&
+        s.dual.bothAxes === false,
+        JSON.stringify(s.dual));
+      assert('abr v6: toolOptions (opacity/flow/smoothing/mode/pen overrides)',
+        Math.abs(s.opacity - 0.8) < 1e-6 && Math.abs(s.flow - 0.65) < 1e-6 &&
+        Math.abs(s.smoothing - 0.35) < 1e-6 && s.blendMode === 'multiply' &&
+        s.pressureSize === true && s.pressureOpacity === true,
+        JSON.stringify({ o: s.opacity, f: s.flow, sm: s.smoothing, m: s.blendMode }));
+      assert('abr v6: wet edges + airbrush toggles', s.wetEdges === true && s.airbrush === true, '');
+      const g = res.patterns.get(pattG);
+      const c = res.patterns.get(pattC);
+      assert('abr v6: grayscale pattern decoded (raw, gradient rows)',
+        g && g.map.size === 8 && g.map.data[0] === 0 && g.map.data[7 * 8] === 224,
+        g ? JSON.stringify([g.map.size, g.map.data[0], g.map.data[7 * 8]]) : 'missing');
+      // 0.299*200 + 0.587*100 + 0.114*50 = 124.2
+      assert('abr v6: RGB pattern decoded via RLE to luminance (124±2)',
+        c && c.map.size === 4 && near(c.map.data[5], 124, 2),
+        c ? 'v=' + c.map.data[5] : 'missing');
 
-      // --- full import wiring + painting with the imported tip ---
+      // --- full import wiring: tips, dual tip, pattern, painting ---
       const before = NL.brush.presets.allGroups().length;
       const n = NL.brush.importAbr('fixture.abr', file.buffer());
       const groups = NL.brush.presets.allGroups();
       const group = groups[groups.length - 1];
-      assert('abr import: registers a new preset group',
-        n === 1 && groups.length === before + 1 && group.name === 'fixture' &&
-        group.presets[0].name === 'Fancy', group.name);
-      assert('abr import: preset applied to the brush tool',
-        NL.store.getState().brush.tip.shape.startsWith('abr:fixture:') &&
-        NL.store.getState().brush.wetEdges === true, NL.store.getState().brush.tip.shape);
+      const imp = group.presets[0].settings;
+      assert('abr import: registers group; prefixes tip, dual tip, pattern ids',
+        n === 1 && groups.length === before + 1 &&
+        imp.tip.shape === 'abr:fixture:' + uuidA &&
+        imp.dual.shape === 'abr:fixture:' + uuidB &&
+        imp.texture.pattern === 'abr:fixture:' + pattG &&
+        NL.brush.patterns.isRegisteredPattern('abr:fixture:' + pattG),
+        JSON.stringify({ tip: imp.tip.shape, dual: imp.dual.shape, pat: imp.texture.pattern }));
 
-      const imported = group.presets[0].settings;
-      const paintSettings = structuredClone(imported);
+      // paint with the imported tip only (texture/dual/dynamics off)
+      const paintSettings = structuredClone(imp);
       paintSettings.wetEdges = false;
       paintSettings.shape.enabled = false;
       paintSettings.scatter.enabled = false;
+      paintSettings.texture.enabled = false;
+      paintSettings.dual.enabled = false;
+      paintSettings.color.enabled = false;
+      paintSettings.transfer.enabled = false;
+      paintSettings.opacity = 1; paintSettings.flow = 1;
+      paintSettings.blendMode = 'normal';
       eng.beginStroke(NL.brush.engineStrokeParams(paintSettings, 'paint'));
       eng.drawStamps(stamps(rec(200, 150, 32, 1)), 1);
-      const d = await read();
-      const leftHalf = px(d, 185, 150)[0];  // tip's opaque half
-      const rightHalf = px(d, 215, 150)[0]; // tip's transparent half
-      eng.cancelStroke();
+      let d = await read();
       assert('abr import: painting uses the sampled tip bitmap',
-        leftHalf <= 40 && rightHalf >= 240, leftHalf + ',' + rightHalf);
+        px(d, 185, 150)[0] <= 40 && px(d, 215, 150)[0] >= 240,
+        px(d, 185, 150)[0] + ',' + px(d, 215, 150)[0]);
+      eng.cancelStroke();
+
+      // paint with the imported *pattern* as a whole-stroke texture:
+      // pattern rows ramp 0..224 top-to-bottom, multiply depth 1 => the
+      // stroke is carved dark->light along y
+      const texSettings = structuredClone(paintSettings);
+      texSettings.tip.shape = 'round';
+      texSettings.tip.hardness = 1;
+      texSettings.texture = {
+        enabled: true, pattern: 'abr:fixture:' + pattG, scale: 4, // 8px tile * 4 = 32px
+        brightness: 0, contrast: 0, invert: false, mode: 'multiply', depth: 1,
+        textureEachTip: false, depthJitter: 0,
+        depthControl: { source: 'off', fadeSteps: 25 },
+      };
+      eng.beginStroke(NL.brush.engineStrokeParams(texSettings, 'paint'));
+      eng.drawStamps(stamps(rec(200, 150, 60, 1)), 1);
+      d = await read();
+      // rows of the 32px tile: y=144..147 -> tile row 4|5 (dark tex value),
+      // sample two points: near tile top (tex 0 -> white) vs tile bottom
+      const texTop = px(d, 200, 130)[0];    // 130 % 32 = 2 -> row 0 -> v=0 -> no paint
+      const texBottom = px(d, 200, 156)[0]; // 156 % 32 = 28 -> row 7 -> v=224 -> strong paint
+      eng.cancelStroke();
+      assert('abr import: imported pattern drives whole-stroke texture',
+        texTop >= 240 && texBottom <= 80, texTop + ',' + texBottom);
       NL.store.getState().applyPreset('soft-round', 'brush');
+    }
+
+    // --- new texture combine modes (screen) through the real pipeline ---
+    {
+      NL.brush.patterns.registerPattern('test-mid-gray',
+        { size: 8, data: new Uint8Array(64).fill(128) }, 'MidGray');
+      const st = makeBrush({});
+      st.texture = {
+        enabled: true, pattern: 'test-mid-gray', scale: 1, brightness: 0,
+        contrast: 0, invert: false, mode: 'screen', depth: 1,
+        textureEachTip: false, depthJitter: 0,
+        depthControl: { source: 'off', fadeSteps: 25 },
+      };
+      eng.beginStroke(NL.brush.engineStrokeParams(st, 'paint'));
+      eng.drawStamps(stamps(rec(200, 150, 40, 0.5)), 1);
+      const d = await read();
+      // screen: 0.5 + 0.502 - 0.5*0.502 = 0.751 -> pixel 255*(1-0.751) = 64
+      const v = px(d, 200, 150)[0];
+      eng.cancelStroke();
+      assert('texture mode screen: coverage brightens through pattern (64±8)',
+        near(v, 64, 8), 'v=' + v);
+    }
+
+    // --- dual count jitter + flip at the dynamics level ---
+    {
+      const dual = { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',
+        size: 20, spacing: 0.5, scatter: 0, bothAxes: false, count: 4,
+        countJitter: 1, flip: true };
+      const ctx = { sample: { x: 0, y: 0, pressure: 1, tiltX: 0, tiltY: 0, twist: 0 },
+        direction: 0, initialDirection: 0, stepIndex: 0 };
+      const out = [];
+      const rng = NL.brush.patterns.seededRng(11);
+      for (let i = 0; i < 6; i++) D.emitDualStamps(dual, ctx, 10, 10, rng, out);
+      const count = out.length / D.STAMP_FLOATS;
+      let flipped = 0;
+      for (let i = 0; i < count; i++) if (out[i * D.STAMP_FLOATS + 9] > 0) flipped++;
+      assert('dual dynamics: count jitter reduces count, flip sets stamp flags',
+        count >= 6 && count < 24 && flipped >= 1, 'count=' + count + ' flipped=' + flipped);
     }
   }
 
@@ -732,6 +987,70 @@ await page.waitForTimeout(800);
 const res = await page.evaluate(TEST);
 console.log(res.join('\n'));
 
+// ---- optional: validate the parser against real ABR files ----
+//
+// Third-party brush packs are not committed to this repo; set ABR_REAL_DIR
+// to a directory containing them to run these checks. Expected values were
+// recorded by analyzing the files listed in the fixture comment above
+// (Nopressure spray brushes + igdiaysu/Photoshop brush packs on GitHub).
+const realResults = [];
+if (process.env.ABR_REAL_DIR) {
+  const { readFileSync, existsSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const EXPECT = [
+    // file, version, brushes, tips, patterns, spot check
+    ['Spray_Brush_1.abr', 6, 1, 1, 0,
+      { name: 'Spray_Brush_1', size: 464, spacing: 0.1 }],
+    ['Selected.abr', 6, 8, 5, 2,
+      { name: 'text watercolor', texMode: 'subtract', texPattern: 'f7535389-d59a-11dd-b141-e1535ecf768b', smoothing: 0.69, dualMode: 'overlay' }],
+    ['MB_Starter_Pack_2021v4.abr', 6, 17, 16, 4,
+      { name: 'MB Lineart (Legendary)', dualSize: 63.2, dualScatter: 0.68, dualTip: '67468570-a4ff-11d5-adae-afb3da9c72e6', pressureSize: true }],
+  ];
+  for (const [file, ver, nBrushes, nTips, nPatterns, spot] of EXPECT) {
+    const path = join(process.env.ABR_REAL_DIR, file);
+    if (!existsSync(path)) {
+      realResults.push(`SKIP real ABR ${file} (not present)`);
+      continue;
+    }
+    const b64 = readFileSync(path).toString('base64');
+    const out = await page.evaluate(([b64, spot]) => {
+      const bin = atob(b64);
+      const buf = new ArrayBuffer(bin.length);
+      const u8 = new Uint8Array(buf);
+      for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+      const res = window.__northlight.brush.abr.parseAbr(buf);
+      const b = res.brushes.find((x) => x.name === spot.name);
+      return {
+        version: res.version,
+        brushes: res.brushes.length,
+        tips: res.tips.size,
+        patterns: res.patterns.size,
+        found: !!b,
+        size: b?.settings.tip?.size,
+        spacing: b?.settings.tip?.spacing,
+        smoothing: b?.settings.smoothing,
+        pressureSize: b?.settings.pressureSize,
+        texMode: b?.settings.texture?.mode,
+        texPattern: b?.texturePatternId,
+        dualMode: b?.settings.dual?.mode,
+        dualSize: b?.settings.dual?.size,
+        dualScatter: b?.settings.dual?.scatter,
+        dualTip: b?.settings.dual?.shape,
+      };
+    }, [b64, spot]);
+    const near = (a, b) => Math.abs(a - b) < 1e-6;
+    let ok = out.version === ver && out.brushes === nBrushes &&
+      out.tips === nTips && out.patterns === nPatterns && out.found;
+    for (const [k, v] of Object.entries(spot)) {
+      if (k === 'name') continue;
+      if (typeof v === 'number') ok = ok && near(out[k], v);
+      else ok = ok && out[k] === v;
+    }
+    realResults.push(`${ok ? 'PASS' : 'FAIL'} real ABR ${file}${ok ? '' : ' — ' + JSON.stringify(out)}`);
+  }
+  console.log(realResults.join('\n'));
+}
+
 // ---- UI-level keyboard shortcut tests (store-backed, engine not needed) ----
 const kb = [];
 const kbAssert = (name, cond, detail = '') =>
@@ -778,7 +1097,7 @@ kbAssert('with airbrush on, digits set flow instead', (await getBrush()).flow ==
 
 console.log(kb.join('\n'));
 
-const all = [...res, ...kb];
+const all = [...res, ...realResults, ...kb];
 const fails = all.filter((r) => r.startsWith('FAIL') || r.startsWith('DEVICE-LOST'));
 console.log(fails.length === 0 ? '\nALL TESTS PASSED' : `\n${fails.length} FAILURES`);
 await browser.close();

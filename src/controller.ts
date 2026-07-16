@@ -141,27 +141,40 @@ export function selectAll(): void {
 }
 
 /**
- * Imports a Photoshop .abr file: registers its sampled tips, wraps every
- * brush into a preset under a new "Imported" group, and selects the first
- * one. Returns the number of imported brushes.
+ * Imports a Photoshop .abr file: registers its sampled tips and texture
+ * patterns, wraps every brush into a preset under a new "Imported" group,
+ * and selects the first one. Returns the number of imported brushes.
  */
 export function importAbr(fileName: string, buffer: ArrayBuffer): number {
   const result = brushAbr.parseAbr(buffer);
   const baseName = fileName.replace(/\.abr$/i, '') || 'Imported';
+  const prefixed = (id: string) => `abr:${baseName}:${id}`;
 
   for (const [id, map] of result.tips) {
-    brushPatterns.registerTip(`abr:${baseName}:${id}`, map);
+    brushPatterns.registerTip(prefixed(id), map);
+  }
+  for (const [id, pattern] of result.patterns) {
+    brushPatterns.registerPattern(prefixed(id), pattern.map, pattern.name || id);
   }
 
   const presets = result.brushes.map((b, i) => {
     const settings = brushDefaults.makeBrush(b.settings);
     if (b.tipId) {
-      settings.tip.shape = `abr:${baseName}:${b.tipId}`;
+      settings.tip.shape = prefixed(b.tipId);
       // sampled tips ignore hardness; keep size sane if the desc lacked one
       if (!b.settings.tip?.size) {
         const map = result.tips.get(b.tipId);
         if (map) settings.tip.size = Math.min(map.size, 300);
       }
+    }
+    // dual brush may reference another sampled tip from this file
+    if (settings.dual.enabled && result.tips.has(settings.dual.shape)) {
+      settings.dual.shape = prefixed(settings.dual.shape);
+    }
+    if (settings.texture.enabled) {
+      settings.texture.pattern = b.texturePatternId
+        ? prefixed(b.texturePatternId)
+        : 'paper';
     }
     return {
       id: `abr:${baseName}:${i}`,

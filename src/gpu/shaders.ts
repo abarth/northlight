@@ -191,7 +191,7 @@ fn texValue(raw: f32, bci: vec4f) -> f32 {
 }
 
 // Photoshop texture modes operating on brush coverage a with texture
-// value v and strength depth.
+// value v and strength depth. Order matches TEXTURE_BLEND_INDEX.
 fn applyTexToAlpha(a: f32, v: f32, mode: u32, depth: f32) -> f32 {
   switch (mode) {
     case 0u: { return a * mix(1.0, v, depth); }                      // multiply
@@ -204,6 +204,24 @@ fn applyTexToAlpha(a: f32, v: f32, mode: u32, depth: f32) -> f32 {
       return mix(a, clamp(o, 0.0, 1.0), depth);
     }
     case 4u: { return clamp(a - (1.0 - v) * depth * 1.5, 0.0, 1.0); } // height
+    case 5u: { return mix(a, max(a, v), depth); }                    // lighten
+    case 6u: { return mix(a, a + v - a * v, depth); }                // screen
+    case 7u: {                                                       // color dodge
+      var o: f32;
+      if (a <= 0.0) { o = 0.0; }
+      else if (v >= 1.0) { o = 1.0; }
+      else { o = min(1.0, a / (1.0 - v)); }
+      return mix(a, o, depth);
+    }
+    case 8u: {                                                       // color burn
+      var o: f32;
+      if (a >= 1.0) { o = 1.0; }
+      else if (v <= 0.0) { o = 0.0; }
+      else { o = 1.0 - min(1.0, (1.0 - a) / v); }
+      return mix(a, o, depth);
+    }
+    case 9u: { return mix(a, clamp(a + v - 1.0, 0.0, 1.0), depth); } // linear burn
+    case 10u: { return mix(a, step(1.0, a + v), depth); }            // hard mix
     default: { return a; }
   }
 }

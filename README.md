@@ -68,13 +68,29 @@ the whole engine and erases layer alpha.
 
 ### Photoshop ABR import
 The Brushes panel's **Import ABR…** button loads Photoshop brush files:
-legacy v1/v2 and modern v6/v7/v10 (8BIM `samp` + Actions-descriptor `desc`)
-formats, including PackBits-compressed tips. Sampled tip bitmaps become
-first-class brush tips (usable for the primary and dual tip), and descriptor
-settings are mapped best-effort: name, diameter, spacing, angle, roundness,
-hardness, flips, Shape Dynamics (controls, jitters, minimum diameter),
-Scattering, Transfer, Color Dynamics, Dual Brush, wet edges, noise, and
-airbrush. ABR texture *patterns* (`patt` section) are not imported.
+legacy v1/v2 and modern v6–v10 (8BIM `samp` tips, Actions-descriptor `desc`,
+and `patt` texture patterns), including PackBits-compressed and 16-bit tips.
+
+- **Sampled tips** become first-class brush tips, usable as the primary and
+  the dual-brush tip (UUIDs are matched exactly, by 35-char truncated
+  prefix, or by order — real files use all three).
+- **Texture patterns** (grayscale and RGB→luminance VirtualMemoryArrayList
+  images) are imported and selectable in the Texture pattern dropdown.
+- **Settings** map onto the engine: name, diameter, spacing, angle,
+  roundness, hardness, flips, Shape Dynamics (controls incl.
+  Direction/Initial Direction/Rotation, jitters, minimums), Scattering,
+  Texture (scale/brightness/contrast/invert/mode/depth/each-tip/depth
+  dynamics), Dual Brush (tip, mode, spacing, scatter, count, count jitter,
+  flip), Transfer, Color Dynamics, wet edges, noise, airbrush, and the
+  options-bar state (opacity, flow, smoothing, paint Mode, and the
+  pressure-override buttons).
+
+The descriptor schema was validated against real ABR files from public
+GitHub repositories (spray brushes from MaousamaQAQ/Nopressure and five
+brush packs from igdiaysu/Photoshop, v6.2 and v10.2 — 288 brushes, 253
+tips, 33 patterns parsed with zero unresolved references) and cross-checked
+against GIMP's loader, SonyStone/ABR-Viewer, and jlai/brush-viewer; see
+`src/brush/abr.ts` and the test suite for the details and URLs.
 
 ### Brush presets
 The **Brushes** panel (sidebar tab) has a grouped, Photoshop-style preset
@@ -150,8 +166,9 @@ src/
     patterns.ts    procedural tileable patterns, sampled tips, runtime tip
                    registry (seeded, deterministic)
     presets.ts     grouped preset library + imported groups
-    abr.ts         Photoshop .abr parser (v1/v2 + v6/v7/v10, PackBits,
-                   Actions-descriptor reader, settings mapping)
+    abr.ts         Photoshop .abr parser (v1/v2 + v6-v10, PackBits,
+                   Actions-descriptor reader, patt pattern decoder,
+                   validated settings mapping)
     engineParams.ts settings -> per-stroke GPU parameters
   gpu/
     shaders.ts    WGSL: compositor (all blend modes), brush stamp (rotated
@@ -189,9 +206,14 @@ edges, per-stamp color, texture / texture-each-tip modulation, true
 dual-brush gating (masking and the secondary spacing train), noise, eraser,
 selection clipping, undo/redo, pressure dynamics with minimums, airbrush
 build-up, the pure dynamics module, pattern/preset integrity, ABR parsing
-(synthesized v2 + v6.2 fixtures with RLE tips and descriptors, plus the full
-import-and-paint path), the viewport pass, Lab/HSV conversions, and the
-Photoshop numeric keyboard shortcuts.
+(synthesized v2 + v6.2 fixtures replicating the real-world descriptor
+schema — RLE tips, patt patterns, truncated dual-tip UUIDs, toolOptions —
+plus the full import-and-paint path), the viewport pass, Lab/HSV
+conversions, and the Photoshop numeric keyboard shortcuts.
+
+Set `ABR_REAL_DIR=/path/to/abr/files` to additionally validate the parser
+against real brush packs (expected values for the files listed in the test
+comments are baked in).
 
 ```bash
 npm run build

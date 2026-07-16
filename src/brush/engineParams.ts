@@ -1,7 +1,6 @@
 import type { EngineStrokeParams } from '../gpu/engine';
+import { getPattern } from './patterns';
 import type { BrushSettings } from './types';
-
-const PATTERN_BASE_PX = 256;
 
 /** Maps full brush settings to the per-stroke parameters the GPU needs. */
 export function engineStrokeParams(
@@ -19,7 +18,8 @@ export function engineStrokeParams(
     texture: s.texture.enabled
       ? {
           pattern: s.texture.pattern,
-          scalePx: PATTERN_BASE_PX * s.texture.scale,
+          // scale is relative to the pattern's native size, like Photoshop
+          scalePx: getPattern(s.texture.pattern).size * s.texture.scale,
           brightness: s.texture.brightness,
           contrast: s.texture.contrast,
           invert: s.texture.invert,

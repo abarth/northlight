@@ -1,29 +1,45 @@
 import type { GrayMap } from './patterns';
+import type { BlendMode } from '../types';
 import type { BrushPatch, DynamicControl, TextureBlend } from './types';
 
 /**
  * Photoshop .abr brush file parser.
  *
  * Supports the legacy v1/v2 format (a flat list of sampled brushes) and the
- * modern v6/v7/v10 format (8BIM 'samp' section with the sampled tip bitmaps
- * plus an 8BIM 'desc' section carrying an Actions-style descriptor with the
- * brush names and dynamics). Tip bitmaps are always imported; descriptor
- * settings are mapped onto our engine best-effort (diameter, spacing, angle,
- * roundness, hardness, flips, shape/scatter/transfer/color dynamics, dual
- * brush, wet edges, noise, airbrush). Texture patterns ('patt' section) are
- * not imported.
+ * modern v6/v7/v9/v10 format: 8BIM 'samp' (sampled tip bitmaps), 'desc'
+ * (an Actions-format descriptor with names and dynamics), and 'patt'
+ * (embedded texture patterns as VirtualMemoryArrayList images).
+ *
+ * The descriptor key schema and enum values below were validated against
+ * real ABR files (see tests/gpu.spec.mjs for the file list and URLs) and
+ * cross-checked against three independent implementations:
+ * - GIMP's app/core/gimpbrush-load.c (samp record layout: skip 47 bytes for
+ *   subversion 1, 301 for subversion 2, from the record start)
+ * - github.com/SonyStone/ABR-Viewer research.md + parser (desc layout,
+ *   '$'-prefixed UUIDs, bVTy 7 = Rotation)
+ * - github.com/jlai/brush-viewer ABR.ksy (Kaitai grammar) and
+ *   github.com/abarth/impression abrParser.ts (bVTy 5/6 = Direction /
+ *   Initial Direction, prVr = flow)
  */
 
 export interface AbrBrush {
   name: string;
   /** id of the sampled tip in `tips`, or null for a computed round brush */
   tipId: string | null;
+  /** id of the texture pattern in `patterns`, when the brush uses Texture */
+  texturePatternId: string | null;
   settings: BrushPatch;
+}
+
+export interface AbrPattern {
+  name: string;
+  map: GrayMap;
 }
 
 export interface AbrResult {
   version: number;
   tips: Map<string, GrayMap>;
+  patterns: Map<string, AbrPattern>;
   brushes: AbrBrush[];
 }
 
@@ -87,6 +103,14 @@ class Reader {
     return this.v.getUint32(this.pos);
   }
 
+  peekAscii(n: number): string {
+    let s = '';
+    for (let i = 0; i < n && this.pos + i < this.length; i++) {
+      s += String.fromCharCode(this.v.getUint8(this.pos + i));
+    }
+    return s;
+  }
+
   ascii(n: number): string {
     let s = '';
     for (let i = 0; i < n; i++) s += String.fromCharCode(this.u8());
@@ -103,7 +127,11 @@ class Reader {
     this.pos += n;
   }
 
-  /** Pascal string: u8 length + ascii chars. */
+  /**
+   * Pascal string: u8 length + ascii chars. Samp-record UUIDs are stored as
+   * '$' + 36 chars; conveniently '$' is ASCII 36, so the prefix doubles as
+   * the length byte and this read yields the bare UUID.
+   */
   pascal(): string {
     return this.ascii(this.u8());
   }
@@ -154,7 +182,27 @@ function toSquareMap(data: Uint8Array, w: number, h: number): GrayMap {
   return { size, data: out };
 }
 
-const MAX_TIP_DIM = 5000;
+/**
+ * Nearest-resamples a non-square bitmap to a square map. Used for patterns,
+ * which must stay tileable (padding would break the tiling), unlike tips.
+ */
+function resampleSquare(data: Uint8Array, w: number, h: number): GrayMap {
+  if (w === h) {
+    return { size: w, data: new Uint8Array(data) };
+  }
+  const size = Math.max(w, h);
+  const out = new Uint8Array(size * size);
+  for (let y = 0; y < size; y++) {
+    const sy = Math.min(h - 1, Math.floor((y * h) / size));
+    for (let x = 0; x < size; x++) {
+      const sx = Math.min(w - 1, Math.floor((x * w) / size));
+      out[y * size + x] = data[sy * w + sx];
+    }
+  }
+  return { size, data: out };
+}
+
+const MAX_TIP_DIM = 8192;
 
 /** Reads one sampled-brush bitmap: rect, depth, compression, pixel data. */
 function readSampledBitmap(r: Reader): GrayMap | null {
@@ -322,7 +370,17 @@ function parseValue(r: Reader, type: string): DescValue {
 }
 
 // ---------------------------------------------------------------------------
-// Descriptor -> BrushSettings mapping (best-effort)
+// Descriptor -> BrushSettings mapping
+//
+// Key names below were observed in real files (MB Starter Pack, Evenant,
+// Pixelstains, spray brushes — see tests for URLs). Notably:
+// - scatter lives in scatterDynamics/countDynamics/bothAxes/'Cnt '
+// - texture uses textureScale/textureBlendMode/textureDepth/InvT/TxtC/
+//   textureBrightness/textureContrast/textureDepthDynamics + Txtr.Idnt
+// - useDualBrush is nested INSIDE the dualBrush descriptor
+// - transfer: opVr = opacity variance, prVr = flow variance
+// - toolOptions: Opct/flow/Md/smoothingValue/usePressureOverridesSize/
+//   usePressureOverridesOpacity
 // ---------------------------------------------------------------------------
 
 const isDesc = (v: DescValue | undefined): v is Descriptor =>
@@ -350,12 +408,27 @@ function str(v: DescValue | undefined): string | undefined {
   return typeof v === 'string' ? v : undefined;
 }
 
+function enumVal(v: DescValue | undefined): string | undefined {
+  if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+    const enumValue = (v as { enumValue?: unknown }).enumValue;
+    if (typeof enumValue === 'string') return enumValue;
+  }
+  return undefined;
+}
+
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 
-/** bVTy control values used across ABR dynamics. */
+/**
+ * bVTy control values. Empirically validated table:
+ * 0=Off, 1=Fade, 2=Pen Pressure, 3=Pen Tilt, 4=Stylus Wheel,
+ * 5=Direction, 6=Initial Direction, 7=Rotation.
+ * (5/6 observed on direction-following brushes in real files; 7=Rotation per
+ * SonyStone/ABR-Viewer's reverse-engineering; 4=wheel is unsupported here and
+ * maps to Off so mouse users don't get zeroed parameters.)
+ */
 const CONTROL_MAP: DynamicControl['source'][] = [
-  'off', 'fade', 'pressure', 'tilt', 'rotation', 'rotation',
-  'initial-direction', 'direction',
+  'off', 'fade', 'pressure', 'tilt', 'off',
+  'direction', 'initial-direction', 'rotation',
 ];
 
 function mapControl(d: Descriptor | undefined): {
@@ -378,26 +451,57 @@ function mapControl(d: Descriptor | undefined): {
   };
 }
 
+/** Texture/dual-brush blend enum -> our TextureBlend (observed values). */
 const BLEND_MAP: Record<string, TextureBlend> = {
   Mltp: 'multiply',
   Drkn: 'darken',
+  Lghn: 'lighten',
+  Scrn: 'screen',
   Sbtr: 'subtract',
   blendSubtraction: 'subtract',
   Ovrl: 'overlay',
-  CBrn: 'darken',
-  linearBurn: 'subtract',
+  CDdg: 'color-dodge',
+  CBrn: 'color-burn',
+  linearDodge: 'color-dodge',
+  linearBurn: 'linear-burn',
+  LnDd: 'color-dodge',
+  lnBr: 'linear-burn',
   Hght: 'height',
   linearHeight: 'height',
-  hardMix: 'height',
+  hardMix: 'hard-mix',
 };
 
 function mapBlend(v: DescValue | undefined): TextureBlend {
-  if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
-    const enumValue = (v as { enumValue?: unknown }).enumValue;
-    if (typeof enumValue === 'string') return BLEND_MAP[enumValue] ?? 'multiply';
-  }
-  return 'multiply';
+  const e = enumVal(v);
+  return (e && BLEND_MAP[e]) || 'multiply';
 }
+
+/** toolOptions 'Md' paint-mode enum -> our layer BlendMode ids. */
+const PAINT_MODE_MAP: Record<string, BlendMode> = {
+  Nrml: 'normal',
+  Drkn: 'darken',
+  Mltp: 'multiply',
+  CBrn: 'color-burn',
+  linearBurn: 'linear-burn',
+  Lghn: 'lighten',
+  Scrn: 'screen',
+  CDdg: 'color-dodge',
+  linearDodge: 'linear-dodge',
+  Ovrl: 'overlay',
+  SftL: 'soft-light',
+  HrdL: 'hard-light',
+  vividLight: 'vivid-light',
+  linearLight: 'linear-light',
+  pinLight: 'pin-light',
+  Dfrn: 'difference',
+  Xclu: 'exclusion',
+  blendSubtraction: 'subtract',
+  blendDivide: 'divide',
+  H: 'hue',
+  Strt: 'saturation',
+  Clr: 'color',
+  Lmns: 'luminosity',
+};
 
 interface TipInfo {
   tipId: string | null;
@@ -415,7 +519,7 @@ function mapTip(tip: Descriptor | undefined): TipInfo {
   const spacingOn = bool(tip['Intr']);
   const spacing = num(tip['Spcn']) ?? num(tip['Spcg']);
   return {
-    tipId: str(tip['sampledData']) ?? null,
+    tipId: str(tip['sampledData'])?.toLowerCase() ?? null,
     size: num(tip['Dmtr']),
     angle: num(tip['Angl']),
     roundness: num(tip['Rndn']),
@@ -427,7 +531,7 @@ function mapTip(tip: Descriptor | undefined): TipInfo {
   };
 }
 
-/** Maps one brushPreset descriptor to a name/tip/settings triple. */
+/** Maps one brushPreset descriptor to a name/tip/pattern/settings record. */
 function mapBrushDescriptor(d: Descriptor): AbrBrush {
   const tipDesc = desc(d['Brsh']);
   const tip = mapTip(tipDesc);
@@ -458,12 +562,15 @@ function mapBrushDescriptor(d: Descriptor): AbrBrush {
       roundnessJitter: clamp01(round.jitter),
       roundnessControl: round.control,
       minRoundness: clamp01((num(d['minimumRoundness']) ?? 25) / 100),
+      // top-level flipX/flipY are the flip *jitters*; the tip's own flips
+      // live inside the Brsh descriptor
       flipXJitter: bool(d['flipX']) ?? false,
       flipYJitter: bool(d['flipY']) ?? false,
     };
   }
 
-  // Scattering
+  // Scattering — amount/control in scatterDynamics, count jitter in
+  // countDynamics, count in 'Cnt ', axes in bothAxes
   if (bool(d['useScatter'])) {
     const sc = mapControl(desc(d['scatterDynamics']));
     const cnt = mapControl(desc(d['countDynamics']));
@@ -479,10 +586,31 @@ function mapBrushDescriptor(d: Descriptor): AbrBrush {
     };
   }
 
-  // Transfer (paint dynamics)
+  // Texture
+  let texturePatternId: string | null = null;
+  if (bool(d['useTexture'])) {
+    const txtr = desc(d['Txtr']);
+    texturePatternId = str(txtr?.['Idnt'])?.toLowerCase() ?? null;
+    const depthDyn = mapControl(desc(d['textureDepthDynamics']));
+    settings.texture = {
+      enabled: true,
+      // pattern id is resolved by the importer once patterns are registered
+      scale: Math.min(Math.max((num(d['textureScale']) ?? 100) / 100, 0.01), 10),
+      brightness: Math.min(1, Math.max(-1, (num(d['textureBrightness']) ?? 0) / 150)),
+      contrast: Math.min(1, Math.max(-1, (num(d['textureContrast']) ?? 0) / 100)),
+      invert: bool(d['InvT']) ?? false,
+      mode: mapBlend(d['textureBlendMode']),
+      depth: clamp01((num(d['textureDepth']) ?? 100) / 100),
+      textureEachTip: bool(d['TxtC']) ?? false,
+      depthJitter: clamp01(depthDyn.jitter),
+      depthControl: depthDyn.control,
+    };
+  }
+
+  // Transfer (paint dynamics): opVr = opacity, prVr = flow
   if (bool(d['usePaintDynamics'])) {
-    const op = mapControl(desc(d['opVr']) ?? desc(d['prVr']));
-    const fl = mapControl(desc(d['flVr']) ?? desc(d['flwV']));
+    const op = mapControl(desc(d['opVr']));
+    const fl = mapControl(desc(d['prVr']) ?? desc(d['flVr']));
     settings.transfer = {
       enabled: true,
       opacityJitter: clamp01(op.jitter),
@@ -499,7 +627,7 @@ function mapBrushDescriptor(d: Descriptor): AbrBrush {
     const fgbg = mapControl(desc(d['clVr']));
     settings.color = {
       enabled: true,
-      applyPerTip: bool(d['perTip']) ?? true,
+      applyPerTip: bool(d['colorDynamicsPerTip']) ?? bool(d['perTip']) ?? true,
       fgBgJitter: clamp01(fgbg.jitter),
       fgBgControl: fgbg.control,
       hueJitter: clamp01((num(d['H']) ?? 0) / 100),
@@ -509,22 +637,48 @@ function mapBrushDescriptor(d: Descriptor): AbrBrush {
     };
   }
 
-  // Dual Brush
+  // Dual Brush — useDualBrush is nested inside the dualBrush descriptor
   const dualDesc = desc(d['dualBrush']);
-  if (bool(d['useDualBrush']) && dualDesc) {
-    const dualTipDesc = desc(dualDesc['Brsh']);
-    const dualTip = mapTip(dualTipDesc);
+  if (dualDesc && (bool(dualDesc['useDualBrush']) ?? bool(d['useDualBrush']))) {
+    const dualTip = mapTip(desc(dualDesc['Brsh']));
+    const dualScatter = mapControl(desc(dualDesc['scatterDynamics']));
+    const dualCount = mapControl(desc(dualDesc['countDynamics']));
+    const panelSpacing = num(dualDesc['Spcn']);
     settings.dual = {
       enabled: true,
       shape: dualTip.tipId ?? 'round',
       hardness: dualTip.hardness !== undefined ? clamp01(dualTip.hardness / 100) : 1,
       mode: mapBlend(dualDesc['BlnM']),
       size: Math.min(Math.max(dualTip.size ?? 40, 1), 1000),
-      spacing: Math.max(dualTip.spacing ?? 0.25, 0.01),
-      scatter: Math.min(Math.max((num(dualDesc['Sctr']) ?? 0) / 100, 0), 10),
-      bothAxes: bool(dualDesc['bothAxes']) ?? true,
+      // the panel's spacing slider is dualBrush.Spcn; the tip's inherent
+      // spacing (dualBrush.Brsh.Spcn) is the fallback
+      spacing: Math.max(
+        panelSpacing !== undefined ? panelSpacing / 100 : dualTip.spacing ?? 0.25,
+        0.01,
+      ),
+      scatter: Math.min(dualScatter.jitter, 10),
+      bothAxes: bool(dualDesc['bothAxes']) ?? false,
       count: Math.min(Math.max(num(dualDesc['Cnt']) ?? 1, 1), 16),
+      countJitter: clamp01(dualCount.jitter),
+      flip: bool(dualDesc['Flip']) ?? false,
     };
+  }
+
+  // Options-bar state
+  const tool = desc(d['toolOptions']);
+  if (tool) {
+    const opct = num(tool['Opct']);
+    if (opct !== undefined) settings.opacity = clamp01(opct / 100);
+    const flow = num(tool['flow']);
+    if (flow !== undefined) settings.flow = clamp01(flow / 100);
+    const smoo = num(tool['smoothingValue']) ?? num(tool['Smoo']);
+    if (smoo !== undefined) settings.smoothing = clamp01(smoo / 100);
+    const mode = enumVal(tool['Md']);
+    if (mode && PAINT_MODE_MAP[mode]) settings.blendMode = PAINT_MODE_MAP[mode];
+    const pSize = bool(tool['usePressureOverridesSize']);
+    if (pSize !== undefined) settings.pressureSize = pSize;
+    const pOp = bool(tool['usePressureOverridesOpacity']);
+    if (pOp !== undefined) settings.pressureOpacity = pOp;
   }
 
   if (bool(d['Wtdg']) !== undefined) settings.wetEdges = bool(d['Wtdg']);
@@ -534,35 +688,142 @@ function mapBrushDescriptor(d: Descriptor): AbrBrush {
   return {
     name: str(d['Nm']) ?? '',
     tipId: tip.tipId,
+    texturePatternId,
     settings,
   };
+}
+
+// ---------------------------------------------------------------------------
+// patt section: embedded patterns as VirtualMemoryArrayList images
+// (validated layout: entry len u32; version=1 u32; imageMode u32 (1=gray,
+// 3=RGB); height u16; width u16; unicode name; pascal id; VMAL: version=3
+// u32, length u32, rect 4xu32, maxChannels u32; per channel: written u32,
+// [length u32, depth u32, rect 4xu32, pixelDepth u16, compression u8,
+// data (length-23 bytes)]. Entries pad to 4 bytes.)
+// ---------------------------------------------------------------------------
+
+const MAX_PATTERN_DIM = 4096;
+
+function parsePattEntry(r: Reader, entryEnd: number): { id: string; pattern: AbrPattern } | null {
+  const version = r.u32();
+  if (version !== 1) return null;
+  const mode = r.u32();
+  const h = r.u16();
+  const w = r.u16();
+  const name = r.unicode();
+  const id = r.pascal().toLowerCase();
+  if ((mode !== 1 && mode !== 3) || w <= 0 || h <= 0 || w > MAX_PATTERN_DIM || h > MAX_PATTERN_DIM) {
+    return null;
+  }
+
+  const vmaVersion = r.u32();
+  if (vmaVersion !== 3) return null;
+  const vmaLen = r.u32();
+  const vmaEnd = Math.min(r.pos + vmaLen, entryEnd);
+  r.skip(16); // VMAL rectangle (matches w/h)
+  const maxChannels = r.u32();
+
+  const wanted = mode === 3 ? 3 : 1;
+  const channels: Uint8Array[] = [];
+  for (let ch = 0; ch < maxChannels + 2 && r.pos + 4 <= vmaEnd && channels.length < wanted; ch++) {
+    const written = r.u32();
+    if (!written) continue;
+    const chLen = r.u32();
+    if (chLen === 0) continue;
+    const chEnd = r.pos + chLen;
+    const depth = r.u32();
+    const top = r.i32();
+    const left = r.i32();
+    const bottom = r.i32();
+    const right = r.i32();
+    r.u16(); // pixel depth (again)
+    const compressed = r.u8() !== 0;
+    const cw = right - left;
+    const chH = bottom - top;
+    if (depth === 8 && cw > 0 && chH > 0 && cw <= MAX_PATTERN_DIM && chH <= MAX_PATTERN_DIM) {
+      let data: Uint8Array;
+      if (!compressed) {
+        data = r.bytes(cw * chH);
+      } else {
+        const counts: number[] = [];
+        for (let y = 0; y < chH; y++) counts.push(r.i16());
+        data = new Uint8Array(cw * chH);
+        for (let y = 0; y < chH; y++) {
+          const rowEnd = r.pos + counts[y];
+          data.set(unpackBits(r, cw), y * cw);
+          r.pos = rowEnd;
+        }
+      }
+      if (cw === w && chH === h) channels.push(data);
+    }
+    r.pos = chEnd;
+  }
+
+  if (channels.length === 0) return null;
+  let gray: Uint8Array;
+  if (channels.length >= 3) {
+    // RGB -> luminance (Photoshop textures use the pattern's luminosity)
+    gray = new Uint8Array(w * h);
+    for (let i = 0; i < gray.length; i++) {
+      gray[i] = Math.round(
+        0.299 * channels[0][i] + 0.587 * channels[1][i] + 0.114 * channels[2][i],
+      );
+    }
+  } else {
+    gray = channels[0];
+  }
+  return { id, pattern: { name, map: resampleSquare(gray, w, h) } };
 }
 
 // ---------------------------------------------------------------------------
 // Top-level parsing
 // ---------------------------------------------------------------------------
 
+/** Resolves a descriptor UUID against samp/patt ids: exact, then 35-char
+ * prefix (samp UUIDs are sometimes truncated by one char), then null. */
+function resolveId(id: string | null, keys: Iterable<string>): string | null {
+  if (!id) return null;
+  const norm = id.toLowerCase();
+  const all = [...keys];
+  if (all.includes(norm)) return norm;
+  const prefix = norm.slice(0, 35);
+  const hit = all.find((k) => k.slice(0, 35) === prefix);
+  return hit ?? null;
+}
+
 function parseV6(r: Reader, version: number, subVersion: number): AbrResult {
   const tips = new Map<string, GrayMap>();
+  const patterns = new Map<string, AbrPattern>();
   const sampleOrder: string[] = [];
   let described: AbrBrush[] = [];
 
   while (r.remaining >= 12) {
-    const sig = r.ascii(4);
-    if (sig !== '8BIM') break;
+    // resync: sections are back-to-back but may carry a byte or two of
+    // padding; scan a few bytes forward for the next 8BIM signature
+    let found = false;
+    for (let k = 0; k < 8 && r.pos + 8 <= r.length; k++) {
+      if (r.peekAscii(4) === '8BIM') {
+        found = true;
+        break;
+      }
+      r.skip(1);
+    }
+    if (!found) break;
+    r.skip(4); // 8BIM
     const key = r.ascii(4);
     const len = r.u32();
-    const end = r.pos + len + ((4 - (len % 4)) % 4);
+    const end = Math.min(r.pos + len, r.length);
 
     if (key === 'samp') {
       while (r.pos < end - 4) {
         const brushLen = r.u32();
-        const brushEnd = r.pos + brushLen + ((4 - (brushLen % 4)) % 4);
+        const brushEnd = Math.min(r.pos + brushLen + ((4 - (brushLen % 4)) % 4), end);
         try {
           const start = r.pos;
-          const id = r.pascal();
-          // header padding after the id: 10 bytes (subversion 1) or 264 (2)
-          r.pos = start + id.length + 1 + (subVersion === 1 ? 10 : 264);
+          const id = r.pascal().toLowerCase();
+          // fixed header size from the record start: 47 bytes for
+          // subversion 1, 301 for subversion 2+ (GIMP's values)
+          r.pos = start + (subVersion <= 1 ? 47 : 301);
           const map = readSampledBitmap(r);
           if (map && id) {
             tips.set(id, map);
@@ -576,13 +837,26 @@ function parseV6(r: Reader, version: number, subVersion: number): AbrResult {
     } else if (key === 'desc') {
       try {
         if (r.peekU32() === 16) r.u32(); // versioned descriptor prefix
-        const desc = parseDescriptor(r);
-        const list = desc['Brsh'];
+        const descriptor = parseDescriptor(r);
+        const list = descriptor['Brsh'];
         if (Array.isArray(list)) {
           described = list.filter(isDesc).map(mapBrushDescriptor);
         }
       } catch (err) {
         console.warn('[northlight] ABR descriptor parse failed:', err);
+      }
+    } else if (key === 'patt') {
+      while (r.pos + 4 < end) {
+        const entryLen = r.u32();
+        if (entryLen === 0 || r.pos + entryLen > end) break;
+        const entryEnd = r.pos + entryLen;
+        try {
+          const parsed = parsePattEntry(r, entryEnd);
+          if (parsed) patterns.set(parsed.id, parsed.pattern);
+        } catch {
+          // skip malformed pattern entries
+        }
+        r.pos = entryEnd + ((4 - (entryLen % 4)) % 4);
       }
     }
     r.pos = end;
@@ -592,15 +866,34 @@ function parseV6(r: Reader, version: number, subVersion: number): AbrResult {
   // bare sampled tips when there is no usable descriptor.
   let brushes: AbrBrush[];
   if (described.length > 0) {
-    brushes = described.filter((b) => b.tipId === null || tips.has(b.tipId));
+    let sampleIndex = 0;
+    brushes = [];
+    for (const b of described) {
+      if (b.tipId !== null) {
+        // resolve against samp ids: exact/prefix, then index order
+        const resolved =
+          resolveId(b.tipId, tips.keys()) ?? sampleOrder[sampleIndex] ?? null;
+        sampleIndex++;
+        if (!resolved) continue;
+        b.tipId = resolved;
+      }
+      if (b.settings.dual?.enabled && typeof b.settings.dual.shape === 'string') {
+        const dualResolved = resolveId(b.settings.dual.shape, tips.keys());
+        if (dualResolved) b.settings.dual.shape = dualResolved;
+        else if (b.settings.dual.shape.includes('-')) b.settings.dual.shape = 'round';
+      }
+      b.texturePatternId = resolveId(b.texturePatternId, patterns.keys());
+      brushes.push(b);
+    }
   } else {
     brushes = sampleOrder.map((id, i) => ({
       name: `Brush ${i + 1}`,
       tipId: id,
+      texturePatternId: null,
       settings: {},
     }));
   }
-  return { version, tips, brushes };
+  return { version, tips, patterns, brushes };
 }
 
 function parseV12(r: Reader, version: number): AbrResult {
@@ -627,6 +920,7 @@ function parseV12(r: Reader, version: number): AbrResult {
           brushes.push({
             name: name || `Brush ${i + 1}`,
             tipId: id,
+            texturePatternId: null,
             settings: {
               tip: {
                 size: Math.min(map.size, 1000),
@@ -642,7 +936,7 @@ function parseV12(r: Reader, version: number): AbrResult {
     }
     r.pos = end;
   }
-  return { version, tips, brushes };
+  return { version, tips, patterns: new Map(), brushes };
 }
 
 export function parseAbr(buf: ArrayBuffer): AbrResult {
@@ -652,7 +946,7 @@ export function parseAbr(buf: ArrayBuffer): AbrResult {
   if (version === 1 || version === 2) {
     return parseV12(r, version);
   }
-  if (version === 6 || version === 7 || version === 10) {
+  if (version >= 6 && version <= 10) {
     const subVersion = r.u16();
     return parseV6(r, version, subVersion);
   }
