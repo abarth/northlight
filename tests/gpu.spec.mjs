@@ -7,8 +7,8 @@
  * conversions, and the Photoshop keyboard shortcuts.
  *
  * Usage:
- *   npm run build && npx vite preview --port 4173 &
- *   npm i --no-save playwright   # once; needs a Chromium with WebGPU
+ *   npm run build && npm test    # tests/run.mjs serves dist/ and runs this
+ * or, against an already-running server:
  *   node tests/gpu.spec.mjs
  *
  * Env overrides: APP_URL, CHROMIUM_PATH, CHROMIUM_FLAGS.

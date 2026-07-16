@@ -1,12 +1,19 @@
 # Northlight
 
+[![CI](https://github.com/abarth/northlight/actions/workflows/ci.yml/badge.svg)](https://github.com/abarth/northlight/actions/workflows/ci.yml)
+[![Deploy](https://github.com/abarth/northlight/actions/workflows/deploy-pages.yml/badge.svg)](https://github.com/abarth/northlight/actions/workflows/deploy-pages.yml)
+
 A Photoshop-style digital painting app built with **TypeScript + React** on a
 **WebGPU** canvas. Every visible pixel is composited on the GPU.
+
+**Try it live: <https://abarth.github.io/northlight/>** (deployed from `main`
+via GitHub Pages).
 
 ```bash
 npm install
 npm run dev        # start the dev server
 npm run build      # typecheck + production build
+npm test           # run the GPU test suite against the build
 ```
 
 Requires a browser with WebGPU (Chrome/Edge 113+, recent Safari or Firefox).
@@ -217,10 +224,17 @@ comments are baked in).
 
 ```bash
 npm run build
-npx vite preview --port 4173 &
-npm i --no-save playwright
-node tests/gpu.spec.mjs
+npm test           # serves dist/ and runs the suite in headless Chromium
 ```
+
+On a machine without a GPU (like a CI runner), run WebGPU on SwiftShader:
+
+```bash
+CHROMIUM_FLAGS="--enable-unsafe-webgpu --enable-features=Vulkan --use-vulkan=swiftshader" npm test
+```
+
+The [CI workflow](.github/workflows/ci.yml) runs the full suite on every push
+and pull request.
 
 Headless note: some SwiftShader-backed Chromium builds have a broken GPU
 process (uploads or canvas presentation fail with "A valid external Instance
