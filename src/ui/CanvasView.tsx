@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   buildRenderState,
+  deleteSelectionContents,
+  fillActiveLayer,
   getEngine,
   redo,
+  sampleCanvasColor,
   setEngine,
   setSelection,
   selectAll,
@@ -12,6 +15,7 @@ import { PaintEngine } from '../gpu/engine';
 import { StrokeSession } from '../gpu/stroke';
 import { engineStrokeParams } from '../brush/engineParams';
 import type { PointerSample } from '../brush/dynamics';
+import { rgbToHsv } from '../color/convert';
 import { DOC_SIZE, useStore } from '../store';
 import type { Point, ToolId } from '../types';
 
@@ -30,7 +34,8 @@ type Drag =
       moved: boolean;
     }
   | { kind: 'marquee'; start: Point; end: Point }
-  | { kind: 'lasso'; points: Point[] };
+  | { kind: 'lasso'; points: Point[] }
+  | { kind: 'eyedrop' };
 
 export function CanvasView() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -45,6 +50,10 @@ export function CanvasView() {
     over: false,
   });
   const spaceRef = useRef(false);
+  /** tool to restore when Alt is released (temporary eyedropper) */
+  const toolBeforeEyedropRef = useRef<ToolId | null>(null);
+  /** drops overlapping eyedropper readbacks while one is in flight */
+  const samplingRef = useRef(false);
   const digitRef = useRef<{ str: string; at: number; target: 'opacity' | 'flow' }>({
     str: '',
     at: 0,
@@ -110,6 +119,20 @@ export function CanvasView() {
         e.preventDefault();
         return;
       }
+      // Holding Alt with a painting tool temporarily switches to the
+      // eyedropper (which then samples the foreground color), like Photoshop.
+      if (e.key === 'Alt') {
+        if (
+          !e.repeat &&
+          (s.tool === 'brush' || s.tool === 'eraser') &&
+          !toolBeforeEyedropRef.current
+        ) {
+          toolBeforeEyedropRef.current = s.tool;
+          s.setTool('eyedropper');
+        }
+        e.preventDefault(); // keep the browser from focusing its menu bar
+        return;
+      }
       if (mod && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         if (e.shiftKey) redo();
@@ -139,6 +162,16 @@ export function CanvasView() {
       if (mod && e.key === '1') {
         e.preventDefault();
         zoomTo(1);
+        return;
+      }
+      // Photoshop fill/clear shortcuts: Alt+Backspace fills the foreground
+      // color, Ctrl+Backspace the background color (both clip to a selection
+      // when one exists); plain Backspace/Delete clears the selected pixels.
+      if (e.key === 'Backspace' || e.key === 'Delete') {
+        e.preventDefault();
+        if (e.altKey) fillActiveLayer('fg');
+        else if (mod) fillActiveLayer('bg');
+        else if (s.selectionPaths) deleteSelectionContents();
         return;
       }
       if (mod) return;
@@ -182,6 +215,7 @@ export function CanvasView() {
       switch (e.key) {
         case 'b': s.setTool('brush'); break;
         case 'e': s.setTool('eraser'); break;
+        case 'i': s.setTool('eyedropper'); break;
         case 'h': s.setTool('pan'); break;
         case 'z': s.setTool('zoom'); break;
         case 'm': s.setTool('marquee'); break;
@@ -229,6 +263,13 @@ export function CanvasView() {
           s.setTool(s.toolBeforePan);
           s.setToolBeforePan(null);
         }
+      }
+      if (e.key === 'Alt') {
+        const back = toolBeforeEyedropRef.current;
+        toolBeforeEyedropRef.current = null;
+        const s = useStore.getState();
+        if (back && s.tool === 'eyedropper') s.setTool(back);
+        e.preventDefault();
       }
     };
 
@@ -330,6 +371,29 @@ export function CanvasView() {
     if (pts && pts.length >= 3) setSelection([pts]);
   }
 
+  /**
+   * Eyedropper sample: sets the foreground color, or the background color on
+   * Alt+click. The temporary (Alt-held) eyedropper always samples the
+   * foreground, since Alt is what invoked it — matching Photoshop.
+   */
+  function eyedropAt(doc: Point, altKey: boolean) {
+    const target: 'fg' | 'bg' = !toolBeforeEyedropRef.current && altKey ? 'bg' : 'fg';
+    if (samplingRef.current) return;
+    samplingRef.current = true;
+    sampleCanvasColor(doc.x, doc.y)
+      .then((rgb) => {
+        if (!rgb) return;
+        const s = useStore.getState();
+        const hsv = rgbToHsv(rgb, target === 'bg' ? s.bg.h : s.fg.h);
+        if (target === 'bg') s.setBg(hsv);
+        else s.setFg(hsv);
+      })
+      .catch(() => {})
+      .finally(() => {
+        samplingRef.current = false;
+      });
+  }
+
   // -------------------------------------------------------------------------
   // pointer handlers
   // -------------------------------------------------------------------------
@@ -348,12 +412,28 @@ export function CanvasView() {
       case 'brush':
       case 'eraser': {
         const settings = t === 'eraser' ? s.eraser : s.brush;
-        engine.beginStroke(engineStrokeParams(settings, t === 'eraser' ? 'erase' : 'paint'));
-        const session = new StrokeSession(engine, settings, { fg: s.fg, bg: s.bg });
+        // On the Background layer the eraser paints the background color
+        // instead of clearing to transparency, like Photoshop.
+        const eraseToBg = t === 'eraser' && s.activeLayerId === 'background';
+        const params = engineStrokeParams(
+          settings,
+          t === 'eraser' && !eraseToBg ? 'erase' : 'paint',
+        );
+        if (eraseToBg) params.blendMode = 'normal';
+        engine.beginStroke(params);
+        const session = new StrokeSession(
+          engine,
+          settings,
+          eraseToBg ? { fg: s.bg, bg: s.bg } : { fg: s.fg, bg: s.bg },
+        );
         session.down(sampleOf(e.nativeEvent, doc));
         dragRef.current = { kind: 'stroke', session };
         break;
       }
+      case 'eyedropper':
+        dragRef.current = { kind: 'eyedrop' };
+        eyedropAt(doc, e.nativeEvent.altKey);
+        break;
       case 'pan':
         dragRef.current = {
           kind: 'pan',
@@ -448,6 +528,10 @@ export function CanvasView() {
         }
         break;
       }
+      case 'eyedrop':
+        // keep sampling while dragging, like Photoshop
+        eyedropAt(screenToDoc(screen), e.altKey);
+        break;
     }
   }
 
@@ -492,6 +576,7 @@ export function CanvasView() {
         else setSelection(null);
         break;
       case 'pan':
+      case 'eyedrop':
         break;
     }
   }
@@ -608,6 +693,7 @@ export function CanvasView() {
   const cursorStyle: Record<string, string> = {
     brush: 'none',
     eraser: 'none',
+    eyedropper: 'crosshair',
     pan: dragRef.current?.kind === 'pan' ? 'grabbing' : 'grab',
     zoom: 'zoom-in',
     marquee: 'crosshair',

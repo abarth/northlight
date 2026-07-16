@@ -1,6 +1,7 @@
 import {
   COMMIT_SHADER,
   COMPOSITE_SHADER,
+  FILL_SHADER,
   PRESENT_SHADER,
   STAMP_SHADER,
 } from './shaders';
@@ -91,12 +92,14 @@ export class PaintEngine {
   private stampPipeline: GPURenderPipeline;
   private stampPipelineDual: GPURenderPipeline;
   private commitPipeline: GPURenderPipeline;
+  private fillPipeline: GPURenderPipeline;
   private presentPipeline: GPURenderPipeline;
 
   private layerUniforms: GPUBuffer;
   private stampUniforms: GPUBuffer;
   private dualStampUniforms: GPUBuffer;
   private commitUniforms: GPUBuffer;
+  private fillUniforms: GPUBuffer;
   private viewUniforms: GPUBuffer;
 
   private sampLinear: GPUSampler;
@@ -177,6 +180,10 @@ export class PaintEngine {
     });
     this.commitUniforms = device.createBuffer({
       size: 80,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.fillUniforms = device.createBuffer({
+      size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.viewUniforms = device.createBuffer({
@@ -272,6 +279,19 @@ export class PaintEngine {
       vertex: { module: commitModule, entryPoint: 'vs' },
       fragment: {
         module: commitModule,
+        entryPoint: 'fs',
+        targets: [{ format: 'rgba8unorm' }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+
+    const fillModule = device.createShaderModule({ code: FILL_SHADER });
+    this.fillPipeline = device.createRenderPipeline({
+      label: 'fill',
+      layout: 'auto',
+      vertex: { module: fillModule, entryPoint: 'vs' },
+      fragment: {
+        module: fillModule,
         entryPoint: 'fs',
         targets: [{ format: 'rgba8unorm' }],
       },
@@ -697,6 +717,113 @@ export class PaintEngine {
     this.clearTexture(this.dualStrokeTex);
   }
 
+  /**
+   * Fills the layer with an opaque color, or clears it to transparency when
+   * `color` is null. Restricted to the current selection mask when one is
+   * set; covers the whole layer otherwise. Records an undo snapshot.
+   */
+  fillRegion(layerId: string, color: [number, number, number] | null): void {
+    const layer = this.layers.get(layerId);
+    if (!layer) return;
+    this.pushUndo(layerId);
+
+    const u = new ArrayBuffer(32);
+    const f = new Float32Array(u);
+    const i = new Uint32Array(u);
+    if (color) {
+      f[0] = color[0];
+      f[1] = color[1];
+      f[2] = color[2];
+      f[3] = 1;
+      i[4] = 1;
+    } else {
+      i[4] = 2;
+    }
+    this.uploadBuffer(this.fillUniforms, 0, u);
+
+    const bindGroup = this.device.createBindGroup({
+      layout: this.fillPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: this.sampNearest },
+        { binding: 1, resource: layer.createView() },
+        { binding: 2, resource: (this.selectionTex ?? this.whiteTex).createView() },
+        { binding: 3, resource: { buffer: this.fillUniforms } },
+      ],
+    });
+
+    const enc = this.device.createCommandEncoder();
+    const pass = enc.beginRenderPass({
+      colorAttachments: [
+        { view: this.scratch.createView(), loadOp: 'clear', storeOp: 'store' },
+      ],
+    });
+    pass.setPipeline(this.fillPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.draw(3);
+    pass.end();
+    enc.copyTextureToTexture(
+      { texture: this.scratch },
+      { texture: layer },
+      [this.docWidth, this.docHeight],
+    );
+    this.device.queue.submit([enc.finish()]);
+  }
+
+  /**
+   * Averages a size x size block of pixels centered on a document coordinate
+   * (eyedropper). `source` picks a single layer texture or a fresh composite
+   * of the given render state. Returns straight (un-premultiplied) RGB in
+   * 0..1 plus average coverage, or null when the block is fully transparent
+   * or entirely outside the document.
+   */
+  async sampleColor(
+    x: number,
+    y: number,
+    size: number,
+    source: { layerId: string } | { state: RenderState },
+  ): Promise<{ r: number; g: number; b: number; a: number } | null> {
+    let tex: GPUTexture | undefined;
+    if ('layerId' in source) {
+      tex = this.layers.get(source.layerId);
+    } else {
+      const enc = this.device.createCommandEncoder();
+      tex = this.composite(enc, source.state);
+      this.device.queue.submit([enc.finish()]);
+    }
+    if (!tex) return null;
+
+    const half = Math.floor(size / 2);
+    const x0 = Math.max(0, Math.round(x) - half);
+    const y0 = Math.max(0, Math.round(y) - half);
+    const x1 = Math.min(this.docWidth, Math.round(x) - half + size);
+    const y1 = Math.min(this.docHeight, Math.round(y) - half + size);
+    if (x1 <= x0 || y1 <= y0) return null;
+    const w = x1 - x0;
+    const h = y1 - y0;
+
+    const data = await this.readTextureRegion(tex, x0, y0, w, h);
+    if (data.length === 0) return null;
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    let a = 0;
+    for (let i = 0; i < w * h; i++) {
+      r += data[i * 4];
+      g += data[i * 4 + 1];
+      b += data[i * 4 + 2];
+      a += data[i * 4 + 3];
+    }
+    if (a <= 0) return null;
+    // premultiplied: un-premultiply the alpha-weighted average
+    const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+    return {
+      r: clamp01(r / a),
+      g: clamp01(g / a),
+      b: clamp01(b / a),
+      a: clamp01(a / (255 * w * h)),
+    };
+  }
+
   // -------------------------------------------------------------------------
   // History
   // -------------------------------------------------------------------------
@@ -744,8 +871,18 @@ export class PaintEngine {
     return this.readTexture(layer, this.docWidth, this.docHeight);
   }
 
-  private async readTexture(
+  private readTexture(
     tex: GPUTexture,
+    w: number,
+    h: number,
+  ): Promise<Uint8Array<ArrayBuffer>> {
+    return this.readTextureRegion(tex, 0, 0, w, h);
+  }
+
+  private async readTextureRegion(
+    tex: GPUTexture,
+    x: number,
+    y: number,
     w: number,
     h: number,
   ): Promise<Uint8Array<ArrayBuffer>> {
@@ -757,7 +894,7 @@ export class PaintEngine {
     try {
       const enc = this.device.createCommandEncoder();
       enc.copyTextureToBuffer(
-        { texture: tex },
+        { texture: tex, origin: { x, y } },
         { buffer: buf, bytesPerRow: rowBytes },
         [w, h],
       );

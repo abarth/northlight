@@ -1,6 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
-import { exportPng, redo, setSelection, undo } from '../controller';
-import { useStore, type PaintToolId } from '../store';
+import {
+  deleteSelectionContents,
+  exportPng,
+  fillActiveLayer,
+  redo,
+  setSelection,
+  undo,
+} from '../controller';
+import {
+  useStore,
+  type EyedropperSample,
+  type EyedropperSampleSize,
+  type PaintToolId,
+} from '../store';
 import { BLEND_MODES, type BlendMode } from '../types';
 import { AirbrushIcon, PenIcon, RedoIcon, SettingsIcon, UndoIcon } from './icons';
 import { PctSlider, ValSlider } from './controls';
@@ -44,9 +56,13 @@ function PctField({
 function TipPicker({ toolKey }: { toolKey: PaintToolId }) {
   const settings = useStore((s) => s[toolKey]);
   const updateBrush = useStore((s) => s.updateBrush);
-  const [openPicker, setOpenPicker] = useState(false);
+  // The popover is position: fixed (anchored to the button's screen rect) so
+  // it floats above the whole app instead of scrolling the options bar.
+  const [popPos, setPopPos] = useState<{ left: number; top: number } | null>(null);
   const thumbRef = useRef<HTMLCanvasElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
+  const openPicker = popPos !== null;
 
   useEffect(() => {
     if (thumbRef.current) drawBrushPreview(thumbRef.current, settings);
@@ -55,25 +71,37 @@ function TipPicker({ toolKey }: { toolKey: PaintToolId }) {
   useEffect(() => {
     if (!openPicker) return;
     const close = (e: PointerEvent) => {
-      if (popRef.current && !popRef.current.contains(e.target as Node)) setOpenPicker(false);
+      if (popRef.current && !popRef.current.contains(e.target as Node)) setPopPos(null);
     };
     window.addEventListener('pointerdown', close, true);
     return () => window.removeEventListener('pointerdown', close, true);
   }, [openPicker]);
 
+  const togglePicker = () => {
+    if (openPicker) {
+      setPopPos(null);
+      return;
+    }
+    const rect = btnRef.current!.getBoundingClientRect();
+    // keep the 300px-wide popover on screen
+    const left = Math.max(4, Math.min(rect.left, window.innerWidth - 308));
+    setPopPos({ left, top: rect.bottom + 6 });
+  };
+
   const tip = settings.tip;
   return (
     <div className="tip-picker" ref={popRef}>
       <button
+        ref={btnRef}
         className="tip-picker-btn"
         title="Brush tip (size, hardness, angle, roundness)"
-        onClick={() => setOpenPicker(!openPicker)}
+        onClick={togglePicker}
       >
         <canvas ref={thumbRef} className="tip-thumb" />
         <span>{Math.round(tip.size)}px ▾</span>
       </button>
       {openPicker && (
-        <div className="tip-popover">
+        <div className="tip-popover" style={{ left: popPos.left, top: popPos.top }}>
           <ValSlider
             label="Size"
             value={tip.size}
@@ -189,6 +217,62 @@ function BrushOptions({ toolKey }: { toolKey: PaintToolId }) {
   );
 }
 
+const SAMPLE_SIZES: { value: EyedropperSampleSize; label: string }[] = [
+  { value: 1, label: 'Point Sample' },
+  { value: 3, label: '3 by 3 Average' },
+  { value: 5, label: '5 by 5 Average' },
+  { value: 11, label: '11 by 11 Average' },
+  { value: 31, label: '31 by 31 Average' },
+  { value: 51, label: '51 by 51 Average' },
+  { value: 101, label: '101 by 101 Average' },
+];
+
+const SAMPLE_SCOPES: { value: EyedropperSample; label: string }[] = [
+  { value: 'all', label: 'All Layers' },
+  { value: 'currentBelow', label: 'Current & Below' },
+  { value: 'current', label: 'Current Layer' },
+];
+
+/** Photoshop-style eyedropper options: Sample Size and Sample scope. */
+function EyedropperOptions() {
+  const sampleSize = useStore((s) => s.eyedropperSampleSize);
+  const sample = useStore((s) => s.eyedropperSample);
+  const setSampleSize = useStore((s) => s.setEyedropperSampleSize);
+  const setSample = useStore((s) => s.setEyedropperSample);
+
+  return (
+    <>
+      <label className="opt-field" title="How many pixels to average around the click">
+        <span>Sample Size</span>
+        <select
+          value={sampleSize}
+          onChange={(e) => setSampleSize(Number(e.target.value) as EyedropperSampleSize)}
+        >
+          {SAMPLE_SIZES.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="opt-field" title="Which layers the sample reads from">
+        <span>Sample</span>
+        <select
+          value={sample}
+          onChange={(e) => setSample(e.target.value as EyedropperSample)}
+        >
+          {SAMPLE_SCOPES.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <span className="hint">Click picks the foreground color; Alt+click picks the background.</span>
+    </>
+  );
+}
+
 export function OptionsBar() {
   const tool = useStore((s) => s.tool);
   const canUndo = useStore((s) => s.canUndo);
@@ -209,12 +293,29 @@ export function OptionsBar() {
                 : 'Drag to select. Click to deselect. Selections clip painting.'}
             </span>
             {hasSelection && (
-              <button className="btn" onClick={() => setSelection(null)}>
-                Deselect (Ctrl+D)
-              </button>
+              <>
+                <button
+                  className="btn"
+                  onClick={() => fillActiveLayer('fg')}
+                  title="Fill the selection with the foreground color (Alt+Backspace)"
+                >
+                  Fill FG
+                </button>
+                <button
+                  className="btn"
+                  onClick={deleteSelectionContents}
+                  title="Delete the selected pixels (Backspace) — transparent, or background color on the Background layer"
+                >
+                  Delete
+                </button>
+                <button className="btn" onClick={() => setSelection(null)}>
+                  Deselect (Ctrl+D)
+                </button>
+              </>
             )}
           </>
         )}
+        {tool === 'eyedropper' && <EyedropperOptions />}
         {tool === 'zoom' && (
           <span className="hint">Click to zoom in, Alt+click out, drag to scrub. Ctrl+0 fits.</span>
         )}

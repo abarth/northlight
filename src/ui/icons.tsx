@@ -93,22 +93,10 @@ export const TrashIcon = ({ size }: IconProps) => (
   </svg>
 );
 
-export const CopyIcon = ({ size }: IconProps) => (
+export const EyedropperIcon = ({ size }: IconProps) => (
   <svg {...base(size)}>
-    <rect x="9" y="9" width="11" height="11" rx="1.5" />
-    <path d="M5 15H4a1.5 1.5 0 0 1-1.5-1.5v-9A1.5 1.5 0 0 1 4 3h9A1.5 1.5 0 0 1 14.5 4.5V5" />
-  </svg>
-);
-
-export const UpIcon = ({ size }: IconProps) => (
-  <svg {...base(size)}>
-    <path d="M12 19V5M5 12l7-7 7 7" />
-  </svg>
-);
-
-export const DownIcon = ({ size }: IconProps) => (
-  <svg {...base(size)}>
-    <path d="M12 5v14M5 12l7 7 7-7" />
+    <path d="M20.7 3.3a2.4 2.4 0 0 0-3.4 0l-3 3-1.1-1.1-1.7 1.7 6.6 6.6 1.7-1.7-1.1-1.1 3-3a2.4 2.4 0 0 0 0-3.4z" />
+    <path d="M13.6 8.4L5.5 16.5 4 20l3.5-1.5 8.1-8.1" />
   </svg>
 );
 

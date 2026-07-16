@@ -99,17 +99,6 @@ export function addLayer(): void {
   );
 }
 
-export function duplicateLayer(srcId: string): void {
-  if (!engine) return;
-  const s = useStore.getState();
-  if (s.layers.length >= MAX_LAYERS) return;
-  const src = s.layers.find((l) => l.id === srcId);
-  if (!src) return;
-  const id = nextLayerId();
-  engine.copyLayer(srcId, id);
-  s.addLayerMeta({ ...src, id, name: `${src.name} copy` }, srcId);
-}
-
 export function deleteLayer(id: string): void {
   const s = useStore.getState();
   if (s.layers.length <= 1) return;
@@ -126,6 +115,55 @@ export function setSelection(paths: Point[][] | null): void {
   }
   s.setSelectionPaths(paths);
   engine?.setSelectionMask(rasterizeSelection(paths, DOC_SIZE.width, DOC_SIZE.height));
+}
+
+/**
+ * Fills the active layer with the foreground or background color, clipped to
+ * the current selection when one exists (Alt+Backspace / Ctrl+Backspace).
+ */
+export function fillActiveLayer(which: 'fg' | 'bg'): void {
+  const s = useStore.getState();
+  const rgb = color.hsvToRgb(which === 'fg' ? s.fg : s.bg);
+  engine?.fillRegion(s.activeLayerId, [rgb.r, rgb.g, rgb.b]);
+}
+
+/**
+ * Deletes the selected pixels: clears them to transparency, except on the
+ * Background layer where they fill with the background color instead.
+ */
+export function deleteSelectionContents(): void {
+  const s = useStore.getState();
+  if (!s.selectionPaths) return;
+  if (s.activeLayerId === 'background') {
+    const rgb = color.hsvToRgb(s.bg);
+    engine?.fillRegion(s.activeLayerId, [rgb.r, rgb.g, rgb.b]);
+  } else {
+    engine?.fillRegion(s.activeLayerId, null);
+  }
+}
+
+/**
+ * Eyedropper sample at a document coordinate, honoring the Sample Size and
+ * Sample scope options. Returns straight RGB, or null on transparent pixels.
+ */
+export async function sampleCanvasColor(x: number, y: number): Promise<color.RGB | null> {
+  if (!engine) return null;
+  const s = useStore.getState();
+  const size = s.eyedropperSampleSize;
+  let result;
+  if (s.eyedropperSample === 'current') {
+    result = await engine.sampleColor(x, y, size, { layerId: s.activeLayerId });
+  } else {
+    let layers = s.layers;
+    if (s.eyedropperSample === 'currentBelow') {
+      const idx = layers.findIndex((l) => l.id === s.activeLayerId);
+      if (idx >= 0) layers = layers.slice(0, idx + 1);
+    }
+    result = await engine.sampleColor(x, y, size, {
+      state: { layers, activeLayerId: s.activeLayerId, view: s.view },
+    });
+  }
+  return result ? { r: result.r, g: result.g, b: result.b } : null;
 }
 
 export function selectAll(): void {

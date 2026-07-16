@@ -1,15 +1,7 @@
-import { addLayer, deleteLayer, duplicateLayer } from '../controller';
+import { addLayer, deleteLayer } from '../controller';
 import { useStore } from '../store';
 import { BLEND_MODES, type BlendMode } from '../types';
-import {
-  CopyIcon,
-  DownIcon,
-  EyeIcon,
-  EyeOffIcon,
-  PlusIcon,
-  TrashIcon,
-  UpIcon,
-} from './icons';
+import { EyeIcon, EyeOffIcon, PlusIcon, TrashIcon } from './icons';
 import { useState } from 'react';
 
 export function LayersPanel() {
@@ -17,11 +9,24 @@ export function LayersPanel() {
   const activeId = useStore((s) => s.activeLayerId);
   const setActive = useStore((s) => s.setActiveLayer);
   const patchLayer = useStore((s) => s.patchLayer);
-  const moveLayer = useStore((s) => s.moveLayer);
+  const setLayerOrder = useStore((s) => s.setLayerOrder);
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [drop, setDrop] = useState<{ id: string; below: boolean } | null>(null);
 
   const active = layers.find((l) => l.id === activeId);
   const displayed = [...layers].reverse(); // top of stack first
+
+  const completeDrop = () => {
+    if (dragId && drop && dragId !== drop.id) {
+      const ids = displayed.map((l) => l.id).filter((id) => id !== dragId);
+      const at = ids.indexOf(drop.id) + (drop.below ? 1 : 0);
+      ids.splice(at, 0, dragId);
+      setLayerOrder(ids.reverse());
+    }
+    setDragId(null);
+    setDrop(null);
+  };
 
   return (
     <div className="panel layers-panel">
@@ -57,73 +62,84 @@ export function LayersPanel() {
         </label>
       </div>
       <div className="layers-list">
-        {displayed.map((l) => (
-          <div
-            key={l.id}
-            className={`layer-row ${l.id === activeId ? 'active' : ''}`}
-            onClick={() => setActive(l.id)}
-          >
-            <button
-              className="icon-btn eye"
-              title={l.visible ? 'Hide layer' : 'Show layer'}
-              onClick={(e) => {
-                e.stopPropagation();
-                patchLayer(l.id, { visible: !l.visible });
+        {displayed.map((l) => {
+          const dropCls =
+            drop?.id === l.id && dragId !== l.id
+              ? drop.below
+                ? ' drop-below'
+                : ' drop-above'
+              : '';
+          return (
+            <div
+              key={l.id}
+              className={`layer-row ${l.id === activeId ? 'active' : ''}${
+                dragId === l.id ? ' dragging' : ''
+              }${dropCls}`}
+              draggable={renaming !== l.id}
+              onDragStart={(e) => {
+                setDragId(l.id);
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', l.id);
               }}
+              onDragEnd={() => {
+                setDragId(null);
+                setDrop(null);
+              }}
+              onDragOver={(e) => {
+                if (!dragId || dragId === l.id) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                const rect = e.currentTarget.getBoundingClientRect();
+                const below = e.clientY > rect.top + rect.height / 2;
+                if (drop?.id !== l.id || drop.below !== below) setDrop({ id: l.id, below });
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                completeDrop();
+              }}
+              onClick={() => setActive(l.id)}
             >
-              {l.visible ? <EyeIcon size={15} /> : <EyeOffIcon size={15} />}
-            </button>
-            {renaming === l.id ? (
-              <input
-                className="rename"
-                autoFocus
-                defaultValue={l.name}
-                onBlur={(e) => {
-                  patchLayer(l.id, { name: e.target.value || l.name });
-                  setRenaming(null);
+              <button
+                className="icon-btn eye"
+                title={l.visible ? 'Hide layer' : 'Show layer'}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  patchLayer(l.id, { visible: !l.visible });
                 }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                  if (e.key === 'Escape') setRenaming(null);
-                }}
-              />
-            ) : (
-              <span className="layer-name" onDoubleClick={() => setRenaming(l.id)}>
-                {l.name}
-              </span>
-            )}
-            {l.blendMode !== 'normal' && (
-              <span className="layer-mode">
-                {BLEND_MODES.find((m) => m.id === l.blendMode)?.label}
-              </span>
-            )}
-          </div>
-        ))}
+              >
+                {l.visible ? <EyeIcon size={15} /> : <EyeOffIcon size={15} />}
+              </button>
+              {renaming === l.id ? (
+                <input
+                  className="rename"
+                  autoFocus
+                  defaultValue={l.name}
+                  onBlur={(e) => {
+                    patchLayer(l.id, { name: e.target.value || l.name });
+                    setRenaming(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                    if (e.key === 'Escape') setRenaming(null);
+                  }}
+                />
+              ) : (
+                <span className="layer-name" onDoubleClick={() => setRenaming(l.id)}>
+                  {l.name}
+                </span>
+              )}
+              {l.blendMode !== 'normal' && (
+                <span className="layer-mode">
+                  {BLEND_MODES.find((m) => m.id === l.blendMode)?.label}
+                </span>
+              )}
+            </div>
+          );
+        })}
       </div>
       <div className="layers-buttons">
         <button className="icon-btn" onClick={addLayer} title="New layer">
           <PlusIcon size={15} />
-        </button>
-        <button
-          className="icon-btn"
-          onClick={() => active && duplicateLayer(active.id)}
-          title="Duplicate layer"
-        >
-          <CopyIcon size={15} />
-        </button>
-        <button
-          className="icon-btn"
-          onClick={() => active && moveLayer(active.id, 1)}
-          title="Move layer up"
-        >
-          <UpIcon size={15} />
-        </button>
-        <button
-          className="icon-btn"
-          onClick={() => active && moveLayer(active.id, -1)}
-          title="Move layer down"
-        >
-          <DownIcon size={15} />
         </button>
         <button
           className="icon-btn danger"

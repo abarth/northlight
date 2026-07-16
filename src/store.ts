@@ -27,6 +27,11 @@ export function nextLayerId(): string {
 export type PaintToolId = 'brush' | 'eraser';
 export type SideTab = 'color' | 'brushes' | 'settings';
 
+/** Photoshop eyedropper "Sample Size" (NxN average around the click). */
+export type EyedropperSampleSize = 1 | 3 | 5 | 11 | 31 | 51 | 101;
+/** Photoshop eyedropper "Sample" scope. */
+export type EyedropperSample = 'all' | 'currentBelow' | 'current';
+
 const initialEraser = makeBrush({ tip: { hardness: 1, size: 30, spacing: 0.15 } });
 
 export interface AppState {
@@ -45,6 +50,9 @@ export interface AppState {
   presetRevision: number;
 
   sideTab: SideTab;
+
+  eyedropperSampleSize: EyedropperSampleSize;
+  eyedropperSample: EyedropperSample;
 
   layers: LayerMeta[]; // bottom -> top
   activeLayerId: string;
@@ -68,11 +76,14 @@ export interface AppState {
   applyPreset: (presetId: string, tool: PaintToolId) => void;
   bumpPresetRevision: () => void;
   setSideTab: (tab: SideTab) => void;
+  setEyedropperSampleSize: (size: EyedropperSampleSize) => void;
+  setEyedropperSample: (sample: EyedropperSample) => void;
 
   addLayerMeta: (meta: LayerMeta, aboveId?: string) => void;
   removeLayerMeta: (id: string) => void;
   patchLayer: (id: string, patch: Partial<LayerMeta>) => void;
-  moveLayer: (id: string, dir: 1 | -1) => void;
+  /** Reorders layers to match `ids` (bottom -> top). Must be a permutation. */
+  setLayerOrder: (ids: string[]) => void;
   setActiveLayer: (id: string) => void;
   setLayerBlendMode: (id: string, mode: BlendMode) => void;
 
@@ -95,6 +106,9 @@ export const useStore = create<AppState>((set) => ({
   presetRevision: 0,
 
   sideTab: 'color',
+
+  eyedropperSampleSize: 1,
+  eyedropperSample: 'all',
 
   layers: [
     {
@@ -137,6 +151,8 @@ export const useStore = create<AppState>((set) => ({
   bumpPresetRevision: () => set((s) => ({ presetRevision: s.presetRevision + 1 })),
 
   setSideTab: (sideTab) => set({ sideTab }),
+  setEyedropperSampleSize: (eyedropperSampleSize) => set({ eyedropperSampleSize }),
+  setEyedropperSample: (eyedropperSample) => set({ eyedropperSample }),
 
   addLayerMeta: (meta, aboveId) =>
     set((s) => {
@@ -164,15 +180,11 @@ export const useStore = create<AppState>((set) => ({
       layers: s.layers.map((l) => (l.id === id ? { ...l, ...patch } : l)),
     })),
 
-  moveLayer: (id, dir) =>
+  setLayerOrder: (ids) =>
     set((s) => {
-      const idx = s.layers.findIndex((l) => l.id === id);
-      const to = idx + dir;
-      if (idx < 0 || to < 0 || to >= s.layers.length) return {};
-      const layers = [...s.layers];
-      const [item] = layers.splice(idx, 1);
-      layers.splice(to, 0, item);
-      return { layers };
+      const byId = new Map(s.layers.map((l) => [l.id, l]));
+      if (ids.length !== s.layers.length || ids.some((id) => !byId.has(id))) return {};
+      return { layers: ids.map((id) => byId.get(id)!) };
     }),
 
   setActiveLayer: (activeLayerId) => set({ activeLayerId }),

@@ -515,6 +515,39 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 `;
 
 /**
+ * Selection fill / clear: writes an opaque color (mode 1) or transparency
+ * (mode 2) into the layer wherever the selection mask covers, leaving other
+ * pixels untouched. Rendered into the scratch texture and copied back, like
+ * the commit pass.
+ */
+export const FILL_SHADER = /* wgsl */ `
+${FULLSCREEN_VS}
+
+struct FillU {
+  color: vec4f,   // premultiplied fill color
+  mode: u32,      // 1 = fill, 2 = erase
+  _p0: f32,
+  _p1: f32,
+  _p2: f32,
+}
+
+@group(0) @binding(0) var samp: sampler;
+@group(0) @binding(1) var layerTex: texture_2d<f32>;
+@group(0) @binding(2) var selTex: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> U: FillU;
+
+@fragment
+fn fs(in: VSOut) -> @location(0) vec4f {
+  let l = textureSampleLevel(layerTex, samp, in.uv, 0.0);
+  let cov = textureSampleLevel(selTex, samp, in.uv, 0.0).r;
+  if (U.mode == 2u) {
+    return l * (1.0 - cov);
+  }
+  return mix(l, U.color, cov);
+}
+`;
+
+/**
  * Final present pass: applies the viewport transform, draws the transparency
  * checkerboard under the document and the pasteboard around it.
  */

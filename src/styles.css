@@ -342,7 +342,7 @@ select {
 
 .side-tab-content {
   flex: 1 1 55%;
-  min-height: 140px;
+  min-height: 60px;
   overflow-y: auto;
 }
 
@@ -551,11 +551,11 @@ select {
   border-radius: 3px;
 }
 
+/* fixed-position (anchored in JS) so it floats above the whole app instead
+   of scrolling/clipping inside the options bar */
 .tip-popover {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 50;
+  position: fixed;
+  z-index: 1000;
   width: 300px;
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -718,16 +718,19 @@ select {
 
 /* layers */
 
+/* min-height 0 so short windows shrink the scrolling list instead of pushing
+   the bottom buttons off screen */
 .layers-panel {
   display: flex;
   flex-direction: column;
-  flex: 1;
-  min-height: 200px;
+  flex: 1 1 45%;
+  min-height: 0;
 }
 
 .layers-controls {
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
   gap: 6px;
   margin-bottom: 6px;
 }
@@ -761,7 +764,7 @@ select {
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--bg-1);
-  min-height: 120px;
+  min-height: 40px;
 }
 
 .layer-row {
@@ -805,6 +808,21 @@ select {
 
 .layers-buttons {
   display: flex;
+  flex-shrink: 0;
   gap: 4px;
   margin-top: 6px;
+}
+
+/* layer drag-and-drop reordering */
+
+.layer-row.dragging {
+  opacity: 0.45;
+}
+
+.layer-row.drop-above {
+  box-shadow: inset 0 2px 0 0 var(--accent);
+}
+
+.layer-row.drop-below {
+  box-shadow: inset 0 -2px 0 0 var(--accent);
 }

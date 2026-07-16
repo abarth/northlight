@@ -4,6 +4,7 @@ import { hsvToRgb, rgbToHex } from '../color/convert';
 import {
   BrushIcon,
   EraserIcon,
+  EyedropperIcon,
   HandIcon,
   LassoIcon,
   MarqueeIcon,
@@ -17,6 +18,7 @@ const TOOLS: { id: ToolId; label: string; shortcut: string; icon: JSX.Element }[
   { id: 'polyLasso', label: 'Polygonal Lasso', shortcut: 'P', icon: <PolyLassoIcon /> },
   { id: 'brush', label: 'Brush', shortcut: 'B', icon: <BrushIcon /> },
   { id: 'eraser', label: 'Eraser', shortcut: 'E', icon: <EraserIcon /> },
+  { id: 'eyedropper', label: 'Eyedropper', shortcut: 'I', icon: <EyedropperIcon /> },
   { id: 'pan', label: 'Hand', shortcut: 'H', icon: <HandIcon /> },
   { id: 'zoom', label: 'Zoom', shortcut: 'Z', icon: <ZoomIcon /> },
 ];

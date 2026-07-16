@@ -1,6 +1,7 @@
 export type ToolId =
   | 'brush'
   | 'eraser'
+  | 'eyedropper'
   | 'pan'
   | 'zoom'
   | 'marquee'
