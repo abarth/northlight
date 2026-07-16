@@ -692,14 +692,7 @@ export function CanvasView() {
       };
     }
     if (!tr) return null;
-    const h = transformHandleAt(tr, screen, ctrl);
-    const moveTool = s.tool === 'move' && !tr.engaged;
-    if (moveTool && (!tr.showHandles || h.zone === 'inside')) return 'move';
-    if (moveTool && h.zone === 'outside') {
-      const qs2 = tr.quad.map(docToScreen);
-      if (distToQuadEdges(qs2, screen) > ROTATE_BAND * devicePixelRatio) return 'move';
-      // falls through: rotate cursor for the band just outside the box
-    }
+    const h = resolveTransformIntent(tr, screen, ctrl);
     const qs = tr.quad.map(docToScreen);
     const center = {
       x: (qs[0].x + qs[1].x + qs[2].x + qs[3].x) / 4,
@@ -734,6 +727,37 @@ export function CanvasView() {
       case 'perspective':
         return 'crosshair';
     }
+  }
+
+  /**
+   * Resolves what a pointer at `screen` does to the transform box. Shared by
+   * the pointer-down handler and the hover cursor so the interaction regions
+   * cannot diverge. With the move tool, the zones are the same whether or
+   * not the float is engaged: handles transform, a band just outside the
+   * outline rotates (both engage the transform), and everywhere else —
+   * inside or far outside — moves. Other tools (an explicit Free Transform)
+   * rotate anywhere outside, like Photoshop's Ctrl+T.
+   */
+  function resolveTransformIntent(
+    tr: TransformState,
+    screen: Point,
+    ctrl: boolean,
+  ): { op: TransformOp; index: number; engages: boolean } {
+    const h = transformHandleAt(tr, screen, ctrl);
+    if (useStore.getState().tool !== 'move') {
+      return { op: h.op, index: h.index, engages: false };
+    }
+    if (!tr.showHandles && !tr.engaged) return { op: 'move', index: 0, engages: false };
+    if (h.zone === 'inside') return { op: 'move', index: 0, engages: false };
+    if (h.zone === 'outside') {
+      const inBand =
+        distToQuadEdges(tr.quad.map(docToScreen), screen) <=
+        ROTATE_BAND * devicePixelRatio;
+      return inBand
+        ? { op: 'rotate', index: 0, engages: true }
+        : { op: 'move', index: 0, engages: false };
+    }
+    return { op: h.op, index: h.index, engages: true };
   }
 
   /** Builds the drag record for a transform-box interaction. */
@@ -945,28 +969,10 @@ export function CanvasView() {
       }
       const tr = useStore.getState().transform;
       if (!tr) return;
-      let handle = transformHandleAt(tr, screen, e.ctrlKey || e.metaKey);
-      if (t === 'move' && !tr.engaged) {
-        if (!tr.showHandles || handle.zone === 'inside') {
-          handle = { op: 'move', index: 0, zone: 'inside' };
-        } else if (handle.zone === 'outside') {
-          // a band just outside the box rotates (and engages the transform,
-          // like Photoshop's transform controls); farther out still moves
-          if (
-            distToQuadEdges(tr.quad.map(docToScreen), screen) <=
-            ROTATE_BAND * devicePixelRatio
-          ) {
-            handle = { op: 'rotate', index: 0, zone: 'outside' };
-            s.patchTransform({ engaged: true });
-          } else {
-            handle = { op: 'move', index: 0, zone: 'inside' };
-          }
-        } else {
-          // grabbing a handle escalates the float into a full transform
-          s.patchTransform({ engaged: true });
-        }
-      }
-      dragRef.current = makeTransformDrag(tr, handle.op, handle.index, doc);
+      const intent = resolveTransformIntent(tr, screen, e.ctrlKey || e.metaKey);
+      // handle grabs and band rotations escalate the float into a full transform
+      if (intent.engages && !tr.engaged) s.patchTransform({ engaged: true });
+      dragRef.current = makeTransformDrag(tr, intent.op, intent.index, doc);
       return;
     }
 
