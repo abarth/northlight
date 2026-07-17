@@ -10,6 +10,7 @@ import {
   MarqueeIcon,
   MoveIcon,
   PolyLassoIcon,
+  SwapColorsIcon,
   ZoomIcon,
 } from './icons';
 
@@ -31,6 +32,7 @@ export function Toolbar() {
   const fg = useStore((s) => s.fg);
   const bg = useStore((s) => s.bg);
   const swap = useStore((s) => s.swapColors);
+  const setDialog = useStore((s) => s.setDialog);
 
   return (
     <div className="toolbar">
@@ -44,15 +46,26 @@ export function Toolbar() {
           {t.icon}
         </button>
       ))}
-      <div className="fgbg" title="Foreground / background colors (X to swap)" onClick={swap}>
-        <div
+      <div className="fgbg">
+        <button
           className="swatch bg-swatch"
+          title="Background color (click to edit)"
           style={{ background: `#${rgbToHex(hsvToRgb(bg))}` }}
+          onClick={() => setDialog('bgColor')}
         />
-        <div
+        <button
           className="swatch fg-swatch"
+          title="Foreground color (click to edit)"
           style={{ background: `#${rgbToHex(hsvToRgb(fg))}` }}
+          onClick={() => setDialog('fgColor')}
         />
+        <button
+          className="swap-colors"
+          title="Switch foreground and background colors (X)"
+          onClick={swap}
+        >
+          <SwapColorsIcon size={13} />
+        </button>
       </div>
     </div>
   );

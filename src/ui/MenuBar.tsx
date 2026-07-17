@@ -1,15 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   addLayer,
+  applyZoom,
+  copySelection,
   cropToSelection,
+  cutSelection,
   deleteLayer,
   deleteSelectionContents,
   exportPng,
   fillActiveLayer,
+  fitOnScreen,
   flattenImage,
   invertSelection,
   mergeDown,
   openImageFile,
+  paste,
   placeImageFile,
   redo,
   reselect,
@@ -19,6 +24,8 @@ import {
   startTransform,
   transformImmediate,
   undo,
+  zoomIn,
+  zoomOut,
 } from '../controller';
 import { useStore } from '../store';
 
@@ -26,6 +33,8 @@ interface Item {
   label: string;
   shortcut?: string;
   disabled?: boolean;
+  /** shows a check mark in the gutter (toggle items like View > Extras) */
+  checked?: boolean;
   action?: () => void;
   children?: Entry[];
 }
@@ -41,6 +50,9 @@ export function MenuBar() {
   const canUndo = useStore((s) => s.canUndo);
   const canRedo = useStore((s) => s.canRedo);
   const hasSelection = useStore((s) => s.selectionPaths !== null);
+  const hasClipboard = useStore((s) => s.hasClipboard);
+  const showExtras = useStore((s) => s.showExtras);
+  const setShowExtras = useStore((s) => s.setShowExtras);
   const layers = useStore((s) => s.layers);
   const activeLayerId = useStore((s) => s.activeLayerId);
   const setDialog = useStore((s) => s.setDialog);
@@ -92,6 +104,43 @@ export function MenuBar() {
         { label: 'Redo', shortcut: 'Shift+Ctrl+Z', disabled: !canRedo, action: redo },
         'sep',
         {
+          label: 'Cut',
+          shortcut: 'Ctrl+X',
+          disabled: !hasSelection,
+          action: () => void cutSelection(),
+        },
+        {
+          label: 'Copy',
+          shortcut: 'Ctrl+C',
+          disabled: !hasSelection,
+          action: () => void copySelection(false),
+        },
+        {
+          label: 'Copy Merged',
+          shortcut: 'Shift+Ctrl+C',
+          disabled: !hasSelection,
+          action: () => void copySelection(true),
+        },
+        {
+          label: 'Paste',
+          shortcut: 'Ctrl+V',
+          disabled: !hasClipboard,
+          action: () => paste(false),
+        },
+        {
+          label: 'Paste in Place',
+          shortcut: 'Shift+Ctrl+V',
+          disabled: !hasClipboard,
+          action: () => paste(true),
+        },
+        {
+          label: 'Clear',
+          shortcut: 'Delete',
+          disabled: !hasSelection,
+          action: deleteSelectionContents,
+        },
+        'sep',
+        {
           label: 'Fill Foreground',
           shortcut: 'Alt+Backspace',
           action: () => fillActiveLayer('fg'),
@@ -100,12 +149,6 @@ export function MenuBar() {
           label: 'Fill Background',
           shortcut: 'Ctrl+Backspace',
           action: () => fillActiveLayer('bg'),
-        },
-        {
-          label: 'Clear',
-          shortcut: 'Delete',
-          disabled: !hasSelection,
-          action: deleteSelectionContents,
         },
         'sep',
         {
@@ -193,6 +236,23 @@ export function MenuBar() {
         },
       ],
     },
+    {
+      label: 'View',
+      items: [
+        { label: 'Zoom In', shortcut: 'Ctrl++', action: () => zoomIn() },
+        { label: 'Zoom Out', shortcut: 'Ctrl+-', action: () => zoomOut() },
+        { label: 'Fit on Screen', shortcut: 'Ctrl+0', action: fitOnScreen },
+        { label: '100%', shortcut: 'Ctrl+1', action: () => applyZoom(1) },
+        { label: '200%', action: () => applyZoom(2) },
+        'sep',
+        {
+          label: 'Extras',
+          shortcut: 'Ctrl+H',
+          checked: showExtras,
+          action: () => setShowExtras(!showExtras),
+        },
+      ],
+    },
   ];
 
   const renderItems = (items: Entry[]) => (
@@ -213,6 +273,7 @@ export function MenuBar() {
               it.action?.();
             }}
           >
+            <span className="menu-check">{it.checked ? '✓' : ''}</span>
             <span className="menu-label">{it.label}</span>
             {it.shortcut && <span className="menu-shortcut">{it.shortcut}</span>}
             {it.children && <span className="menu-arrow">▸</span>}

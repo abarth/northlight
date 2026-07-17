@@ -63,14 +63,18 @@ export interface TransformState {
   engaged: boolean;
 }
 
-export type DialogId = 'new' | 'imageSize' | 'canvasSize' | null;
+export type DialogId = 'new' | 'imageSize' | 'canvasSize' | 'fgColor' | 'bgColor' | null;
 
 const initialEraser = makeBrush({ tip: { hardness: 1, size: 30, spacing: 0.15 } });
 
 export interface AppState {
   tool: ToolId;
-  /** tool to return to after a spacebar-pan */
-  toolBeforePan: ToolId | null;
+  /**
+   * Photoshop-style temporary tool while modifier keys are held (Space = pan,
+   * Space+Ctrl/Alt = zoom, Alt = eyedropper, Ctrl = move). The base `tool`
+   * stays selected in the toolbar; the effective tool is overrideTool ?? tool.
+   */
+  overrideTool: ToolId | null;
 
   fg: HSV;
   bg: HSV;
@@ -110,13 +114,17 @@ export interface AppState {
 
   view: Viewport;
   selectionPaths: Point[][] | null;
+  /** View > Extras (Ctrl+H): show selection edges and other helpers */
+  showExtras: boolean;
+  /** something has been Cut/Copied and can be pasted */
+  hasClipboard: boolean;
 
   canUndo: boolean;
   canRedo: boolean;
   gpuError: string | null;
 
   setTool: (t: ToolId) => void;
-  setToolBeforePan: (t: ToolId | null) => void;
+  setOverrideTool: (t: ToolId | null) => void;
   setFg: (c: HSV) => void;
   setBg: (c: HSV) => void;
   swapColors: () => void;
@@ -150,13 +158,15 @@ export interface AppState {
 
   setView: (v: Viewport) => void;
   setSelectionPaths: (paths: Point[][] | null) => void;
+  setShowExtras: (v: boolean) => void;
+  setHasClipboard: (v: boolean) => void;
   setHistory: (canUndo: boolean, canRedo: boolean) => void;
   setGpuError: (e: string | null) => void;
 }
 
 export const useStore = create<AppState>((set) => ({
   tool: 'brush',
-  toolBeforePan: null,
+  overrideTool: null,
 
   fg: { h: 0, s: 0, v: 0 }, // black
   bg: { h: 0, s: 0, v: 1 }, // white
@@ -192,13 +202,15 @@ export const useStore = create<AppState>((set) => ({
 
   view: { zoom: 1, panX: 0, panY: 0 },
   selectionPaths: null,
+  showExtras: true,
+  hasClipboard: false,
 
   canUndo: false,
   canRedo: false,
   gpuError: null,
 
   setTool: (tool) => set({ tool }),
-  setToolBeforePan: (toolBeforePan) => set({ toolBeforePan }),
+  setOverrideTool: (overrideTool) => set({ overrideTool }),
   setFg: (fg) => set({ fg }),
   setBg: (bg) => set({ bg }),
   swapColors: () => set((s) => ({ fg: s.bg, bg: s.fg })),
@@ -289,6 +301,8 @@ export const useStore = create<AppState>((set) => ({
 
   setView: (view) => set({ view }),
   setSelectionPaths: (selectionPaths) => set({ selectionPaths }),
+  setShowExtras: (showExtras) => set({ showExtras }),
+  setHasClipboard: (hasClipboard) => set({ hasClipboard }),
   setHistory: (canUndo, canRedo) => set({ canUndo, canRedo }),
   setGpuError: (gpuError) => set({ gpuError }),
 }));

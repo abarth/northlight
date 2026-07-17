@@ -1426,6 +1426,99 @@ kbAssert('tip outline: unknown tip traces the round fallback mark', outline.unkn
 kbAssert('tip outline: spatter keeps only meaningful islands', outline.spatter >= 1,
   JSON.stringify(outline));
 
+// ---- temporary tool overrides (Space / Alt / Ctrl), like Photoshop ----
+await page.evaluate(() => {
+  window.__northlight.store.getState().setTool('brush');
+});
+const toolState = () => page.evaluate(() => {
+  const s = window.__northlight.store.getState();
+  return { tool: s.tool, override: s.overrideTool };
+});
+
+await page.keyboard.down('Space');
+kbAssert('Space overrides to the hand tool',
+  (await toolState()).override === 'pan', JSON.stringify(await toolState()));
+await page.keyboard.down('Alt');
+kbAssert('Space+Alt overrides to the zoom tool',
+  (await toolState()).override === 'zoom', JSON.stringify(await toolState()));
+await page.keyboard.up('Alt');
+kbAssert('releasing Alt returns to the hand tool',
+  (await toolState()).override === 'pan', JSON.stringify(await toolState()));
+await page.keyboard.down('Alt');
+await page.keyboard.up('Space');
+kbAssert('releasing Space (Alt still held, brush) leaves the eyedropper',
+  (await toolState()).override === 'eyedropper', JSON.stringify(await toolState()));
+await page.keyboard.up('Alt');
+{
+  const st = await toolState();
+  kbAssert('releasing all modifiers restores the brush',
+    st.tool === 'brush' && st.override === null, JSON.stringify(st));
+}
+
+await page.keyboard.down('Control');
+kbAssert('Ctrl with the brush overrides to move',
+  (await toolState()).override === 'move', JSON.stringify(await toolState()));
+await page.keyboard.up('Control');
+
+await page.keyboard.down('Space');
+await page.keyboard.press('e');
+{
+  const st = await toolState();
+  kbAssert('tool shortcut while Space is held retargets the base tool',
+    st.tool === 'eraser' && st.override === 'pan', JSON.stringify(st));
+}
+await page.keyboard.up('Space');
+await page.evaluate(() => window.__northlight.store.getState().setTool('brush'));
+
+// ---- View shortcuts: zoom stops and Extras ----
+await page.evaluate(() => {
+  window.__northlight.store.getState().setView({ zoom: 1, panX: 0, panY: 0 });
+});
+const zoomLevel = () => page.evaluate(() => window.__northlight.store.getState().view.zoom);
+await page.keyboard.press('Control+=');
+kbAssert('Ctrl+= zooms in to the next stop (200%)',
+  (await zoomLevel()) === 2, String(await zoomLevel()));
+await page.keyboard.press('Control+-');
+await page.keyboard.press('Control+-');
+kbAssert('Ctrl+- steps back out through the stops (66.67%)',
+  (await zoomLevel()) === 2 / 3, String(await zoomLevel()));
+await page.keyboard.press('Control+1');
+kbAssert('Ctrl+1 returns to 100%', (await zoomLevel()) === 1, String(await zoomLevel()));
+
+const extras = () => page.evaluate(() => window.__northlight.store.getState().showExtras);
+kbAssert('Extras starts visible', await extras());
+await page.keyboard.press('Control+h');
+kbAssert('Ctrl+H hides Extras', !(await extras()));
+await page.keyboard.press('Control+h');
+kbAssert('Ctrl+H shows Extras again', await extras());
+
+// ---- Edit > Copy / Paste (internal clipboard) ----
+const clip = await page.evaluate(async () => {
+  const NL = window.__northlight;
+  // The on-screen engine can lose its device in headless SwiftShader, so
+  // point the controller at a fresh offscreen engine for the clipboard flow.
+  const doc = NL.store.getState().doc;
+  const canvas = document.createElement('canvas');
+  canvas.width = 320; canvas.height = 200;
+  const eng = await NL.PaintEngine.create(canvas, doc.width, doc.height);
+  NL.setEngine(eng);
+  const before = NL.store.getState().layers.length;
+  NL.edit.selectAll();
+  const copied = await NL.edit.copySelection(false);
+  NL.edit.paste(false);
+  const s = NL.store.getState();
+  return {
+    copied,
+    before,
+    after: s.layers.length,
+    hasClipboard: s.hasClipboard,
+    deselected: s.selectionPaths === null,
+  };
+});
+kbAssert('Copy captures the selection and Paste adds a layer',
+  clip.copied && clip.after === clip.before + 1 && clip.hasClipboard && clip.deselected,
+  JSON.stringify(clip));
+
 console.log(kb.join('\n'));
 
 const all = [...res, ...realResults, ...kb];

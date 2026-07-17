@@ -1,17 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  MAX_ZOOM,
+  MIN_ZOOM,
   applySelectionShape,
   applyTransformPreview,
+  applyZoom,
   autoSelectMoveTarget,
   buildRenderState,
   cancelTransform,
   commitTransform,
+  copySelection,
+  cutSelection,
   deleteSelectionContents,
   fillActiveLayer,
+  fitOnScreen,
   getEngine,
   invertSelection,
   mergeDown,
+  nextZoomStop,
   nudgeMoveSession,
+  paste,
   redo,
   reselect,
   sampleCanvasColor,
@@ -21,6 +29,8 @@ import {
   startMoveSession,
   startTransform,
   transformQuadBy,
+  zoomIn,
+  zoomOut,
   addLayer,
   undo,
 } from '../controller';
@@ -40,9 +50,14 @@ import {
 import type { SelectionOp } from '../gpu/selection';
 import { DOC_SIZE, useStore, type TransformState } from '../store';
 import type { Point, ToolId } from '../types';
-
-const MIN_ZOOM = 1 / 32;
-const MAX_ZOOM = 32;
+import {
+  eyedropperCursor,
+  moveToolCursor,
+  resizeCursorFor,
+  rotateCursor,
+  selectionToolCursor,
+  zoomCursor,
+} from './cursors';
 
 type TransformOp =
   | 'scale'
@@ -101,92 +116,6 @@ const rectCorners = (r: { x: number; y: number; w: number; h: number }): Point[]
   { x: r.x, y: r.y + r.h },
 ];
 
-/**
- * Resize cursor for an on-screen axis, quantized to the four CSS resize
- * cursors. Because the axis comes from the live quad geometry, a box rotated
- * 90° swaps horizontal/vertical arrows and ~45° rotations show diagonals,
- * like Photoshop.
- */
-function resizeCursorFor(dx: number, dy: number): string {
-  let ang = (Math.atan2(dy, dx) * 180) / Math.PI; // y-down screen space
-  ang = ((ang % 180) + 180) % 180;
-  if (ang < 22.5 || ang >= 157.5) return 'ew-resize';
-  if (ang < 67.5) return 'nwse-resize';
-  if (ang < 112.5) return 'ns-resize';
-  return 'nesw-resize';
-}
-
-const rotateCursorCache = new Map<number, string>();
-
-/**
- * Curved double-arrow rotation cursor, oriented for a pointer sitting at
- * `angle` (radians) from the transform box center; the arc bows away from
- * the box. Built as an SVG data URI and cached per 45° step.
- */
-function rotateCursor(angle: number): string {
-  const deg =
-    ((Math.round((angle * 180) / Math.PI / 45) * 45) % 360 + 360) % 360;
-  let cur = rotateCursorCache.get(deg);
-  if (cur) return cur;
-
-  // arc from (16,4) to (16,20), radius 9, bowing toward +x
-  const head = (px: number, py: number, dx: number, dy: number) => {
-    const leg = (rot: number) => {
-      const ca = Math.cos(rot);
-      const sa = Math.sin(rot);
-      const hx = dx * ca - dy * sa;
-      const hy = dx * sa + dy * ca;
-      return `M${px} ${py} l${(hx * 6).toFixed(1)} ${(hy * 6).toFixed(1)}`;
-    };
-    return leg(0.45) + leg(-0.45);
-  };
-  // arrowhead legs point back along the arc so the tips point outward
-  const paths =
-    '<path d="M16 4 A 9 9 0 0 1 16 20"/>' +
-    `<path d="${head(16, 4, 0.894, 0.447)}"/>` +
-    `<path d="${head(16, 20, 0.894, -0.447)}"/>`;
-  const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24">` +
-    `<g transform="rotate(${deg} 12 12)" fill="none" stroke-linecap="round">` +
-    `<g stroke="%23fff" stroke-width="4.5">${paths}</g>` +
-    `<g stroke="%23000" stroke-width="1.8">${paths}</g>` +
-    `</g></svg>`;
-  cur = `url("data:image/svg+xml,${svg.replace(/"/g, "'")}") 12 12, auto`;
-  rotateCursorCache.set(deg, cur);
-  return cur;
-}
-
-const selectionCursorCache = new Map<SelectionOp, string>();
-
-/**
- * Crosshair cursor with a Photoshop-style badge at the lower right showing
- * the pending boolean op: + (add), − (subtract), × (intersect). Built as an
- * SVG data URI and cached per op; 'new' is the plain CSS crosshair.
- */
-function selectionCursor(op: SelectionOp): string {
-  if (op === 'new') return 'crosshair';
-  let cur = selectionCursorCache.get(op);
-  if (cur) return cur;
-
-  const cross = '<path d="M10 3v14M3 10h14"/>';
-  const badge =
-    op === 'add'
-      ? '<path d="M19 15v8M15 19h8"/>'
-      : op === 'subtract'
-        ? '<path d="M15 19h8"/>'
-        : '<path d="M16 16l6 6M22 16l-6 6"/>';
-  const paths = cross + badge;
-  const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26">` +
-    `<g fill="none" stroke-linecap="round">` +
-    `<g stroke="%23fff" stroke-width="3.4">${paths}</g>` +
-    `<g stroke="%23000" stroke-width="1.6">${paths}</g>` +
-    `</g></svg>`;
-  cur = `url("data:image/svg+xml,${svg.replace(/"/g, "'")}") 10 10, crosshair`;
-  selectionCursorCache.set(op, cur);
-  return cur;
-}
-
 /** Shift-drag: snap movement to horizontal / vertical / 45° diagonals. */
 function constrain45(dx: number, dy: number): [number, number] {
   if (Math.abs(dx) > 2 * Math.abs(dy)) return [dx, 0];
@@ -212,6 +141,16 @@ function distToQuadEdges(q: Point[], p: Point): number {
 
 /** How far outside the box the move tool's rotate zone extends (CSS px). */
 const ROTATE_BAND = 22;
+
+/** Tools where holding Ctrl temporarily switches to Move, like Photoshop. */
+const CTRL_MOVE_TOOLS: ReadonlySet<ToolId> = new Set([
+  'brush',
+  'eraser',
+  'eyedropper',
+  'marquee',
+  'lasso',
+  'polyLasso',
+]);
 
 function pointInQuad(p: Point, q: Point[]): boolean {
   let inside = false;
@@ -240,9 +179,10 @@ export function CanvasView() {
     y: 0,
     over: false,
   });
+  /** currently held modifier keys, for the temporary-tool overrides */
   const spaceRef = useRef(false);
-  /** tool to restore when Alt is released (temporary eyedropper) */
-  const toolBeforeEyedropRef = useRef<ToolId | null>(null);
+  const altRef = useRef(false);
+  const ctrlRef = useRef(false);
   /** drops overlapping eyedropper readbacks while one is in flight */
   const samplingRef = useRef(false);
   const digitRef = useRef<{ str: string; at: number; target: 'opacity' | 'flow' }>({
@@ -253,11 +193,14 @@ export function CanvasView() {
   const [ready, setReady] = useState(false);
 
   const tool = useStore((s) => s.tool);
+  const overrideTool = useStore((s) => s.overrideTool);
   const gpuError = useStore((s) => s.gpuError);
   const fitNonce = useStore((s) => s.fitNonce);
   const hasTransform = useStore((s) => s.transform !== null);
   /** cursor for the transform overlay element under the pointer */
   const [hoverCursor, setHoverCursor] = useState<string | null>(null);
+  /** Alt held: zoom tool shows the zoom-out cursor, like Photoshop */
+  const [altDown, setAltDown] = useState(false);
   /** boolean-op override for an in-progress polygonal lasso */
   const polyOpRef = useRef<SelectionOp>('new');
 
@@ -276,7 +219,7 @@ export function CanvasView() {
         });
         setEngine(engine);
         engine.resize();
-        fitView();
+        fitOnScreen();
         setReady(true);
         const loop = () => {
           // Device loss surfaces via device.lost above; keep the loop alive
@@ -305,15 +248,45 @@ export function CanvasView() {
 
   useEffect(() => {
     if (!hasTransform) setHoverCursor(null);
-  }, [hasTransform, tool]);
+  }, [hasTransform, tool, overrideTool]);
 
   // re-fit after document size changes (New / Image Size / Canvas Size / ...)
   useEffect(() => {
     if (!ready) return;
     getEngine()?.resize();
-    fitView();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    fitOnScreen();
   }, [fitNonce, ready]);
+
+  /**
+   * Photoshop-style temporary tool overrides from held keys, resolved from
+   * the full modifier state so any press/release order works:
+   *   Space = hand; Space+Ctrl = zoom in; Space+Alt = zoom out;
+   *   Alt with a painting tool = eyedropper; Ctrl = move.
+   * The base tool never changes — the override lives beside it in the store —
+   * so releasing the keys always returns to where you started, and e.g.
+   * Space+Alt releasing just Space lands on the eyedropper.
+   */
+  function syncOverride() {
+    // keep the temporary tool through an active drag, like Photoshop
+    if (dragRef.current) return;
+    const s = useStore.getState();
+    const base = s.tool;
+    let ov: ToolId | null = null;
+    if (spaceRef.current) {
+      ov = altRef.current || ctrlRef.current ? 'zoom' : 'pan';
+    } else if (!s.transform && altRef.current && (base === 'brush' || base === 'eraser')) {
+      ov = 'eyedropper';
+    } else if (!s.transform && ctrlRef.current && CTRL_MOVE_TOOLS.has(base)) {
+      ov = 'move';
+    }
+    if (ov === base) ov = null;
+    if (ov === s.overrideTool) return;
+    // leaving a Ctrl-move: bake the float so the base tool paints again
+    if (s.overrideTool === 'move' && ov !== 'move' && s.transform && !s.transform.engaged) {
+      commitTransform();
+    }
+    s.setOverrideTool(ov);
+  }
 
   // --- keyboard shortcuts ---
   useEffect(() => {
@@ -325,11 +298,10 @@ export function CanvasView() {
       const s = useStore.getState();
       const mod = e.ctrlKey || e.metaKey;
 
-      if (e.code === 'Space' && !e.repeat) {
-        spaceRef.current = true;
-        if (s.tool !== 'pan' && !s.toolBeforePan) {
-          s.setToolBeforePan(s.tool);
-          s.setTool('pan');
+      if (e.code === 'Space') {
+        if (!spaceRef.current) {
+          spaceRef.current = true;
+          syncOverride();
         }
         e.preventDefault();
         return;
@@ -339,19 +311,20 @@ export function CanvasView() {
       if (['Shift', 'Alt', 'Control', 'Meta'].includes(e.key)) {
         updateHoverCursor(e);
       }
-      // Holding Alt with a painting tool temporarily switches to the
-      // eyedropper (which then samples the foreground color), like Photoshop.
       if (e.key === 'Alt') {
-        if (
-          !e.repeat &&
-          !s.transform &&
-          (s.tool === 'brush' || s.tool === 'eraser') &&
-          !toolBeforeEyedropRef.current
-        ) {
-          toolBeforeEyedropRef.current = s.tool;
-          s.setTool('eyedropper');
+        if (!altRef.current) {
+          altRef.current = true;
+          setAltDown(true);
+          syncOverride();
         }
         e.preventDefault(); // keep the browser from focusing its menu bar
+        return;
+      }
+      if (e.key === 'Control' || e.key === 'Meta') {
+        if (!ctrlRef.current) {
+          ctrlRef.current = true;
+          syncOverride();
+        }
         return;
       }
       if (mod && e.key.toLowerCase() === 'z') {
@@ -392,6 +365,46 @@ export function CanvasView() {
         s.setDialog('canvasSize');
         return;
       }
+      // Clipboard: Ctrl+X cut, Ctrl+C copy, Shift+Ctrl+C copy merged,
+      // Ctrl+V paste, Shift+Ctrl+V paste in place.
+      if (mod && e.key.toLowerCase() === 'x') {
+        e.preventDefault();
+        void cutSelection();
+        return;
+      }
+      if (mod && e.key.toLowerCase() === 'c') {
+        e.preventDefault();
+        void copySelection(e.shiftKey);
+        return;
+      }
+      if (mod && e.key.toLowerCase() === 'v') {
+        e.preventDefault();
+        paste(e.shiftKey);
+        return;
+      }
+      // Ctrl+H toggles Extras (selection edges), like Photoshop
+      if (mod && e.key.toLowerCase() === 'h') {
+        e.preventDefault();
+        s.setShowExtras(!s.showExtras);
+        return;
+      }
+      // Ctrl+= / Ctrl+- step through the zoom stops
+      if (mod && (e.key === '=' || e.key === '+')) {
+        e.preventDefault();
+        zoomIn();
+        return;
+      }
+      if (mod && (e.key === '-' || e.key === '_')) {
+        e.preventDefault();
+        zoomOut();
+        return;
+      }
+      // Ctrl+Alt+0 = 100%, like Photoshop's Actual Pixels
+      if (mod && e.altKey && e.key === '0') {
+        e.preventDefault();
+        applyZoom(1);
+        return;
+      }
       if (mod && e.key.toLowerCase() === 't') {
         e.preventDefault();
         void startTransform('layer', 'free');
@@ -414,12 +427,12 @@ export function CanvasView() {
       }
       if (mod && e.key === '0') {
         e.preventDefault();
-        fitView();
+        fitOnScreen();
         return;
       }
       if (mod && e.key === '1') {
         e.preventDefault();
-        zoomTo(1);
+        applyZoom(1);
         return;
       }
       // Photoshop fill/clear shortcuts: Alt+Backspace fills the foreground
@@ -539,27 +552,36 @@ export function CanvasView() {
       }
       if (e.code === 'Space') {
         spaceRef.current = false;
-        const s = useStore.getState();
-        if (s.toolBeforePan) {
-          s.setTool(s.toolBeforePan);
-          s.setToolBeforePan(null);
-        }
-      }
-      if (e.key === 'Alt') {
-        const back = toolBeforeEyedropRef.current;
-        toolBeforeEyedropRef.current = null;
-        const s = useStore.getState();
-        if (back && s.tool === 'eyedropper') s.setTool(back);
+        syncOverride();
+      } else if (e.key === 'Alt') {
+        altRef.current = false;
+        setAltDown(false);
+        syncOverride();
         e.preventDefault();
+      } else if (e.key === 'Control' || e.key === 'Meta') {
+        ctrlRef.current = false;
+        syncOverride();
       }
+    };
+
+    // Alt+Tab and friends: key-up events never arrive, so drop all overrides
+    const onBlur = () => {
+      spaceRef.current = false;
+      altRef.current = false;
+      ctrlRef.current = false;
+      setAltDown(false);
+      syncOverride();
     };
 
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // --- wheel zoom (non-passive) ---
@@ -598,37 +620,6 @@ export function CanvasView() {
     return { x: p.x * v.zoom + v.panX, y: p.y * v.zoom + v.panY };
   }
 
-  function applyZoom(newZoom: number, screenAnchor: Point) {
-    const s = useStore.getState();
-    const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newZoom));
-    const doc = screenToDoc(screenAnchor);
-    s.setView({
-      zoom,
-      panX: screenAnchor.x - doc.x * zoom,
-      panY: screenAnchor.y - doc.y * zoom,
-    });
-  }
-
-  function zoomTo(zoom: number) {
-    const canvas = canvasRef.current!;
-    applyZoom(zoom, { x: canvas.width / 2, y: canvas.height / 2 });
-  }
-
-  function fitView() {
-    const canvas = canvasRef.current!;
-    const w = canvas.width;
-    const h = canvas.height;
-    const zoom = Math.min(
-      MAX_ZOOM,
-      Math.max(MIN_ZOOM, Math.min((w * 0.9) / DOC_SIZE.width, (h * 0.9) / DOC_SIZE.height)),
-    );
-    useStore.getState().setView({
-      zoom,
-      panX: (w - DOC_SIZE.width * zoom) / 2,
-      panY: (h - DOC_SIZE.height * zoom) / 2,
-    });
-  }
-
   function sampleOf(e: PointerEvent, doc: Point): PointerSample {
     return {
       x: doc.x,
@@ -641,8 +632,9 @@ export function CanvasView() {
   }
 
   function activeTool(e: { button?: number }): ToolId {
-    if (e.button === 1 || spaceRef.current) return 'pan';
-    return useStore.getState().tool;
+    if (e.button === 1) return 'pan'; // middle-button pan
+    const s = useStore.getState();
+    return s.overrideTool ?? s.tool;
   }
 
   function closePoly() {
@@ -706,7 +698,8 @@ export function CanvasView() {
   function transformCursorAt(screen: Point, ctrl: boolean): string | null {
     const s = useStore.getState();
     let tr = s.transform;
-    if (!tr && s.tool === 'move' && s.moveShowTransform && s.selectionPaths) {
+    const effTool = s.overrideTool ?? s.tool;
+    if (!tr && effTool === 'move' && s.moveShowTransform && s.selectionPaths) {
       let minX = Infinity;
       let minY = Infinity;
       let maxX = -Infinity;
@@ -781,12 +774,13 @@ export function CanvasView() {
    */
   function selectionModCursor(mods: { shiftKey: boolean; altKey: boolean }): string | null {
     const s = useStore.getState();
-    if (s.transform || spaceRef.current) return null;
-    if (s.tool !== 'marquee' && s.tool !== 'lasso' && s.tool !== 'polyLasso') return null;
+    if (s.transform || s.overrideTool) return null;
+    const t = s.tool;
+    if (t !== 'marquee' && t !== 'lasso' && t !== 'polyLasso') return null;
     // an in-progress polygonal lasso locked its op at the first click
     const fallback = polyRef.current ? polyOpRef.current : s.selectionOp;
     const op = selectionOpFromEvent(mods, fallback);
-    return op === 'new' ? null : selectionCursor(op);
+    return op === 'new' ? null : selectionToolCursor(t, op);
   }
 
   /**
@@ -802,7 +796,9 @@ export function CanvasView() {
   }) {
     if (dragRef.current) return;
     const cur = cursorRef.current;
-    if (!cur.over) {
+    const ov = useStore.getState().overrideTool;
+    // a temporary hand/zoom keeps its own cursor, even over a transform box
+    if (!cur.over || ov === 'pan' || ov === 'zoom') {
       setHoverCursor(null);
       return;
     }
@@ -827,7 +823,8 @@ export function CanvasView() {
     ctrl: boolean,
   ): { op: TransformOp; index: number; engages: boolean } {
     const h = transformHandleAt(tr, screen, ctrl);
-    if (useStore.getState().tool !== 'move') {
+    const s = useStore.getState();
+    if ((s.overrideTool ?? s.tool) !== 'move') {
       return { op: h.op, index: h.index, engages: false };
     }
     if (!tr.showHandles && !tr.engaged) return { op: 'move', index: 0, engages: false };
@@ -986,7 +983,8 @@ export function CanvasView() {
    * foreground, since Alt is what invoked it — matching Photoshop.
    */
   function eyedropAt(doc: Point, altKey: boolean) {
-    const target: 'fg' | 'bg' = !toolBeforeEyedropRef.current && altKey ? 'bg' : 'fg';
+    const temporary = useStore.getState().overrideTool === 'eyedropper';
+    const target: 'fg' | 'bg' = !temporary && altKey ? 'bg' : 'fg';
     if (samplingRef.current) return;
     samplingRef.current = true;
     sampleCanvasColor(doc.x, doc.y)
@@ -1234,7 +1232,8 @@ export function CanvasView() {
         break;
       case 'zoom':
         if (!drag.moved) {
-          applyZoom(s.view.zoom * (e.altKey ? 1 / 1.5 : 1.5), screen);
+          // click steps to the next Photoshop zoom stop; Alt+click zooms out
+          applyZoom(nextZoomStop(s.view.zoom, e.altKey ? 'out' : 'in'), screen);
         }
         break;
       case 'marquee': {
@@ -1271,6 +1270,9 @@ export function CanvasView() {
       case 'transform':
         break;
     }
+
+    // modifiers released mid-drag apply now that the drag is over
+    syncOverride();
   }
 
   // -------------------------------------------------------------------------
@@ -1319,8 +1321,9 @@ export function CanvasView() {
       ctx.setLineDash([]);
     };
 
-    // committed selection (mapped through an in-progress transform)
-    if (s.selectionPaths) {
+    // committed selection (mapped through an in-progress transform);
+    // hidden while Extras is off (View > Extras, Ctrl+H)
+    if (s.selectionPaths && s.showExtras) {
       let paths = s.selectionPaths;
       if (s.transform) {
         const H = homographyFromQuads(
@@ -1420,7 +1423,7 @@ export function CanvasView() {
     // flips (the shader flips uv, so the mark mirrors), rotate by the static
     // tip angle (negated to Photoshop's CCW-positive convention).
     const cur = cursorRef.current;
-    const t = spaceRef.current ? 'pan' : s.tool;
+    const t = s.overrideTool ?? s.tool;
     if (cur.over && (t === 'brush' || t === 'eraser')) {
       const tip = (t === 'eraser' ? s.eraser : s.brush).tip;
       const r = Math.max((tip.size / 2) * s.view.zoom, 1);
@@ -1468,23 +1471,29 @@ export function CanvasView() {
     }
   }
 
-  const cursorStyle: Record<string, string> = {
-    move: 'move',
-    brush: 'none',
-    eraser: 'none',
-    eyedropper: 'crosshair',
-    pan: dragRef.current?.kind === 'pan' ? 'grabbing' : 'grab',
-    zoom: 'zoom-in',
-    marquee: 'crosshair',
-    lasso: 'crosshair',
-    polyLasso: 'crosshair',
-  };
+  /** Base cursor for the effective tool; Alt flips the zoom cursor to −. */
+  function baseCursorFor(t: ToolId, alt: boolean): string {
+    switch (t) {
+      case 'move': return moveToolCursor();
+      case 'brush':
+      case 'eraser': return 'none'; // the overlay draws the tip outline
+      case 'eyedropper': return eyedropperCursor();
+      case 'pan': return dragRef.current?.kind === 'pan' ? 'grabbing' : 'grab';
+      case 'zoom': return zoomCursor(alt ? 'out' : 'in');
+      case 'marquee': return 'crosshair';
+      case 'lasso': return selectionToolCursor('lasso', 'new');
+      case 'polyLasso': return selectionToolCursor('polyLasso', 'new');
+    }
+  }
 
   return (
     <div
       ref={wrapRef}
       className="canvas-wrap"
-      style={{ cursor: hoverCursor ?? cursorStyle[tool] ?? 'default', touchAction: 'none' }}
+      style={{
+        cursor: hoverCursor ?? baseCursorFor(overrideTool ?? tool, altDown),
+        touchAction: 'none',
+      }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}

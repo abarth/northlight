@@ -166,7 +166,10 @@ airbrush toggle, **Smoothing**, and the pressure-controls-size button.
   on the GPU, so nothing degrades while you drag.
 
 ### Document
-- Photoshop-style **menu bar** (File / Edit / Image / Layer / Select).
+- Photoshop-style **menu bar** (File / Edit / Image / Layer / Select / View).
+- **Edit > Cut / Copy / Copy Merged / Paste / Paste in Place**: an internal
+  clipboard that carries the selected pixels (mask-feathered edges included);
+  Paste lands on a new layer, centered or in place.
 - **File > New** with paper presets (Letter, Legal, Tabloid, A3–A6) and
   screen presets, in pixels / inches / cm / mm at a chosen resolution (ppi).
 - **Image Size** (resample toggle, constrain proportions, percent units) and
@@ -190,11 +193,22 @@ airbrush toggle, **Smoothing**, and the pressure-controls-size button.
   values outside the sRGB gamut hold steady while you edit (the exported
   paint color clamps), instead of drifting through an RGB round-trip.
 - Numeric readouts + hex input in every mode, foreground/background
-  swatches (`X` swap, `D` reset).
+  swatches (`X` swap, `D` reset). Clicking a swatch opens the picker in a
+  dialog; the little bent arrows above the swatches swap them.
 
 ### Navigation & workflow
-- Pan tool (or hold **Space**), zoom tool (click / Alt-click / scrubby drag),
-  wheel zoom around the cursor, `Ctrl+0` fit, `Ctrl+1` 100%.
+- Pan tool (or hold **Space**), zoom tool (click / Alt-click / scrubby drag;
+  clicks step through the Photoshop zoom stops), wheel zoom around the
+  cursor, `Ctrl+=` / `Ctrl+-` zoom in/out, `Ctrl+0` fit, `Ctrl+1` 100%.
+- Photoshop's temporary-tool chords, in any press/release order: **Space**
+  pans, **Space+Ctrl** zooms in, **Space+Alt** zooms out, **Alt** with a
+  painting tool eyedrops, **Ctrl** moves — and releasing keys falls back
+  through the chord (Space+Alt then releasing Space leaves the eyedropper).
+  The toolbar selection never changes; the keys only borrow the tool.
+- Per-tool cursors, like Photoshop: eyedropper, lassos with +/−/× selection
+  badges, zoom with +/− (Alt flips it), move arrow with the four-way badge.
+- **View > Extras** (`Ctrl+H`) hides the selection edges while keeping the
+  selection active.
 - Undo/redo for strokes (`Ctrl+Z` / `Ctrl+Shift+Z`), flattened PNG export,
   transparency checkerboard, live brush-outline cursor.
 
@@ -206,15 +220,19 @@ airbrush toggle, **Smoothing**, and the pressure-controls-size button.
 | B / E | Brush / Eraser |
 | I | Eyedropper (Alt+click picks the background color) |
 | Alt (held with brush/eraser) | Temporary eyedropper |
+| Ctrl (held) | Temporary move tool |
 | M / L / P | Marquee / Lasso / Polygonal lasso |
 | Shift / Alt / Shift+Alt (drag) | Add / subtract / intersect selection |
 | H / Z / Space | Hand / Zoom / temporary pan |
+| Space+Ctrl / Space+Alt (held) | Temporary zoom in / zoom out |
 | [ / ] | Decrease / increase brush size |
 | Shift+[ / Shift+] | Hardness −25% / +25% |
 | 1…0 | Brush opacity (5 → 50%, 45 typed quickly → 45%, 0 → 100%) |
 | Shift+1…0 | Brush flow (swapped with opacity while airbrush is on) |
 | X / D | Swap / reset colors |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / Redo |
+| Ctrl+X / Ctrl+C / Ctrl+Shift+C | Cut / Copy / Copy Merged |
+| Ctrl+V / Ctrl+Shift+V | Paste / Paste in Place |
 | Ctrl+T | Free Transform (Enter applies, Esc cancels) |
 | Ctrl+A / Ctrl+D | Select all / Deselect |
 | Ctrl+Shift+D / Ctrl+Shift+I | Reselect / Inverse |
@@ -222,7 +240,9 @@ airbrush toggle, **Smoothing**, and the pressure-controls-size button.
 | Arrows (Move tool or transform) | Nudge 1 px (Shift = 10 px) |
 | Ctrl+Shift+N / Ctrl+E | New layer / Merge down |
 | Alt+Ctrl+I / Alt+Ctrl+C | Image Size / Canvas Size |
-| Ctrl+0 / Ctrl+1 | Fit view / 100% |
+| Ctrl+= / Ctrl+- | Zoom in / out through the zoom stops |
+| Ctrl+0 / Ctrl+1 (or Alt+Ctrl+0) | Fit view / 100% |
+| Ctrl+H | Toggle Extras (selection edges) |
 
 ## Architecture
 

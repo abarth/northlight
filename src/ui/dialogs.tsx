@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { newDocument, resizeCanvas, resizeImage } from '../controller';
 import { useStore } from '../store';
+import type { HSV } from '../types';
+import { ColorPickerBody } from './ColorPicker';
 
 const MAX_DIM = 8192;
 
@@ -422,6 +424,38 @@ export function CanvasSizeDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Color Picker (clicking the foreground / background swatch)
+// ---------------------------------------------------------------------------
+
+export function ColorPickerDialog({
+  target,
+  onClose,
+}: {
+  target: 'fg' | 'bg';
+  onClose: () => void;
+}) {
+  // edits stay local until OK, like Photoshop's picker
+  const [draft, setDraft] = useState<HSV>(() => useStore.getState()[target]);
+
+  const ok = () => {
+    const s = useStore.getState();
+    if (target === 'fg') s.setFg(draft);
+    else s.setBg(draft);
+    onClose();
+  };
+
+  return (
+    <Dialog
+      title={`Color Picker (${target === 'fg' ? 'Foreground' : 'Background'} Color)`}
+      onOk={ok}
+      onClose={onClose}
+    >
+      <ColorPickerBody color={draft} onChange={setDraft} />
+    </Dialog>
+  );
+}
+
 export function Dialogs() {
   const dialog = useStore((s) => s.dialog);
   const setDialog = useStore((s) => s.setDialog);
@@ -429,5 +463,7 @@ export function Dialogs() {
   if (dialog === 'new') return <NewDocDialog onClose={close} />;
   if (dialog === 'imageSize') return <ImageSizeDialog onClose={close} />;
   if (dialog === 'canvasSize') return <CanvasSizeDialog onClose={close} />;
+  if (dialog === 'fgColor') return <ColorPickerDialog target="fg" onClose={close} />;
+  if (dialog === 'bgColor') return <ColorPickerDialog target="bg" onClose={close} />;
   return null;
 }

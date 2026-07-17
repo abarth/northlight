@@ -1325,6 +1325,11 @@ export class PaintEngine {
     return this.format;
   }
 
+  /** Canvas size in device pixels — the coordinate space of Viewport pan. */
+  get viewSize(): { width: number; height: number } {
+    return { width: this.canvas.width, height: this.canvas.height };
+  }
+
   /** Flattened document pixels (premultiplied RGBA), for export. */
   async readComposite(state: RenderState): Promise<Uint8Array<ArrayBuffer>> {
     const enc = this.device.createCommandEncoder();

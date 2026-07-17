@@ -58,6 +58,21 @@ declare global {
         importAbr: typeof importAbr;
         tipOutline: typeof tipOutline;
       };
+      setEngine: typeof setEngine;
+      edit: {
+        selectAll: typeof selectAll;
+        setSelection: typeof setSelection;
+        copySelection: typeof copySelection;
+        cutSelection: typeof cutSelection;
+        paste: typeof paste;
+      };
+      view: {
+        zoomIn: typeof zoomIn;
+        zoomOut: typeof zoomOut;
+        zoomTo: typeof zoomTo;
+        fitOnScreen: typeof fitOnScreen;
+        nextZoomStop: typeof nextZoomStop;
+      };
     };
   }
 }
@@ -79,6 +94,9 @@ window.__northlight = {
     importAbr,
     tipOutline,
   },
+  setEngine,
+  edit: { selectAll, setSelection, copySelection, cutSelection, paste },
+  view: { zoomIn, zoomOut, zoomTo, fitOnScreen, nextZoomStop },
 };
 
 export function setEngine(e: PaintEngine | null): void {
@@ -250,6 +268,167 @@ export function selectAll(): void {
       { x: 0, y: height },
     ],
   ]);
+}
+
+// ---------------------------------------------------------------------------
+// View (View > Zoom In / Zoom Out / Fit on Screen / 100%)
+// ---------------------------------------------------------------------------
+
+export const MIN_ZOOM = 1 / 32;
+export const MAX_ZOOM = 32;
+
+/** Photoshop-style zoom stops used by Zoom In/Out and zoom-tool clicks. */
+const ZOOM_STOPS = [
+  1 / 32, 1 / 24, 1 / 16, 1 / 12, 1 / 8, 1 / 6, 1 / 4, 1 / 3, 1 / 2, 2 / 3,
+  1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32,
+];
+
+export function nextZoomStop(zoom: number, dir: 'in' | 'out'): number {
+  if (dir === 'in') {
+    for (const s of ZOOM_STOPS) if (s > zoom * 1.001) return s;
+    return MAX_ZOOM;
+  }
+  for (let i = ZOOM_STOPS.length - 1; i >= 0; i--) {
+    if (ZOOM_STOPS[i] < zoom * 0.999) return ZOOM_STOPS[i];
+  }
+  return MIN_ZOOM;
+}
+
+/**
+ * Sets the zoom, keeping `anchor` (device pixels; defaults to the viewport
+ * center) fixed on the same document point.
+ */
+export function applyZoom(newZoom: number, anchor?: Point): void {
+  const s = useStore.getState();
+  const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newZoom));
+  const size = engine?.viewSize;
+  const a = anchor ?? { x: (size?.width ?? 0) / 2, y: (size?.height ?? 0) / 2 };
+  const v = s.view;
+  const doc = { x: (a.x - v.panX) / v.zoom, y: (a.y - v.panY) / v.zoom };
+  s.setView({ zoom, panX: a.x - doc.x * zoom, panY: a.y - doc.y * zoom });
+}
+
+export function zoomIn(anchor?: Point): void {
+  applyZoom(nextZoomStop(useStore.getState().view.zoom, 'in'), anchor);
+}
+
+export function zoomOut(anchor?: Point): void {
+  applyZoom(nextZoomStop(useStore.getState().view.zoom, 'out'), anchor);
+}
+
+export function zoomTo(zoom: number): void {
+  applyZoom(zoom);
+}
+
+/** View > Fit on Screen: centers the document at the largest comfortable fit. */
+export function fitOnScreen(): void {
+  const size = engine?.viewSize;
+  if (!size || size.width === 0) return;
+  const zoom = Math.min(
+    MAX_ZOOM,
+    Math.max(
+      MIN_ZOOM,
+      Math.min((size.width * 0.9) / DOC_SIZE.width, (size.height * 0.9) / DOC_SIZE.height),
+    ),
+  );
+  useStore.getState().setView({
+    zoom,
+    panX: (size.width - DOC_SIZE.width * zoom) / 2,
+    panY: (size.height - DOC_SIZE.height * zoom) / 2,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard (Edit > Cut / Copy / Copy Merged / Paste)
+// ---------------------------------------------------------------------------
+
+interface ClipboardContent {
+  /** premultiplied RGBA, width*height*4 */
+  data: Uint8Array;
+  width: number;
+  height: number;
+  /** document position the pixels were copied from (for Paste in Place) */
+  x: number;
+  y: number;
+}
+
+let clipboard: ClipboardContent | null = null;
+
+/**
+ * Copies the selected pixels — from the active layer, or from the flattened
+ * composite with `merged` — clipped by the selection mask's coverage.
+ * Like Photoshop, Copy needs a selection.
+ */
+export async function copySelection(merged = false): Promise<boolean> {
+  if (!engine || !selectionMask) return false;
+  commitTransform();
+  const s = useStore.getState();
+  const b = maskBounds(selectionMask, DOC_SIZE.width, DOC_SIZE.height);
+  if (!b) return false;
+  const src = merged
+    ? await engine.readComposite(buildRenderState())
+    : await engine.readLayerPixels(s.activeLayerId);
+  if (src.length < DOC_SIZE.width * DOC_SIZE.height * 4) return false;
+  const dw = DOC_SIZE.width;
+  const out = new Uint8Array(b.w * b.h * 4);
+  for (let y = 0; y < b.h; y++) {
+    for (let x = 0; x < b.w; x++) {
+      const m = selectionMask[(b.y + y) * dw + (b.x + x)];
+      if (m === 0) continue;
+      const si = ((b.y + y) * dw + (b.x + x)) * 4;
+      const di = (y * b.w + x) * 4;
+      // premultiplied: scaling all four channels applies the mask coverage
+      out[di] = (src[si] * m + 127) / 255;
+      out[di + 1] = (src[si + 1] * m + 127) / 255;
+      out[di + 2] = (src[si + 2] * m + 127) / 255;
+      out[di + 3] = (src[si + 3] * m + 127) / 255;
+    }
+  }
+  clipboard = { data: out, width: b.w, height: b.h, x: b.x, y: b.y };
+  s.setHasClipboard(true);
+  return true;
+}
+
+export async function cutSelection(): Promise<void> {
+  if (await copySelection(false)) deleteSelectionContents();
+}
+
+/**
+ * Pastes the clipboard as a new layer — centered on the canvas, or at the
+ * position it was copied from with `inPlace` — and drops the selection,
+ * like Photoshop.
+ */
+export function paste(inPlace = false): void {
+  if (!engine || !clipboard) return;
+  const s = useStore.getState();
+  if (s.layers.length >= MAX_LAYERS) return;
+  commitTransform();
+  setSelection(null);
+  const { width: dw, height: dh } = DOC_SIZE;
+  const c = clipboard;
+  const ox = inPlace ? c.x : Math.round((dw - c.width) / 2);
+  const oy = inPlace ? c.y : Math.round((dh - c.height) / 2);
+  const buf = new Uint8Array(dw * dh * 4);
+  const x0 = Math.max(0, ox);
+  const x1 = Math.min(dw, ox + c.width);
+  const y0 = Math.max(0, oy);
+  const y1 = Math.min(dh, oy + c.height);
+  for (let y = y0; y < y1; y++) {
+    const srcOff = ((y - oy) * c.width + (x0 - ox)) * 4;
+    buf.set(c.data.subarray(srcOff, srcOff + (x1 - x0) * 4), (y * dw + x0) * 4);
+  }
+  const id = nextLayerId();
+  engine.putLayerImage(id, buf, dw, dh);
+  s.addLayerMeta(
+    {
+      id,
+      name: `Layer ${s.layers.length + 1}`,
+      visible: true,
+      opacity: 1,
+      blendMode: 'normal',
+    },
+    s.activeLayerId,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -723,7 +902,8 @@ export async function openImageFile(file: File): Promise<void> {
 }
 
 // Switching tools while a transform is open applies it, like Photoshop.
-// Spacebar panning is exempt so you can reposition the view mid-transform.
+// The view tools (hand, zoom) are exempt so you can reposition mid-transform.
+const VIEW_TOOLS: ReadonlySet<string> = new Set(['pan', 'zoom']);
 useStore.subscribe((state, prev) => {
   if (!state.transform) return;
   // Switching to another layer ends the float/transform too.
@@ -731,7 +911,7 @@ useStore.subscribe((state, prev) => {
     commitTransform();
     return;
   }
-  if (state.tool !== prev.tool && state.tool !== 'pan' && prev.tool !== 'pan') {
+  if (state.tool !== prev.tool && !VIEW_TOOLS.has(state.tool) && !VIEW_TOOLS.has(prev.tool)) {
     commitTransform();
   }
 });

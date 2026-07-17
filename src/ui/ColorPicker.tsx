@@ -551,16 +551,25 @@ function OklchArea({ fg, setFg }: { fg: HSV; setFg: (c: HSV) => void }) {
 
 // ---------------------------------------------------------------------------
 
-export function ColorPicker() {
-  const fg = useStore((s) => s.fg);
-  const setFg = useStore((s) => s.setFg);
+/**
+ * The picker UI itself (model tabs, gradient areas, hex row), bound to any
+ * color. The side panel binds it to the foreground color; the swatch dialogs
+ * bind it to a local draft that commits on OK.
+ */
+export function ColorPickerBody({
+  color,
+  onChange,
+}: {
+  color: HSV;
+  onChange: (c: HSV) => void;
+}) {
   const [mode, setMode] = useState<Mode>('hsb');
   const [hexDraft, setHexDraft] = useState<string | null>(null);
 
-  const hex = rgbToHex(hsvToRgb(fg));
+  const hex = rgbToHex(hsvToRgb(color));
 
   return (
-    <div className="panel color-panel">
+    <>
       {/* model tabs stay at the top so they don't move as panel height changes */}
       <div className="mode-tabs">
         {(['hsb', 'rgb', 'lab', 'oklch'] as Mode[]).map((m) => (
@@ -574,10 +583,10 @@ export function ColorPicker() {
         ))}
       </div>
 
-      {mode === 'hsb' && <HsbArea fg={fg} setFg={setFg} />}
-      {mode === 'rgb' && <RgbArea fg={fg} setFg={setFg} />}
-      {mode === 'lab' && <LabArea fg={fg} setFg={setFg} />}
-      {mode === 'oklch' && <OklchArea fg={fg} setFg={setFg} />}
+      {mode === 'hsb' && <HsbArea fg={color} setFg={onChange} />}
+      {mode === 'rgb' && <RgbArea fg={color} setFg={onChange} />}
+      {mode === 'lab' && <LabArea fg={color} setFg={onChange} />}
+      {mode === 'oklch' && <OklchArea fg={color} setFg={onChange} />}
 
       <label className="channel-row hex-row">
         <span className="ch-label">#</span>
@@ -587,13 +596,24 @@ export function ColorPicker() {
           onChange={(e) => {
             setHexDraft(e.target.value);
             const parsed = hexToRgb(e.target.value);
-            if (parsed) setFg(rgbToHsv(parsed, fg.h));
+            if (parsed) onChange(rgbToHsv(parsed, color.h));
           }}
           onBlur={() => setHexDraft(null)}
           spellCheck={false}
         />
         <div className="preview" style={{ background: `#${hex}` }} />
       </label>
+    </>
+  );
+}
+
+export function ColorPicker() {
+  const fg = useStore((s) => s.fg);
+  const setFg = useStore((s) => s.setFg);
+
+  return (
+    <div className="panel color-panel">
+      <ColorPickerBody color={fg} onChange={setFg} />
     </div>
   );
 }
