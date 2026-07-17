@@ -672,6 +672,21 @@ const TEST = `
       const offD = Math.hypot(od[0], od[1]);
       assert('dynamics: dual 100% scatter tops out at half a diameter',
         near(offD, 50, 0.5), 'offset=' + offD);
+
+      // scattered dual marks get a random per-stamp orientation; an
+      // unscattered train keeps the tip upright (angle 0)
+      const os = [];
+      D.emitDualStamps({ ...dual, count: 2 }, ctx(1), 0, 0,
+        NL.brush.patterns.seededRng(5), os);
+      const a0 = os[4];
+      const a1 = os[D.STAMP_FLOATS + 4];
+      assert('dynamics: scattered dual marks get random orientations',
+        a0 !== a1 && (a0 > 0 || a1 > 0), 'a0=' + a0 + ' a1=' + a1);
+      const ou = [];
+      D.emitDualStamps({ ...dual, scatter: 0 }, ctx(1), 0, 0,
+        NL.brush.patterns.seededRng(5), ou);
+      assert('dynamics: unscattered dual marks stay upright', ou[4] === 0,
+        'angle=' + ou[4]);
     }
 
     const cd = { enabled: true, applyPerTip: true, fgBgJitter: 0,
