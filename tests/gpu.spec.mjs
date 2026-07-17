@@ -283,32 +283,38 @@ const TEST = `
     eng.cancelStroke();
   }
 
-  // ---- 12b. dual brush Color Burn: neutral where the mask is empty ----
-  // Photoshop's dual Color Burn darkens the dab where the secondary train
-  // has ink but leaves it UNCHANGED where the mask is empty (unlike
-  // multiply, which masks to the intersection). A scattered dual train must
-  // not tear the stroke apart (Size_Flow_Gang.abr "06 Gritty").
-  {
-    const dual = { enabled: true, shape: 'round', hardness: 1, mode: 'color-burn',
+  // ---- 12b. dual brush burn modes: neutral where the mask is empty ----
+  // Photoshop's dual Color Burn / Linear Burn darken the dab's TIP COVERAGE
+  // (before flow) where the secondary train has ink, and leave it UNCHANGED
+  // where the mask is empty (unlike multiply, which masks to the
+  // intersection). A scattered dual train must not tear the stroke apart
+  // (Size_Flow_Gang.abr "06 Gritty"), and a saturated mask must not blow a
+  // low-flow dab past its flow (soft grain, not black clumps).
+  for (const mode of ['color-burn', 'linear-burn']) {
+    const dual = { enabled: true, shape: 'round', hardness: 1, mode,
       size: 30, spacing: 0.5, scatter: 0, bothAxes: true, count: 1 };
-    // half-strength dual ink at one spot, then a light primary dab
-    eng.beginStroke(sp({ dual }));
+    // half-strength dual ink at one spot inside a soft low-flow dab
+    // (soft round: tip coverage < 1 away from the center, so burning shows)
+    eng.beginStroke(sp({ dual, hardness: 0 }));
     eng.drawStamps(stamps(rec(170, 150, 15, 0.5, { color: [1, 1, 1] })), 1, 'dual');
     eng.drawStamps(stamps(rec(200, 150, 80, 0.3)), 1);
     const d = await read();
-    const burned = px(d, 170, 150)[0];   // dual ink -> darkened dab
-    const plain = px(d, 250, 150)[0];    // no dual coverage -> dab unchanged
+    const burned = px(d, 170, 150)[0];  // dual ink -> darkened dab
+    const plain = px(d, 250, 150)[0];   // no dual coverage
     eng.cancelStroke();
-    // reference: the same 0.3-alpha dab with the dual brush off
-    eng.beginStroke(sp());
+    // reference: the same soft 0.3-alpha dab with the dual brush off
+    eng.beginStroke(sp({ hardness: 0 }));
     eng.drawStamps(stamps(rec(200, 150, 80, 0.3)), 1);
     const ref = await read();
+    const refBurn = px(ref, 170, 150)[0];
     const refPlain = px(ref, 250, 150)[0];
     eng.cancelStroke();
-    assert('dual color burn: dab unchanged where the mask is empty',
+    assert('dual ' + mode + ': dab unchanged where the mask is empty',
       near(plain, refPlain, 2), 'plain=' + plain + ' ref=' + refPlain);
-    assert('dual color burn: dual ink darkens the dab',
-      burned < plain - 40, 'burned=' + burned + ' plain=' + plain);
+    assert('dual ' + mode + ': dual ink darkens the dab',
+      burned < refBurn - 20, 'burned=' + burned + ' ref=' + refBurn);
+    assert('dual ' + mode + ': burned dab never exceeds its flow',
+      burned >= Math.round(255 * 0.7) - 2, 'burned=' + burned);
   }
 
   // ---- 13. dual brush walks its own spacing train along a stroke ----

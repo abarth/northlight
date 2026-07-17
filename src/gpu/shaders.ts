@@ -226,18 +226,21 @@ fn applyTexToAlpha(a: f32, v: f32, mode: u32, depth: f32) -> f32 {
   }
 }
 
-// Dual Brush gating: brush coverage a against the secondary train's mask v.
-// Mostly the texture math above, except Color Burn: Photoshop composites the
-// dual mark onto the primary like a burn on the rendered image — a dab is
-// UNCHANGED where the mask is empty and darkens toward full coverage where
-// dual ink builds up (o = a / (1 - v)). The coverage-domain burn used for
-// Texture (case 8u) would instead zero every dab the dual train misses,
-// tearing scattered-dual brushes into disconnected blotches.
-fn applyDualToAlpha(a: f32, v: f32, mode: u32) -> f32 {
-  if (mode == 8u) {
-    return min(a / max(1.0 - v, 1e-3), 1.0);
-  }
-  return applyTexToAlpha(a, v, mode, 1.0);
+// Dual Brush burn modes gate the TIP COVERAGE t (before flow/opacity), in
+// the rendered-image domain: a dab is UNCHANGED where the mask is empty and
+// darkens toward the tip's full coverage where dual ink builds up. Two
+// details matter, both validated against Photoshop renders of
+// Size_Flow_Gang.abr "06 Gritty" (scattered dual, Color Burn, 5% flow):
+// - The coverage-domain burn used for Texture (case 8u) is zero wherever
+//   the mask is empty, which tears scattered-dual strokes into blotches.
+// - Burning must happen before the flow multiply. Burning the post-flow
+//   alpha lets a saturated mask blow a 5%-flow dab up to 100%, turning the
+//   soft grain Photoshop draws into harsh near-black clumps.
+// The other dual modes gate post-flow alpha with the texture math (multiply
+// commutes with the flow scale, so its behavior is identical either way).
+fn dualBurnTip(t: f32, v: f32, mode: u32) -> f32 {
+  if (mode == 9u) { return min(t + v, 1.0); }        // linear burn
+  return min(t / max(1.0 - v, 1e-3), 1.0);           // color burn
 }
 
 // Wet edges: interior settles at ~60% while the rim stays strong.
@@ -444,6 +447,9 @@ fn roundProfile(r: f32, hardness: f32, radiusPx: f32) -> f32 {
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
   var a: f32;
+  // the tip's footprint: additive dual ink (linear burn) never escapes it,
+  // so the quad's apron and corners stay clean
+  var support = 1.0;
   if (SU.tipTextured > 0.5) {
     var uv = in.tipPos * 0.5 + vec2f(0.5);
     let f = u32(in.flags + 0.5);
@@ -451,19 +457,26 @@ fn fs(in: VSOut) -> @location(0) vec4f {
     if ((f & 2u) != 0u) { uv.y = 1.0 - uv.y; }
     a = textureSampleLevel(tipTex, clampSamp, clamp(uv, vec2f(0.0), vec2f(1.0)), 0.0).r;
     // hide the apron outside the tip square
-    if (abs(in.tipPos.x) > 1.0 || abs(in.tipPos.y) > 1.0) { a = 0.0; }
+    if (abs(in.tipPos.x) > 1.0 || abs(in.tipPos.y) > 1.0) { a = 0.0; support = 0.0; }
   } else {
     a = roundProfile(length(in.tipPos), SU.hardness, in.radius);
+    if (length(in.tipPos) >= 1.0) { support = 0.0; }
   }
-  a = a * in.alpha;
 
   // Photoshop dual brush: each dab is gated by the secondary tip's coverage
   // mask as it exists right now (the dual train is drawn first each flush).
   // Gating at dab time keeps painting incremental — already-painted areas
   // never change retroactively when later dual stamps land on them.
+  // Burn modes gate the tip coverage BEFORE flow; the rest gate after.
   if (SU.dualOn > 0.5) {
     let cov = textureSampleLevel(dualTex, clampSamp, in.docPos / SU.docSize, 0.0).r;
-    a = applyDualToAlpha(a, cov, SU.dualMode);
+    if (SU.dualMode == 8u || SU.dualMode == 9u) {
+      a = dualBurnTip(a, cov * support, SU.dualMode) * in.alpha;
+    } else {
+      a = applyTexToAlpha(a * in.alpha, cov, SU.dualMode, 1.0);
+    }
+  } else {
+    a = a * in.alpha;
   }
 
   if (SU.texEach > 0.5) {
