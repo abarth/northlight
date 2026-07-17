@@ -385,12 +385,6 @@ export function BrushSettingsPanel() {
           value={s.dual.countJitter}
           onChange={(v) => sect('dual', { countJitter: v })}
         />
-        <CheckRow
-          label="Flip"
-          checked={s.dual.flip}
-          onChange={(v) => sect('dual', { flip: v })}
-          title="Randomly mirror the secondary tip per stamp"
-        />
       </PanelSection>
 
       <PanelSection

@@ -297,18 +297,12 @@ export function emitDualStamps(
         sy += Math.sin(n) * dist;
       }
     }
-    // Photoshop implicitly randomizes the orientation of scattered dual
-    // marks — without it every mark is an identical translated copy of the
-    // tip and the texture reads as repetitive. (The panel's Flip checkbox
-    // adds random mirroring on top; it would be redundant if the implicit
-    // variation were itself a flip.)
-    let angle = 0;
-    if (dual.scatter > 0) angle = rng() * TAU;
+    // Photoshop implicitly mirrors every dual mark at random on both axes
+    // (its Dual Brush panel has no Flip control and the marks are never
+    // rotated) — without this the train reads as one repeated stamp.
     let flags = 0;
-    if (dual.flip) {
-      if (rng() < 0.5) flags += FLAG_FLIP_X;
-      if (rng() < 0.5) flags += FLAG_FLIP_Y;
-    }
-    out.push(sx, sy, dual.size / 2, 1, angle, 1, 1, 1, 1, flags, 1);
+    if (rng() < 0.5) flags += FLAG_FLIP_X;
+    if (rng() < 0.5) flags += FLAG_FLIP_Y;
+    out.push(sx, sy, dual.size / 2, 1, 0, 1, 1, 1, 1, flags, 1);
   }
 }

@@ -666,27 +666,29 @@ const TEST = `
         near(off, 50, 0.5), 'offset=' + off);
       const dual = { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',
         size: 100, spacing: 0.5, scatter: 1, bothAxes: false, count: 1,
-        countJitter: 0, flip: false };
+        countJitter: 0 };
       const od = [];
       D.emitDualStamps(dual, ctx(1), 0, 0, () => 1, od);
       const offD = Math.hypot(od[0], od[1]);
       assert('dynamics: dual 100% scatter tops out at half a diameter',
         near(offD, 50, 0.5), 'offset=' + offD);
 
-      // scattered dual marks get a random per-stamp orientation; an
-      // unscattered train keeps the tip upright (angle 0)
-      const os = [];
-      D.emitDualStamps({ ...dual, count: 2 }, ctx(1), 0, 0,
-        NL.brush.patterns.seededRng(5), os);
-      const a0 = os[4];
-      const a1 = os[D.STAMP_FLOATS + 4];
-      assert('dynamics: scattered dual marks get random orientations',
-        a0 !== a1 && (a0 > 0 || a1 > 0), 'a0=' + a0 + ' a1=' + a1);
-      const ou = [];
-      D.emitDualStamps({ ...dual, scatter: 0 }, ctx(1), 0, 0,
-        NL.brush.patterns.seededRng(5), ou);
-      assert('dynamics: unscattered dual marks stay upright', ou[4] === 0,
-        'angle=' + ou[4]);
+      // Photoshop implicitly mirrors dual marks at random on both axes —
+      // even with scatter off — and never rotates them
+      const of = [];
+      const frng = NL.brush.patterns.seededRng(9);
+      for (let i = 0; i < 16; i++) {
+        D.emitDualStamps({ ...dual, scatter: 0 }, ctx(1), 0, 0, frng, of);
+      }
+      const flags = new Set();
+      let spun = 0;
+      for (let i = 0; i < 16; i++) {
+        flags.add(of[i * D.STAMP_FLOATS + 9]);
+        if (of[i * D.STAMP_FLOATS + 4] !== 0) spun++;
+      }
+      assert('dynamics: dual marks get implicit random flips, no rotation',
+        flags.size >= 3 && spun === 0,
+        'flags=' + [...flags].join('/') + ' spun=' + spun);
     }
 
     const cd = { enabled: true, applyPerTip: true, fgBgJitter: 0,
@@ -1045,7 +1047,7 @@ const TEST = `
         // the outer dualBrush.Spcn (120 here, a stale default)
         s.dual.size === 24 && Math.abs(s.dual.spacing - 0.1) < 1e-6 &&
         Math.abs(s.dual.scatter - 3) < 1e-6 && s.dual.count === 2 &&
-        Math.abs(s.dual.countJitter - 0.5) < 1e-6 && s.dual.flip === true &&
+        Math.abs(s.dual.countJitter - 0.5) < 1e-6 &&
         s.dual.bothAxes === false,
         JSON.stringify(s.dual));
       assert('abr v6: toolOptions (opacity/flow/smoothing/mode/pen overrides)',
@@ -1147,7 +1149,7 @@ const TEST = `
     {
       const dual = { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',
         size: 20, spacing: 0.5, scatter: 0, bothAxes: false, count: 4,
-        countJitter: 1, flip: true };
+        countJitter: 1 };
       const ctx = { sample: { x: 0, y: 0, pressure: 1, tiltX: 0, tiltY: 0, twist: 0 },
         direction: 0, initialDirection: 0, stepIndex: 0 };
       const out = [];
@@ -1156,7 +1158,7 @@ const TEST = `
       const count = out.length / D.STAMP_FLOATS;
       let flipped = 0;
       for (let i = 0; i < count; i++) if (out[i * D.STAMP_FLOATS + 9] > 0) flipped++;
-      assert('dual dynamics: count jitter reduces count, flip sets stamp flags',
+      assert('dual dynamics: count jitter reduces count, implicit flips set flags',
         count >= 6 && count < 24 && flipped >= 1, 'count=' + count + ' flipped=' + flipped);
     }
   }

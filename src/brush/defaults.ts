@@ -60,7 +60,6 @@ export function defaultBrush(): BrushSettings {
       bothAxes: true,
       count: 1,
       countJitter: 0,
-      flip: false,
     },
     color: {
       enabled: false,

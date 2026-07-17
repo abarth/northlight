@@ -665,7 +665,6 @@ function mapBrushDescriptor(d: Descriptor): AbrBrush {
       bothAxes: bool(dualDesc['bothAxes']) ?? false,
       count: Math.min(Math.max(num(dualDesc['Cnt']) ?? 1, 1), 16),
       countJitter: clamp01(dualCount.jitter),
-      flip: bool(dualDesc['Flip']) ?? false,
     };
   }
 

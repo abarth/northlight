@@ -146,8 +146,6 @@ export interface DualBrush {
   count: number;
   /** 0..1 random reduction of count */
   countJitter: number;
-  /** randomly mirror the secondary tip per stamp */
-  flip: boolean;
 }
 
 export interface ColorDynamics {
