@@ -283,6 +283,34 @@ const TEST = `
     eng.cancelStroke();
   }
 
+  // ---- 12b. dual brush Color Burn: neutral where the mask is empty ----
+  // Photoshop's dual Color Burn darkens the dab where the secondary train
+  // has ink but leaves it UNCHANGED where the mask is empty (unlike
+  // multiply, which masks to the intersection). A scattered dual train must
+  // not tear the stroke apart (Size_Flow_Gang.abr "06 Gritty").
+  {
+    const dual = { enabled: true, shape: 'round', hardness: 1, mode: 'color-burn',
+      size: 30, spacing: 0.5, scatter: 0, bothAxes: true, count: 1 };
+    // half-strength dual ink at one spot, then a light primary dab
+    eng.beginStroke(sp({ dual }));
+    eng.drawStamps(stamps(rec(170, 150, 15, 0.5, { color: [1, 1, 1] })), 1, 'dual');
+    eng.drawStamps(stamps(rec(200, 150, 80, 0.3)), 1);
+    const d = await read();
+    const burned = px(d, 170, 150)[0];   // dual ink -> darkened dab
+    const plain = px(d, 250, 150)[0];    // no dual coverage -> dab unchanged
+    eng.cancelStroke();
+    // reference: the same 0.3-alpha dab with the dual brush off
+    eng.beginStroke(sp());
+    eng.drawStamps(stamps(rec(200, 150, 80, 0.3)), 1);
+    const ref = await read();
+    const refPlain = px(ref, 250, 150)[0];
+    eng.cancelStroke();
+    assert('dual color burn: dab unchanged where the mask is empty',
+      near(plain, refPlain, 2), 'plain=' + plain + ' ref=' + refPlain);
+    assert('dual color burn: dual ink darkens the dab',
+      burned < plain - 40, 'burned=' + burned + ' plain=' + plain);
+  }
+
   // ---- 13. dual brush walks its own spacing train along a stroke ----
   {
     const settings = makeBrush({

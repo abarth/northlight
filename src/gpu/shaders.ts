@@ -226,6 +226,20 @@ fn applyTexToAlpha(a: f32, v: f32, mode: u32, depth: f32) -> f32 {
   }
 }
 
+// Dual Brush gating: brush coverage a against the secondary train's mask v.
+// Mostly the texture math above, except Color Burn: Photoshop composites the
+// dual mark onto the primary like a burn on the rendered image — a dab is
+// UNCHANGED where the mask is empty and darkens toward full coverage where
+// dual ink builds up (o = a / (1 - v)). The coverage-domain burn used for
+// Texture (case 8u) would instead zero every dab the dual train misses,
+// tearing scattered-dual brushes into disconnected blotches.
+fn applyDualToAlpha(a: f32, v: f32, mode: u32) -> f32 {
+  if (mode == 8u) {
+    return min(a / max(1.0 - v, 1e-3), 1.0);
+  }
+  return applyTexToAlpha(a, v, mode, 1.0);
+}
+
 // Wet edges: interior settles at ~60% while the rim stays strong.
 fn wetRemap(a: f32) -> f32 {
   return clamp(0.6 * a + 0.4 * sin(3.14159265 * a), 0.0, 1.0);
@@ -449,7 +463,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // never change retroactively when later dual stamps land on them.
   if (SU.dualOn > 0.5) {
     let cov = textureSampleLevel(dualTex, clampSamp, in.docPos / SU.docSize, 0.0).r;
-    a = applyTexToAlpha(a, cov, SU.dualMode, 1.0);
+    a = applyDualToAlpha(a, cov, SU.dualMode);
   }
 
   if (SU.texEach > 0.5) {
