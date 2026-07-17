@@ -189,7 +189,9 @@ export function emitStamps(
     let sx = x;
     let sy = y;
     if (sc.enabled && scatterAmt > 0) {
-      const dist = (rng() * 2 - 1) * scatterAmt * diameter;
+      // Photoshop's Scatter spreads marks across scatter% x diameter in
+      // total, so individual offsets reach +-scatter% x radius
+      const dist = (rng() * 2 - 1) * scatterAmt * (diameter / 2);
       if (sc.bothAxes) {
         const a = rng() * TAU;
         sx += Math.cos(a) * dist;
@@ -281,7 +283,10 @@ export function emitDualStamps(
     let sx = x;
     let sy = y;
     if (dual.scatter > 0) {
-      const dist = (rng() * 2 - 1) * dual.scatter * dual.size;
+      // +-scatter% x radius, as for the primary tip's Scatter above; keeping
+      // offsets within the dual tip's radius is what lets a scattered train
+      // (e.g. 86% scatter) still lay contiguous ink along the stroke spine
+      const dist = (rng() * 2 - 1) * dual.scatter * (dual.size / 2);
       if (dual.bothAxes) {
         const a = rng() * TAU;
         sx += Math.cos(a) * dist;

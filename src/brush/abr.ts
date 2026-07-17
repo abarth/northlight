@@ -421,14 +421,16 @@ const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 /**
  * bVTy control values. Empirically validated table:
  * 0=Off, 1=Fade, 2=Pen Pressure, 3=Pen Tilt, 4=Stylus Wheel,
- * 5=Direction, 6=Initial Direction, 7=Rotation.
- * (5/6 observed on direction-following brushes in real files; 7=Rotation per
+ * 5=Initial Direction, 6=Direction, 7=Rotation.
+ * (5/6 verified against Photoshop's UI for Size_Flow_Gang.abr: "08 Flatty"
+ * stores bVTy 6 and Photoshop shows Direction — jlai/brush-viewer and
+ * abarth/impression have the pair backwards; 7=Rotation per
  * SonyStone/ABR-Viewer's reverse-engineering; 4=wheel is unsupported here and
  * maps to Off so mouse users don't get zeroed parameters.)
  */
 const CONTROL_MAP: DynamicControl['source'][] = [
   'off', 'fade', 'pressure', 'tilt', 'off',
-  'direction', 'initial-direction', 'rotation',
+  'initial-direction', 'direction', 'rotation',
 ];
 
 function mapControl(d: Descriptor | undefined): {
@@ -578,7 +580,8 @@ function mapBrushDescriptor(d: Descriptor): AbrBrush {
       enabled: true,
       bothAxes: bool(d['bothAxes']) ?? false,
       // ABR stores scatter as a percentage that can reach 1000%; our model
-      // uses 0..10 where 1.0 = 100% of the diameter
+      // uses 0..10 where 1.0 = a spread of 100% of the diameter (offsets
+      // up to +-half a diameter)
       scatter: Math.min(sc.jitter, 10),
       scatterControl: sc.control,
       count: Math.min(Math.max(num(d['Cnt']) ?? 1, 1), 16),

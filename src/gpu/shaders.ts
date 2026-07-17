@@ -226,21 +226,13 @@ fn applyTexToAlpha(a: f32, v: f32, mode: u32, depth: f32) -> f32 {
   }
 }
 
-// Dual Brush burn modes gate the TIP COVERAGE t (before flow/opacity), in
-// the rendered-image domain: a dab is UNCHANGED where the mask is empty and
-// darkens toward the tip's full coverage where dual ink builds up. Two
-// details matter, both validated against Photoshop renders of
-// Size_Flow_Gang.abr "06 Gritty" (scattered dual, Color Burn, 5% flow):
-// - The coverage-domain burn used for Texture (case 8u) is zero wherever
-//   the mask is empty, which tears scattered-dual strokes into blotches.
-// - Burning must happen before the flow multiply. Burning the post-flow
-//   alpha lets a saturated mask blow a 5%-flow dab up to 100%, turning the
-//   soft grain Photoshop draws into harsh near-black clumps.
-// The other dual modes gate post-flow alpha with the texture math (multiply
-// commutes with the flow scale, so its behavior is identical either way).
-fn dualBurnTip(t: f32, v: f32, mode: u32) -> f32 {
-  if (mode == 9u) { return min(t + v, 1.0); }        // linear burn
-  return min(t / max(1.0 - v, 1e-3), 1.0);           // color burn
+// Dual Brush gate: the texture math above, except color burn resolves the
+// empty-mask case FIRST — applyTexToAlpha's case 8u lets a fully-covered
+// tip pixel (a >= 1) through any mask, but a dab must never escape the dual
+// train's marks.
+fn applyDualToTip(t: f32, v: f32, mode: u32) -> f32 {
+  if (mode == 8u && v <= 0.0) { return 0.0; }
+  return applyTexToAlpha(t, v, mode, 1.0);
 }
 
 // Wet edges: interior settles at ~60% while the rim stays strong.
@@ -467,17 +459,18 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   // mask as it exists right now (the dual train is drawn first each flush).
   // Gating at dab time keeps painting incremental — already-painted areas
   // never change retroactively when later dual stamps land on them.
-  // Burn modes gate the tip coverage BEFORE flow; the rest gate after.
+  // The mode combines the mask with the TIP coverage, before flow/opacity:
+  // the darkening modes are zero wherever the mask is empty, so the stroke
+  // stays contained to the dual train's marks, and burning steepens a dab's
+  // grain inside the mask but never pushes it past its flow (both validated
+  // against Photoshop renders of Size_Flow_Gang.abr "06 Gritty"). Masking
+  // cov by the tip footprint keeps modes with additive branches
+  // (screen/lighten/hard mix) inside it, off the stamp quad's apron.
   if (SU.dualOn > 0.5) {
     let cov = textureSampleLevel(dualTex, clampSamp, in.docPos / SU.docSize, 0.0).r;
-    if (SU.dualMode == 8u || SU.dualMode == 9u) {
-      a = dualBurnTip(a, cov * support, SU.dualMode) * in.alpha;
-    } else {
-      a = applyTexToAlpha(a * in.alpha, cov, SU.dualMode, 1.0);
-    }
-  } else {
-    a = a * in.alpha;
+    a = applyDualToTip(a, cov * support, SU.dualMode);
   }
+  a = a * in.alpha;
 
   if (SU.texEach > 0.5) {
     let v = texValue(

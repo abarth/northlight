@@ -283,38 +283,37 @@ const TEST = `
     eng.cancelStroke();
   }
 
-  // ---- 12b. dual brush burn modes: neutral where the mask is empty ----
-  // Photoshop's dual Color Burn / Linear Burn darken the dab's TIP COVERAGE
-  // (before flow) where the secondary train has ink, and leave it UNCHANGED
-  // where the mask is empty (unlike multiply, which masks to the
-  // intersection). A scattered dual train must not tear the stroke apart
-  // (Size_Flow_Gang.abr "06 Gritty"), and a saturated mask must not blow a
-  // low-flow dab past its flow (soft grain, not black clumps).
+  // ---- 12b. dual brush burn modes: contained, tip-domain burn ----
+  // Photoshop's dual Color Burn / Linear Burn combine the mask with the
+  // dab's TIP coverage before flow applies: the primary paints only where
+  // the dual train has ink (contained, like multiply), the burn steepens
+  // the tip's values inside the mask, and even a saturated mask can never
+  // push a dab past its flow (Size_Flow_Gang.abr "06 Gritty" draws soft
+  // grain at 5% flow, not black clumps).
   for (const mode of ['color-burn', 'linear-burn']) {
     const dual = { enabled: true, shape: 'round', hardness: 1, mode,
       size: 30, spacing: 0.5, scatter: 0, bothAxes: true, count: 1 };
-    // half-strength dual ink at one spot inside a soft low-flow dab
-    // (soft round: tip coverage < 1 away from the center, so burning shows)
-    eng.beginStroke(sp({ dual, hardness: 0 }));
-    eng.drawStamps(stamps(rec(170, 150, 15, 0.5, { color: [1, 1, 1] })), 1, 'dual');
-    eng.drawStamps(stamps(rec(200, 150, 80, 0.3)), 1);
+    eng.beginStroke(sp({ dual }));
+    // saturated dual ink at one spot, 60% ink at another, then a 0.5-flow dab
+    eng.drawStamps(stamps(
+      rec(170, 150, 15, 1, { color: [1, 1, 1] }),
+      rec(230, 150, 15, 0.6, { color: [1, 1, 1] }),
+    ), 2, 'dual');
+    eng.drawStamps(stamps(rec(200, 150, 80, 0.5)), 1);
     const d = await read();
-    const burned = px(d, 170, 150)[0];  // dual ink -> darkened dab
-    const plain = px(d, 250, 150)[0];   // no dual coverage
+    const full = px(d, 170, 150)[0];    // v=1: tip burns to 1, times 0.5 flow
+    const mid = px(d, 230, 150)[0];     // v=0.6: modes differ (see below)
+    const empty = px(d, 255, 150)[0];   // v=0: contained -> unpainted
     eng.cancelStroke();
-    // reference: the same soft 0.3-alpha dab with the dual brush off
-    eng.beginStroke(sp({ hardness: 0 }));
-    eng.drawStamps(stamps(rec(200, 150, 80, 0.3)), 1);
-    const ref = await read();
-    const refBurn = px(ref, 170, 150)[0];
-    const refPlain = px(ref, 250, 150)[0];
-    eng.cancelStroke();
-    assert('dual ' + mode + ': dab unchanged where the mask is empty',
-      near(plain, refPlain, 2), 'plain=' + plain + ' ref=' + refPlain);
-    assert('dual ' + mode + ': dual ink darkens the dab',
-      burned < refBurn - 20, 'burned=' + burned + ' ref=' + refBurn);
-    assert('dual ' + mode + ': burned dab never exceeds its flow',
-      burned >= Math.round(255 * 0.7) - 2, 'burned=' + burned);
+    assert('dual ' + mode + ': paints at its flow under saturated mask',
+      near(full, 128, 3), 'full=' + full);
+    // color burn: t=1 stays 1 for any v>0 -> 128. linear burn:
+    // clamp(1 + 0.6 - 1) = 0.6 -> alpha 0.3 -> 178.
+    const wantMid = mode === 'color-burn' ? 128 : 178;
+    assert('dual ' + mode + ': burns the tip against the mask value',
+      near(mid, wantMid, 3), 'mid=' + mid + ' want=' + wantMid);
+    assert('dual ' + mode + ': contained to the dual marks', empty === 255,
+      'empty=' + empty);
   }
 
   // ---- 13. dual brush walks its own spacing train along a stroke ----
@@ -650,6 +649,31 @@ const TEST = `
     const off0 = Math.hypot(out[0] - 50, out[1] - 50);
     assert('dynamics: scatter offsets stamps', off0 > 1, 'offset=' + off0);
 
+    // scatter spreads across scatter% x diameter TOTAL: offsets reach
+    // +-scatter% x radius, never a full diameter (Photoshop semantics)
+    {
+      const wide = makeBrush({
+        tip: { size: 100 },
+        scatter: { enabled: true, bothAxes: true, scatter: 1,
+          scatterControl: { source: 'off', fadeSteps: 25 }, count: 1, countJitter: 0 },
+      });
+      const o = [];
+      D.emitStamps(wide, ctx(1), 0, 0,
+        { strokeColor: { r: 0, g: 0, b: 0 }, fg: { h: 0, s: 0, v: 0 },
+          bg: { h: 0, s: 0, v: 1 }, rng: () => 1 }, o);
+      const off = Math.hypot(o[0], o[1]);
+      assert('dynamics: 100% scatter tops out at half a diameter',
+        near(off, 50, 0.5), 'offset=' + off);
+      const dual = { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',
+        size: 100, spacing: 0.5, scatter: 1, bothAxes: false, count: 1,
+        countJitter: 0, flip: false };
+      const od = [];
+      D.emitDualStamps(dual, ctx(1), 0, 0, () => 1, od);
+      const offD = Math.hypot(od[0], od[1]);
+      assert('dynamics: dual 100% scatter tops out at half a diameter',
+        near(offD, 50, 0.5), 'offset=' + offD);
+    }
+
     const cd = { enabled: true, applyPerTip: true, fgBgJitter: 0,
       fgBgControl: { source: 'off', fadeSteps: 25 }, hueJitter: 0.5,
       satJitter: 0, briJitter: 0, purity: 0 };
@@ -884,7 +908,7 @@ const TEST = `
             ['minimumRoundness', T.untf('#Prc', 30)],
             ['tiltScale', T.untf('#Prc', 200)],
             ['szVr', dyn(2, 30)],            // pen pressure
-            ['angleDynamics', dyn(5, 0)],    // direction
+            ['angleDynamics', dyn(6, 0)],    // direction (5 = initial direction)
             ['roundnessDynamics', dyn(7, 0)],// rotation
             ['useScatter', T.bool(true)],
             ['bothAxes', T.bool(true)],
