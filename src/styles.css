@@ -489,7 +489,7 @@ select {
 /* swap arrows in the gap above the background swatch */
 .swap-colors {
   position: absolute;
-  top: -3px;
+  top: -2px;
   right: -2px;
   display: flex;
   align-items: center;
