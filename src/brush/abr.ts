@@ -170,6 +170,23 @@ function unpackBits(r: Reader, expected: number): Uint8Array<ArrayBuffer> {
   return out;
 }
 
+/**
+ * Photoshop's compressed-rows image layout, shared by sampled tips and
+ * pattern channels: per-row compressed byte counts (i16 each), then a
+ * PackBits-packed run per row of `bytesPerRow` decoded bytes.
+ */
+function readRleRows(r: Reader, rows: number, bytesPerRow: number): Uint8Array<ArrayBuffer> {
+  const counts: number[] = [];
+  for (let y = 0; y < rows; y++) counts.push(r.i16());
+  const out = new Uint8Array(rows * bytesPerRow);
+  for (let y = 0; y < rows; y++) {
+    const rowEnd = r.pos + counts[y];
+    out.set(unpackBits(r, bytesPerRow), y * bytesPerRow);
+    r.pos = rowEnd;
+  }
+  return out;
+}
+
 /** Pads a possibly non-square bitmap into a square, centered GrayMap. */
 function toSquareMap(data: Uint8Array, w: number, h: number): GrayMap {
   const size = Math.max(w, h);
@@ -226,20 +243,12 @@ function readSampledBitmap(r: Reader): GrayMap | null {
       for (let i = 0; i < w * h; i++) gray[i] = r.u16() >> 8;
     }
   } else {
-    // per-row compressed byte counts, then PackBits rows
-    const counts: number[] = [];
-    for (let y = 0; y < h; y++) counts.push(r.i16());
-    const bpr = w * (depth >> 3);
-    gray = new Uint8Array(w * h);
-    for (let y = 0; y < h; y++) {
-      const rowEnd = r.pos + counts[y];
-      const row = unpackBits(r, bpr);
-      r.pos = rowEnd;
-      if (depth === 8) {
-        gray.set(row, y * w);
-      } else {
-        for (let x = 0; x < w; x++) gray[y * w + x] = row[x * 2];
-      }
+    const rows = readRleRows(r, h, w * (depth >> 3));
+    if (depth === 8) {
+      gray = rows;
+    } else {
+      gray = new Uint8Array(w * h);
+      for (let i = 0; i < w * h; i++) gray[i] = rows[i * 2];
     }
   }
   return toSquareMap(gray, w, h);
@@ -745,19 +754,7 @@ function parsePattEntry(r: Reader, entryEnd: number): { id: string; pattern: Abr
     const cw = right - left;
     const chH = bottom - top;
     if (depth === 8 && cw > 0 && chH > 0 && cw <= MAX_PATTERN_DIM && chH <= MAX_PATTERN_DIM) {
-      let data: Uint8Array;
-      if (!compressed) {
-        data = r.bytes(cw * chH);
-      } else {
-        const counts: number[] = [];
-        for (let y = 0; y < chH; y++) counts.push(r.i16());
-        data = new Uint8Array(cw * chH);
-        for (let y = 0; y < chH; y++) {
-          const rowEnd = r.pos + counts[y];
-          data.set(unpackBits(r, cw), y * cw);
-          r.pos = rowEnd;
-        }
-      }
+      const data = compressed ? readRleRows(r, chH, cw) : r.bytes(cw * chH);
       if (cw === w && chH === h) channels.push(data);
     }
     r.pos = chEnd;

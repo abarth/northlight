@@ -6,7 +6,6 @@ import {
   emitDualStamps,
   emitStamps,
   stampDiameter,
-  STAMP_FLOATS,
   type PointerSample,
   type StampContext,
 } from '../brush/dynamics';
@@ -234,12 +233,11 @@ export class StrokeSession {
   }
 
   private flush(): void {
-    for (const batch of this.queue) {
-      if (batch.records.length === 0) continue;
-      const arr = new Float32Array(batch.records);
-      this.engine.drawStamps(arr, arr.length / STAMP_FLOATS, batch.target);
-    }
+    const batches = this.queue
+      .filter((batch) => batch.records.length > 0)
+      .map((batch) => ({ target: batch.target, records: new Float32Array(batch.records) }));
     this.queue = [];
+    if (batches.length > 0) this.engine.drawStampBatches(batches);
   }
 }
 

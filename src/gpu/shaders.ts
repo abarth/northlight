@@ -258,6 +258,21 @@ fn hash21(p: vec2f) -> f32 {
  * commit pass. Requires BLEND_LIB (compositePixel) and TEX_LIB.
  */
 const MERGE_LIB = /* wgsl */ `
+// Stroke -> layer merge parameters. Embedded verbatim in the compositor's
+// LayerU and the commit pass's CommitU, and written by the engine's single
+// fillMergeFields helper — keep the three in sync.
+struct MergeU {
+  blend: u32,        // stroke blend mode
+  opacity: f32,      // stroke-level opacity cap
+  wetEdges: f32,
+  texOn: f32,        // whole-stroke texture enabled
+  texScalePx: f32,
+  texMode: u32,
+  dualOn: f32,
+  dualMode: u32,
+  texBCI: vec4f,     // brightness, contrast, invert, depth
+}
+
 /**
  * Merges the live/committing stroke into a premultiplied layer pixel.
  * st: premultiplied stroke texel. patRaw: raw pattern sample (whole-stroke
@@ -271,32 +286,25 @@ fn strokeMergeApply(
   patRaw: f32,
   dualV: f32,
   mode: u32,        // 1 = paint, 2 = erase
-  blend: u32,
-  opacity: f32,
-  wet: f32,
-  texOn: f32,
-  bci: vec4f,
-  texMode: u32,
-  dualOn: f32,
-  dualMode: u32,
+  m: MergeU,
 ) -> vec4f {
   var cov = st.a;
-  if (dualOn > 0.5) {
-    cov = applyDualToAlpha(cov, dualV, dualMode);
+  if (m.dualOn > 0.5) {
+    cov = applyDualToAlpha(cov, dualV, m.dualMode);
   }
-  if (texOn > 0.5) {
-    cov = applyTexToAlpha(cov, texValue(patRaw, bci), texMode, bci.w);
+  if (m.texOn > 0.5) {
+    cov = applyTexToAlpha(cov, texValue(patRaw, m.texBCI), m.texMode, m.texBCI.w);
   }
-  if (wet > 0.5) {
+  if (m.wetEdges > 0.5) {
     cov = wetRemap(cov);
   }
-  let sa = cov * opacity;
+  let sa = cov * m.opacity;
   if (mode == 2u) {
     return l * (1.0 - sa);
   }
   var cs = vec3f(0.0);
   if (st.a > 0.0) { cs = st.rgb / st.a; }
-  return compositePixel(l, cs, sa, blend);
+  return compositePixel(l, cs, sa, m.blend);
 }
 `;
 
@@ -312,21 +320,13 @@ ${TEX_LIB}
 ${MERGE_LIB}
 
 struct LayerU {
-  blendMode: u32,
+  blendMode: u32,      // layer blend mode
   layerOpacity: f32,
   strokeMode: u32,     // 0 = none, 1 = paint, 2 = erase
-  strokeOpacity: f32,
-  strokeBlend: u32,
-  wetEdges: f32,
-  texOn: f32,          // whole-stroke texture enabled
-  texScalePx: f32,
-  texBCI: vec4f,       // brightness, contrast, invert, depth
-  texMode: u32,
-  dualOn: f32,
-  dualMode: u32,
-  _p2: f32,
+  _p0: f32,
   docSize: vec2f,
-  _p3: vec2f,
+  _p1: vec2f,
+  merge: MergeU,       // valid when strokeMode != 0
 }
 
 @group(0) @binding(0) var samp: sampler;
@@ -345,13 +345,10 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 
   if (U.strokeMode != 0u) {
     let st = textureSampleLevel(strokeTex, samp, in.uv, 0.0);
-    let patUv = in.uv * U.docSize / max(U.texScalePx, 1.0);
+    let patUv = in.uv * U.docSize / max(U.merge.texScalePx, 1.0);
     let patRaw = textureSampleLevel(patternTex, repeatSamp, patUv, 0.0).r;
     let dualV = textureSampleLevel(dualTex, samp, in.uv, 0.0).r;
-    l = strokeMergeApply(
-      l, st, patRaw, dualV, U.strokeMode, U.strokeBlend, U.strokeOpacity,
-      U.wetEdges, U.texOn, U.texBCI, U.texMode, U.dualOn, U.dualMode,
-    );
+    l = strokeMergeApply(l, st, patRaw, dualV, U.strokeMode, U.merge);
   }
 
   let as_ = l.a * U.layerOpacity;
@@ -496,20 +493,9 @@ ${MERGE_LIB}
 
 struct CommitU {
   mode: u32,           // 1 = paint, 2 = erase
-  opacity: f32,
-  strokeBlend: u32,
-  wetEdges: f32,
-  texOn: f32,
-  texScalePx: f32,
-  texMode: u32,
   _p0: f32,
-  texBCI: vec4f,
-  dualMode: u32,
-  dualOn: f32,
-  _p3: f32,
-  _p4: f32,
   docSize: vec2f,
-  _p5: vec2f,
+  merge: MergeU,
 }
 
 @group(0) @binding(0) var samp: sampler;
@@ -524,13 +510,10 @@ struct CommitU {
 fn fs(in: VSOut) -> @location(0) vec4f {
   let l = textureSampleLevel(layerTex, samp, in.uv, 0.0);
   let st = textureSampleLevel(strokeTex, samp, in.uv, 0.0);
-  let patUv = in.uv * U.docSize / max(U.texScalePx, 1.0);
+  let patUv = in.uv * U.docSize / max(U.merge.texScalePx, 1.0);
   let patRaw = textureSampleLevel(patternTex, repeatSamp, patUv, 0.0).r;
   let dualV = textureSampleLevel(dualTex, samp, in.uv, 0.0).r;
-  return strokeMergeApply(
-    l, st, patRaw, dualV, U.mode, U.strokeBlend, U.opacity,
-    U.wetEdges, U.texOn, U.texBCI, U.texMode, U.dualOn, U.dualMode,
-  );
+  return strokeMergeApply(l, st, patRaw, dualV, U.mode, U.merge);
 }
 `;
 

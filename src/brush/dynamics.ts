@@ -95,6 +95,24 @@ function lerpRgb(a: RGB, b: RGB, t: number): RGB {
   return { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t };
 }
 
+/**
+ * Photoshop's Scatter: spreads marks across scatter% x size in total, i.e.
+ * individual offsets reach +-scatter% x half the size — radially when "both
+ * axes" is set, otherwise across the stroke direction. Draws one rng value
+ * for the distance (plus one for the angle when radial).
+ */
+function scatterOffset(
+  scatter: number,
+  bothAxes: boolean,
+  size: number,
+  direction: number,
+  rng: () => number,
+): { dx: number; dy: number } {
+  const dist = (rng() * 2 - 1) * scatter * (size / 2);
+  const a = bothAxes ? rng() * TAU : direction + Math.PI / 2;
+  return { dx: Math.cos(a) * dist, dy: Math.sin(a) * dist };
+}
+
 /** Evaluates Color Dynamics for one stamp (or once per stroke). */
 export function dynamicColor(
   cd: ColorDynamics,
@@ -190,19 +208,9 @@ export function emitStamps(
     let sx = x;
     let sy = y;
     if (sc.enabled && scatterAmt > 0) {
-      // Photoshop's Scatter spreads marks across scatter% x diameter in
-      // total, so individual offsets reach +-scatter% x radius
-      const dist = (rng() * 2 - 1) * scatterAmt * (diameter / 2);
-      if (sc.bothAxes) {
-        const a = rng() * TAU;
-        sx += Math.cos(a) * dist;
-        sy += Math.sin(a) * dist;
-      } else {
-        // across the stroke direction
-        const n = ctx.direction + Math.PI / 2;
-        sx += Math.cos(n) * dist;
-        sy += Math.sin(n) * dist;
-      }
+      const off = scatterOffset(scatterAmt, sc.bothAxes, diameter, ctx.direction, rng);
+      sx += off.dx;
+      sy += off.dy;
     }
 
     // Photoshop's tip angle is counter-clockwise-positive on screen, while
@@ -297,19 +305,12 @@ export function emitDualStamps(
     let sx = x;
     let sy = y;
     if (dual.scatter > 0) {
-      // +-scatter% x radius, as for the primary tip's Scatter above; keeping
-      // offsets within the dual tip's radius is what lets a scattered train
-      // (e.g. 86% scatter) still lay contiguous ink along the stroke spine
-      const dist = (rng() * 2 - 1) * dual.scatter * (dual.size / 2);
-      if (dual.bothAxes) {
-        const a = rng() * TAU;
-        sx += Math.cos(a) * dist;
-        sy += Math.sin(a) * dist;
-      } else {
-        const n = ctx.direction + Math.PI / 2;
-        sx += Math.cos(n) * dist;
-        sy += Math.sin(n) * dist;
-      }
+      // offsets stay within the dual tip's radius, which is what lets a
+      // scattered train (e.g. 86% scatter) keep laying contiguous ink
+      // along the stroke spine
+      const off = scatterOffset(dual.scatter, dual.bothAxes, dual.size, ctx.direction, rng);
+      sx += off.dx;
+      sy += off.dy;
     }
     // Photoshop implicitly mirrors every dual mark at random on both axes
     // (its Dual Brush panel has no Flip control and the marks are never

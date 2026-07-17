@@ -16,6 +16,7 @@ import {
   type TipShape,
 } from '../brush/types';
 import { getPattern, getTip } from '../brush/patterns';
+import { readTextureRegion, uploadBuffer, uploadTexture } from './transfer';
 import { STAMP_FLOATS } from '../brush/dynamics';
 
 export interface EngineTextureParams {
@@ -162,7 +163,7 @@ export class PaintEngine {
       format: 'r8unorm',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
-    this.uploadTexture(this.whiteTex, new Uint8Array([255]), 1, 1, 1);
+    uploadTexture(this.device, this.whiteTex, new Uint8Array([255]), 1, 1, 1);
 
     this.sampLinear = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.sampNearest = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
@@ -283,59 +284,33 @@ export class PaintEngine {
     this.stampPipeline = makeStampPipeline('stamp', 'rgba8unorm');
     this.stampPipelineDual = makeStampPipeline('stamp-dual', 'r8unorm');
 
-    const commitModule = device.createShaderModule({ code: COMMIT_SHADER });
-    this.commitPipeline = device.createRenderPipeline({
-      label: 'commit',
-      layout: 'auto',
-      vertex: { module: commitModule, entryPoint: 'vs' },
-      fragment: {
-        module: commitModule,
-        entryPoint: 'fs',
-        targets: [{ format: 'rgba8unorm' }],
-      },
-      primitive: { topology: 'triangle-list' },
-    });
-
-    const fillModule = device.createShaderModule({ code: FILL_SHADER });
-    this.fillPipeline = device.createRenderPipeline({
-      label: 'fill',
-      layout: 'auto',
-      vertex: { module: fillModule, entryPoint: 'vs' },
-      fragment: {
-        module: fillModule,
-        entryPoint: 'fs',
-        targets: [{ format: 'rgba8unorm' }],
-      },
-      primitive: { topology: 'triangle-list' },
-    });
-
-    const transformModule = device.createShaderModule({ code: TRANSFORM_SHADER });
-    this.transformPipeline = device.createRenderPipeline({
-      label: 'transform',
-      layout: 'auto',
-      vertex: { module: transformModule, entryPoint: 'vs' },
-      fragment: {
-        module: transformModule,
-        entryPoint: 'fs',
-        targets: [{ format: 'rgba8unorm' }],
-      },
-      primitive: { topology: 'triangle-list' },
-    });
-
-    const presentModule = device.createShaderModule({ code: PRESENT_SHADER });
-    this.presentPipeline = device.createRenderPipeline({
-      label: 'present',
-      layout: 'auto',
-      vertex: { module: presentModule, entryPoint: 'vs' },
-      fragment: {
-        module: presentModule,
-        entryPoint: 'fs',
-        targets: [{ format }],
-      },
-      primitive: { topology: 'triangle-list' },
-    });
+    this.commitPipeline = this.makeFullscreenPipeline('commit', COMMIT_SHADER, 'rgba8unorm');
+    this.fillPipeline = this.makeFullscreenPipeline('fill', FILL_SHADER, 'rgba8unorm');
+    this.transformPipeline = this.makeFullscreenPipeline(
+      'transform',
+      TRANSFORM_SHADER,
+      'rgba8unorm',
+    );
+    this.presentPipeline = this.makeFullscreenPipeline('present', PRESENT_SHADER, format);
 
     this.clearTexture(this.strokeTex);
+  }
+
+  /** Fullscreen-triangle pipeline with an auto layout (all passes but the
+   * compositor, which needs a dynamic-offset uniform binding). */
+  private makeFullscreenPipeline(
+    label: string,
+    code: string,
+    format: GPUTextureFormat,
+  ): GPURenderPipeline {
+    const module = this.device.createShaderModule({ code });
+    return this.device.createRenderPipeline({
+      label,
+      layout: 'auto',
+      vertex: { module, entryPoint: 'vs' },
+      fragment: { module, entryPoint: 'fs', targets: [{ format }] },
+      primitive: { topology: 'triangle-list' },
+    });
   }
 
   static async create(
@@ -370,66 +345,8 @@ export class PaintEngine {
   }
 
   // -------------------------------------------------------------------------
-  // Uploads
-  //
-  // All CPU->GPU uploads go through mappedAtCreation staging buffers and
-  // GPU-side copies instead of queue.writeBuffer/writeTexture. Some Chromium
-  // builds (e.g. SwiftShader-backed headless) silently drop queue.write*
-  // ("A valid external Instance reference no longer exists") while encoder
-  // copies keep working; this path is correct everywhere.
+  // Uploads (see transfer.ts for the staging-buffer rationale)
   // -------------------------------------------------------------------------
-
-  private uploadBuffer(target: GPUBuffer, offset: number, data: ArrayBuffer | ArrayBufferView): void {
-    const bytes = ArrayBuffer.isView(data)
-      ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
-      : new Uint8Array(data);
-    const size = Math.ceil(bytes.byteLength / 4) * 4;
-    const staging = this.device.createBuffer({
-      size,
-      usage: GPUBufferUsage.COPY_SRC,
-      mappedAtCreation: true,
-    });
-    new Uint8Array(staging.getMappedRange()).set(bytes);
-    staging.unmap();
-    const enc = this.device.createCommandEncoder();
-    enc.copyBufferToBuffer(staging, 0, target, offset, size);
-    this.device.queue.submit([enc.finish()]);
-    staging.destroy();
-  }
-
-  /** `data` is tightly packed rows of `bytesPerPixel * width` bytes. */
-  private uploadTexture(
-    tex: GPUTexture,
-    data: Uint8Array,
-    width: number,
-    height: number,
-    bytesPerPixel: number,
-  ): void {
-    const unpadded = width * bytesPerPixel;
-    const padded = Math.ceil(unpadded / 256) * 256;
-    const staging = this.device.createBuffer({
-      size: padded * height,
-      usage: GPUBufferUsage.COPY_SRC,
-      mappedAtCreation: true,
-    });
-    const dst = new Uint8Array(staging.getMappedRange());
-    if (padded === unpadded) {
-      dst.set(data);
-    } else {
-      for (let y = 0; y < height; y++) {
-        dst.set(data.subarray(y * unpadded, (y + 1) * unpadded), y * padded);
-      }
-    }
-    staging.unmap();
-    const enc = this.device.createCommandEncoder();
-    enc.copyBufferToTexture(
-      { buffer: staging, bytesPerRow: padded },
-      { texture: tex },
-      [width, height],
-    );
-    this.device.queue.submit([enc.finish()]);
-    staging.destroy();
-  }
 
   /** Cached single-channel texture for patterns / tip shapes / dual tiles. */
   private grayTexture(key: string, make: () => { size: number; data: Uint8Array }): GPUTexture {
@@ -442,7 +359,7 @@ export class PaintEngine {
         format: 'r8unorm',
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
       });
-      this.uploadTexture(tex, map.data, map.size, map.size, 1);
+      uploadTexture(this.device, tex, map.data, map.size, map.size, 1);
       this.patternTextures.set(key, tex);
     }
     return tex;
@@ -511,6 +428,20 @@ export class PaintEngine {
     this.device.queue.submit([enc.finish()]);
   }
 
+  /** Clears the stroke and dual-mask textures with a single submit. */
+  private clearStrokeTextures(): void {
+    const enc = this.device.createCommandEncoder();
+    for (const tex of [this.strokeTex, this.dualStrokeTex]) {
+      const pass = enc.beginRenderPass({
+        colorAttachments: [
+          { view: tex.createView(), loadOp: 'clear', storeOp: 'store' },
+        ],
+      });
+      pass.end();
+    }
+    this.device.queue.submit([enc.finish()]);
+  }
+
   private clearTexture(
     tex: GPUTexture,
     rgba: [number, number, number, number] = [0, 0, 0, 0],
@@ -536,6 +467,7 @@ export class PaintEngine {
 
   /** `mask` is a doc-sized, single-channel coverage bitmap, or null to clear. */
   setSelectionMask(mask: Uint8Array<ArrayBuffer> | null): void {
+    this.stampBindGroups = null; // stamps sample the selection texture
     if (!mask) {
       this.selectionTex?.destroy();
       this.selectionTex = null;
@@ -549,12 +481,38 @@ export class PaintEngine {
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
       });
     }
-    this.uploadTexture(this.selectionTex, mask, this.docWidth, this.docHeight, 1);
+    uploadTexture(this.device, this.selectionTex, mask, this.docWidth, this.docHeight, 1);
   }
 
   // -------------------------------------------------------------------------
   // Strokes
   // -------------------------------------------------------------------------
+
+  /**
+   * Writes the WGSL MergeU block (12 words) at `word` into a uniform slice.
+   * The single source of truth for the stroke->layer merge layout, shared by
+   * the compositor's LayerU and the commit pass's CommitU.
+   */
+  private static fillMergeFields(
+    f: Float32Array,
+    u: Uint32Array,
+    word: number,
+    stroke: EngineStrokeParams,
+  ): void {
+    const tex = stroke.texture;
+    u[word] = BLEND_MODE_INDEX[stroke.blendMode] ?? 0;
+    f[word + 1] = stroke.opacity;
+    f[word + 2] = stroke.wetEdges ? 1 : 0;
+    f[word + 3] = tex && !tex.eachTip ? 1 : 0;
+    f[word + 4] = tex ? tex.scalePx : 256;
+    u[word + 5] = tex ? TEXTURE_BLEND_INDEX[tex.mode] : 0;
+    f[word + 6] = stroke.dual ? 1 : 0;
+    u[word + 7] = stroke.dual ? TEXTURE_BLEND_INDEX[stroke.dual.mode] : 0;
+    f[word + 8] = tex ? tex.brightness : 0;
+    f[word + 9] = tex ? tex.contrast : 0;
+    f[word + 10] = tex && tex.invert ? 1 : 0;
+    f[word + 11] = tex ? tex.depth : 1;
+  }
 
   /** StampU layout shared by the primary and dual stamp passes. */
   private fillStampUniforms(
@@ -579,13 +537,13 @@ export class PaintEngine {
     f[9] = tex ? tex.contrast : 0;
     f[10] = tex && tex.invert ? 1 : 0;
     f[11] = tex ? tex.depth : 1;
-    this.uploadBuffer(target, 0, u);
+    uploadBuffer(this.device, target, 0, u);
   }
 
   beginStroke(params: EngineStrokeParams): void {
     this.stroke = params;
-    this.clearTexture(this.strokeTex);
-    this.clearTexture(this.dualStrokeTex);
+    this.stampBindGroups = null; // tip/pattern textures change per stroke
+    this.clearStrokeTextures();
 
     this.strokeTipTex =
       params.tipShape === 'round'
@@ -626,58 +584,132 @@ export class PaintEngine {
   }
 
   /**
-   * instances: packed STAMP_FLOATS records per stamp. `target` selects the
-   * primary color stroke or the dual-brush coverage mask.
+   * Bind groups for the stamp passes. Their inputs only change when a stroke
+   * begins (tip/pattern textures), the selection mask changes, or the doc is
+   * resized, so they are cached and rebuilt lazily instead of per draw.
    */
-  drawStamps(
-    instances: Float32Array<ArrayBuffer>,
-    count: number,
-    target: 'primary' | 'dual' = 'primary',
+  private stampBindGroups: { primary: GPUBindGroup; dual: GPUBindGroup } | null = null;
+
+  private ensureStampBindGroups(): { primary: GPUBindGroup; dual: GPUBindGroup } {
+    if (this.stampBindGroups) return this.stampBindGroups;
+    const white = this.whiteTex.createView();
+    const selection = (this.selectionTex ?? this.whiteTex).createView();
+    const make = (dual: boolean) =>
+      this.device.createBindGroup({
+        layout: (dual ? this.stampPipelineDual : this.stampPipeline).getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: { buffer: dual ? this.dualStampUniforms : this.stampUniforms },
+          },
+          { binding: 1, resource: selection },
+          { binding: 2, resource: this.sampLinear },
+          {
+            binding: 3,
+            resource: (dual ? this.strokeDualTipTex : this.strokeTipTex)?.createView() ?? white,
+          },
+          { binding: 4, resource: this.strokePatternTex?.createView() ?? white },
+          { binding: 5, resource: this.sampRepeat },
+        ],
+      });
+    this.stampBindGroups = { primary: make(false), dual: make(true) };
+    return this.stampBindGroups;
+  }
+
+  /**
+   * Draws stamp batches in order with one instance upload and one queue
+   * submit for the lot. `records` are packed STAMP_FLOATS-sized instances;
+   * `target` selects the primary color stroke or the dual coverage mask.
+   */
+  drawStampBatches(
+    batches: { target: 'primary' | 'dual'; records: Float32Array }[],
   ): void {
-    if (!this.stroke || count === 0) return;
-    if (count > this.instanceCapacity) {
-      while (this.instanceCapacity < count) this.instanceCapacity *= 2;
+    if (!this.stroke) return;
+    const totalFloats = batches.reduce((n, b) => n + b.records.length, 0);
+    const total = totalFloats / STAMP_FLOATS;
+    if (total === 0) return;
+
+    if (total > this.instanceCapacity) {
+      while (this.instanceCapacity < total) this.instanceCapacity *= 2;
       this.instanceBuf.destroy();
       this.instanceBuf = this.device.createBuffer({
         size: this.instanceCapacity * STAMP_STRIDE,
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
       });
     }
-    this.uploadBuffer(this.instanceBuf, 0, instances.subarray(0, count * STAMP_FLOATS));
+    const combined = new Float32Array(totalFloats);
+    let writeAt = 0;
+    for (const b of batches) {
+      combined.set(b.records, writeAt);
+      writeAt += b.records.length;
+    }
+    uploadBuffer(this.device, this.instanceBuf, 0, combined);
 
-    const dual = target === 'dual';
-    const pipeline = dual ? this.stampPipelineDual : this.stampPipeline;
-    const white = this.whiteTex.createView();
-    const bindGroup = this.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: dual ? this.dualStampUniforms : this.stampUniforms } },
-        { binding: 1, resource: (this.selectionTex ?? this.whiteTex).createView() },
-        { binding: 2, resource: this.sampLinear },
-        {
-          binding: 3,
-          resource: (dual ? this.strokeDualTipTex : this.strokeTipTex)?.createView() ?? white,
-        },
-        { binding: 4, resource: this.strokePatternTex?.createView() ?? white },
-        { binding: 5, resource: this.sampRepeat },
-      ],
-    });
+    const groups = this.ensureStampBindGroups();
+    const enc = this.device.createCommandEncoder();
+    let byteOffset = 0;
+    for (const b of batches) {
+      const count = b.records.length / STAMP_FLOATS;
+      if (count === 0) continue;
+      const dual = b.target === 'dual';
+      const pass = enc.beginRenderPass({
+        colorAttachments: [
+          {
+            view: (dual ? this.dualStrokeTex : this.strokeTex).createView(),
+            loadOp: 'load',
+            storeOp: 'store',
+          },
+        ],
+      });
+      pass.setPipeline(dual ? this.stampPipelineDual : this.stampPipeline);
+      pass.setVertexBuffer(0, this.instanceBuf, byteOffset);
+      pass.setBindGroup(0, dual ? groups.dual : groups.primary);
+      pass.draw(4, count);
+      pass.end();
+      byteOffset += b.records.length * 4;
+    }
+    this.device.queue.submit([enc.finish()]);
+  }
 
+  /** Single-batch convenience over drawStampBatches. */
+  drawStamps(
+    instances: Float32Array<ArrayBuffer>,
+    count: number,
+    target: 'primary' | 'dual' = 'primary',
+  ): void {
+    this.drawStampBatches([{ target, records: instances.subarray(0, count * STAMP_FLOATS) }]);
+  }
+
+  /**
+   * Runs one fullscreen pass into the scratch texture and copies the result
+   * into `dst` — the pattern for every pass that rewrites a layer in place
+   * (a texture cannot be sampled while it is the render target).
+   */
+  private renderViaScratch(
+    pipeline: GPURenderPipeline,
+    bindGroup: GPUBindGroup,
+    dst: GPUTexture,
+    dynamicOffsets?: number[],
+  ): void {
     const enc = this.device.createCommandEncoder();
     const pass = enc.beginRenderPass({
       colorAttachments: [
-        {
-          view: (dual ? this.dualStrokeTex : this.strokeTex).createView(),
-          loadOp: 'load',
-          storeOp: 'store',
-        },
+        { view: this.scratch.createView(), loadOp: 'clear', storeOp: 'store' },
       ],
     });
     pass.setPipeline(pipeline);
-    pass.setVertexBuffer(0, this.instanceBuf);
-    pass.setBindGroup(0, bindGroup);
-    pass.draw(4, count);
+    if (dynamicOffsets) {
+      pass.setBindGroup(0, bindGroup, dynamicOffsets);
+    } else {
+      pass.setBindGroup(0, bindGroup);
+    }
+    pass.draw(3);
     pass.end();
+    enc.copyTextureToTexture(
+      { texture: this.scratch },
+      { texture: dst },
+      [this._docWidth, this._docHeight],
+    );
     this.device.queue.submit([enc.finish()]);
   }
 
@@ -692,27 +724,15 @@ export class PaintEngine {
     // commit pass below, so it captures the old contents).
     this.pushUndo(layerId);
 
-    const u = new ArrayBuffer(80);
+    // CommitU: mode, pad, docSize, merge block
+    const u = new ArrayBuffer(64);
     const f = new Float32Array(u);
     const i = new Uint32Array(u);
-    const tex = stroke.texture;
-    const texOn = tex && !tex.eachTip;
     i[0] = stroke.mode === 'erase' ? 2 : 1;
-    f[1] = stroke.opacity;
-    i[2] = BLEND_MODE_INDEX[stroke.blendMode] ?? 0;
-    f[3] = stroke.wetEdges ? 1 : 0;
-    f[4] = texOn ? 1 : 0;
-    f[5] = tex ? tex.scalePx : 256;
-    i[6] = tex ? TEXTURE_BLEND_INDEX[tex.mode] : 0;
-    f[8] = tex ? tex.brightness : 0;
-    f[9] = tex ? tex.contrast : 0;
-    f[10] = tex && tex.invert ? 1 : 0;
-    f[11] = tex ? tex.depth : 1;
-    i[12] = stroke.dual ? TEXTURE_BLEND_INDEX[stroke.dual.mode] : 0;
-    f[13] = stroke.dual ? 1 : 0;
-    f[16] = this.docWidth;
-    f[17] = this.docHeight;
-    this.uploadBuffer(this.commitUniforms, 0, u);
+    f[2] = this.docWidth;
+    f[3] = this.docHeight;
+    PaintEngine.fillMergeFields(f, i, 4, stroke);
+    uploadBuffer(this.device, this.commitUniforms, 0, u);
 
     const bindGroup = this.device.createBindGroup({
       layout: this.commitPipeline.getBindGroupLayout(0),
@@ -727,31 +747,13 @@ export class PaintEngine {
       ],
     });
 
-    const enc = this.device.createCommandEncoder();
-    const pass = enc.beginRenderPass({
-      colorAttachments: [
-        { view: this.scratch.createView(), loadOp: 'clear', storeOp: 'store' },
-      ],
-    });
-    pass.setPipeline(this.commitPipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.draw(3);
-    pass.end();
-    enc.copyTextureToTexture(
-      { texture: this.scratch },
-      { texture: layer },
-      [this.docWidth, this.docHeight],
-    );
-    this.device.queue.submit([enc.finish()]);
-
-    this.clearTexture(this.strokeTex);
-    this.clearTexture(this.dualStrokeTex);
+    this.renderViaScratch(this.commitPipeline, bindGroup, layer);
+    this.clearStrokeTextures();
   }
 
   cancelStroke(): void {
     this.stroke = null;
-    this.clearTexture(this.strokeTex);
-    this.clearTexture(this.dualStrokeTex);
+    this.clearStrokeTextures();
   }
 
   /**
@@ -776,7 +778,7 @@ export class PaintEngine {
     } else {
       i[4] = 2;
     }
-    this.uploadBuffer(this.fillUniforms, 0, u);
+    uploadBuffer(this.device, this.fillUniforms, 0, u);
 
     const bindGroup = this.device.createBindGroup({
       layout: this.fillPipeline.getBindGroupLayout(0),
@@ -788,22 +790,7 @@ export class PaintEngine {
       ],
     });
 
-    const enc = this.device.createCommandEncoder();
-    const pass = enc.beginRenderPass({
-      colorAttachments: [
-        { view: this.scratch.createView(), loadOp: 'clear', storeOp: 'store' },
-      ],
-    });
-    pass.setPipeline(this.fillPipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.draw(3);
-    pass.end();
-    enc.copyTextureToTexture(
-      { texture: this.scratch },
-      { texture: layer },
-      [this.docWidth, this.docHeight],
-    );
-    this.device.queue.submit([enc.finish()]);
+    this.renderViaScratch(this.fillPipeline, bindGroup, layer);
   }
 
   // -------------------------------------------------------------------------
@@ -842,7 +829,7 @@ export class PaintEngine {
       f[22] = opts.bgFill[2];
       f[23] = 1;
     }
-    this.uploadBuffer(this.transformUniforms, 0, u);
+    uploadBuffer(this.device, this.transformUniforms, 0, u);
 
     const bindGroup = this.device.createBindGroup({
       layout: this.transformPipeline.getBindGroupLayout(0),
@@ -987,8 +974,8 @@ export class PaintEngine {
     this.scratch = this.makeDocTexture('rgba8unorm', 'scratch');
     this.strokeTex = this.makeDocTexture('rgba8unorm', 'stroke');
     this.dualStrokeTex = this.makeDocTexture('r8unorm', 'dualStroke');
-    this.clearTexture(this.strokeTex);
-    this.clearTexture(this.dualStrokeTex);
+    this.stampBindGroups = null; // stamps render into the recreated textures
+    this.clearStrokeTextures();
 
     this.undoStack = [];
     this.redoStack = [];
@@ -1012,9 +999,9 @@ export class PaintEngine {
     u[0] = BLEND_MODE_INDEX[blendMode] ?? 0;
     f[1] = opacity;
     u[2] = 0; // no live stroke
-    f[16] = this._docWidth;
-    f[17] = this._docHeight;
-    this.uploadBuffer(this.layerUniforms, 0, buf);
+    f[4] = this._docWidth;
+    f[5] = this._docHeight;
+    uploadBuffer(this.device, this.layerUniforms, 0, buf);
 
     const white = this.whiteTex.createView();
     const bindGroup = this.device.createBindGroup({
@@ -1030,29 +1017,14 @@ export class PaintEngine {
         { binding: 7, resource: this.dualStrokeTex.createView() },
       ],
     });
-    const enc = this.device.createCommandEncoder();
-    const pass = enc.beginRenderPass({
-      colorAttachments: [
-        { view: this.scratch.createView(), loadOp: 'clear', storeOp: 'store' },
-      ],
-    });
-    pass.setPipeline(this.compositePipeline);
-    pass.setBindGroup(0, bindGroup, [0]);
-    pass.draw(3);
-    pass.end();
-    enc.copyTextureToTexture(
-      { texture: this.scratch },
-      { texture: bottom },
-      [this._docWidth, this._docHeight],
-    );
-    this.device.queue.submit([enc.finish()]);
+    this.renderViaScratch(this.compositePipeline, bindGroup, bottom, [0]);
   }
 
   /** Replaces a layer's pixels with doc-sized premultiplied RGBA data. */
   putLayerImage(id: string, data: Uint8Array, width: number, height: number): void {
     if (width !== this._docWidth || height !== this._docHeight) return;
     this.ensureLayer(id);
-    this.uploadTexture(this.layers.get(id)!, data, width, height, 4);
+    uploadTexture(this.device, this.layers.get(id)!, data, width, height, 4);
   }
 
   /** Raw premultiplied RGBA pixels of one layer (for bounds / flatten). */
@@ -1092,7 +1064,7 @@ export class PaintEngine {
     const w = x1 - x0;
     const h = y1 - y0;
 
-    const data = await this.readTextureRegion(tex, x0, y0, w, h);
+    const data = await readTextureRegion(this.device, tex, x0, y0, w, h);
     if (data.length === 0) return null;
     let r = 0;
     let g = 0;
@@ -1167,51 +1139,13 @@ export class PaintEngine {
     w: number,
     h: number,
   ): Promise<Uint8Array<ArrayBuffer>> {
-    return this.readTextureRegion(tex, 0, 0, w, h);
-  }
-
-  private async readTextureRegion(
-    tex: GPUTexture,
-    x: number,
-    y: number,
-    w: number,
-    h: number,
-  ): Promise<Uint8Array<ArrayBuffer>> {
-    const rowBytes = Math.ceil((w * 4) / 256) * 256;
-    const buf = this.device.createBuffer({
-      size: rowBytes * h,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
-    try {
-      const enc = this.device.createCommandEncoder();
-      enc.copyTextureToBuffer(
-        { texture: tex, origin: { x, y } },
-        { buffer: buf, bytesPerRow: rowBytes },
-        [w, h],
-      );
-      this.device.queue.submit([enc.finish()]);
-      await buf.mapAsync(GPUMapMode.READ);
-      const mapped = new Uint8Array(buf.getMappedRange());
-      const out = new Uint8Array(w * 4 * h);
-      for (let y = 0; y < h; y++) {
-        out.set(mapped.subarray(y * rowBytes, y * rowBytes + w * 4), y * w * 4);
-      }
-      buf.unmap();
-      return out;
-    } catch (err) {
-      // GPU readback can fail on broken WebGPU stacks; degrade gracefully
-      // (the corresponding undo step is skipped) instead of crashing.
-      console.warn('[northlight] texture readback failed:', err);
-      return new Uint8Array(0);
-    } finally {
-      buf.destroy();
-    }
+    return readTextureRegion(this.device, tex, 0, 0, w, h);
   }
 
   private writeLayer(layerId: string, data: Uint8Array<ArrayBuffer>): void {
     const layer = this.layers.get(layerId);
     if (!layer || data.length === 0) return;
-    this.uploadTexture(layer, data, this.docWidth, this.docHeight, 4);
+    uploadTexture(this.device, layer, data, this.docWidth, this.docHeight, 4);
   }
 
   // -------------------------------------------------------------------------
@@ -1234,6 +1168,7 @@ export class PaintEngine {
     const visible = state.layers.filter((l) => this.layers.has(l.id));
 
     // Write all per-layer uniform slices in one go.
+    // LayerU: layer blend/opacity, strokeMode, docSize, merge block
     const buf = new ArrayBuffer(UNIFORM_SLICE * Math.max(1, visible.length));
     visible.forEach((meta, idx) => {
       const f = new Float32Array(buf, idx * UNIFORM_SLICE, LAYER_U_SIZE / 4);
@@ -1244,26 +1179,11 @@ export class PaintEngine {
       const strokeHere =
         stroke !== null && meta.id === state.activeLayerId && meta.visible;
       u[2] = strokeHere ? (stroke!.mode === 'erase' ? 2 : 1) : 0;
-      if (strokeHere) {
-        const tex = stroke.texture;
-        const texOn = tex && !tex.eachTip;
-        f[3] = stroke.opacity;
-        u[4] = BLEND_MODE_INDEX[stroke.blendMode] ?? 0;
-        f[5] = stroke.wetEdges ? 1 : 0;
-        f[6] = texOn ? 1 : 0;
-        f[7] = tex ? tex.scalePx : 256;
-        f[8] = tex ? tex.brightness : 0;
-        f[9] = tex ? tex.contrast : 0;
-        f[10] = tex && tex.invert ? 1 : 0;
-        f[11] = tex ? tex.depth : 1;
-        u[12] = tex ? TEXTURE_BLEND_INDEX[tex.mode] : 0;
-        f[13] = stroke.dual ? 1 : 0;
-        u[14] = stroke.dual ? TEXTURE_BLEND_INDEX[stroke.dual.mode] : 0;
-      }
-      f[16] = this.docWidth;
-      f[17] = this.docHeight;
+      f[4] = this.docWidth;
+      f[5] = this.docHeight;
+      if (strokeHere) PaintEngine.fillMergeFields(f, u, 8, stroke!);
     });
-    this.uploadBuffer(this.layerUniforms, 0, buf);
+    uploadBuffer(this.device, this.layerUniforms, 0, buf);
 
     // Clear the first accumulation target.
     let read = 0;
@@ -1334,7 +1254,7 @@ export class PaintEngine {
     f[6] = view.zoom;
     f[7] = view.zoom >= 2 ? 1 : 0; // nearest sampling when zoomed in
     f[8] = 8 * devicePixelRatio; // checker cell size
-    this.uploadBuffer(this.viewUniforms, 0, u);
+    uploadBuffer(this.device, this.viewUniforms, 0, u);
 
     const bindGroup = this.device.createBindGroup({
       layout: this.presentPipeline.getBindGroupLayout(0),
