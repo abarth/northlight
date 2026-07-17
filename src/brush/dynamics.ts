@@ -1,5 +1,6 @@
 import { clamp, hsvToRgb, rgbToHsv, type RGB } from '../color/convert';
 import type { HSV } from '../types';
+import { getTipAspect } from './patterns';
 import type { BrushSettings, ColorDynamics, DualBrush, DynamicControl } from './types';
 
 /**
@@ -259,6 +260,19 @@ export function emitStamps(
       depthScale,
     );
   }
+}
+
+/**
+ * Distance between dual-brush train stamps. Photoshop's dual Spacing is a
+ * percentage of the tip MARK's short side: with a round or square tip,
+ * 100% spacing makes the marks exactly abut (spacing x diameter), while a
+ * squat sampled tip (e.g. "Chalk 44 pixels", ink box 44x32) packs tighter
+ * by its aspect ratio. Verified against isolated dual marks in Photoshop:
+ * circles at 100% touch in a strip and at 200% sit one circle apart, and
+ * the chalk tip at the same panel size lands its marks closer together.
+ */
+export function dualSpacingPx(dual: DualBrush): number {
+  return Math.max(dual.spacing * dual.size * getTipAspect(dual.shape), 0.5);
 }
 
 /**

@@ -1,6 +1,7 @@
 import type { PaintEngine } from './engine';
 import type { BrushSettings } from '../brush/types';
 import {
+  dualSpacingPx,
   dynamicColor,
   emitDualStamps,
   emitStamps,
@@ -9,6 +10,7 @@ import {
   type PointerSample,
   type StampContext,
 } from '../brush/dynamics';
+import { getTipAspect } from '../brush/patterns';
 import { hsvToRgb, type RGB } from '../color/convert';
 import type { HSV } from '../types';
 
@@ -105,18 +107,14 @@ export class StrokeSession {
     emitDualStamps(dual, this.contextAt(sample), x, y, this.rng, this.queueFor('dual'));
   }
 
-  /** Spacing distance for the current pen state (control-scaled, no jitter). */
+  /** Spacing distance for the current pen state (control-scaled, no jitter).
+   * Like the dual train (see dualSpacingPx), Photoshop's spacing is a
+   * percentage of the tip MARK's short side, so a squat sampled tip packs
+   * its dabs tighter than a round tip of the same size. */
   private spacingPx(sample: PointerSample): number {
     const d = stampDiameter(this.settings, this.contextAt(sample), zeroRng);
-    return Math.max(this.settings.tip.spacing * d, 0.5);
-  }
-
-  private dualSpacingPx(): number {
-    const dual = this.settings.dual;
-    // Photoshop paces the dual train at spacing% x the dual tip's RADIUS
-    // (verified against isolated dual marks at 200% spacing: marks abut
-    // rather than leaving a mark-sized gap)
-    return Math.max((dual.spacing * dual.size) / 2, 0.5);
+    const aspect = getTipAspect(this.settings.tip.shape);
+    return Math.max(this.settings.tip.spacing * d * aspect, 0.5);
   }
 
   down(sample: PointerSample): void {
@@ -126,7 +124,7 @@ export class StrokeSession {
     this.stepIndex = 0;
     this.pathDist = 0;
     this.emitDual(sample.x, sample.y, sample);
-    this.dualNext = this.dualSpacingPx();
+    this.dualNext = dualSpacingPx(this.settings.dual);
     this.emit(sample.x, sample.y, sample);
     this.flush();
 
@@ -207,7 +205,7 @@ export class StrokeSession {
     // some dabs still reveals them — no need to run ahead of the pen.
     if (this.settings.dual.enabled) {
       const end = this.pathDist + dist;
-      const step = this.dualSpacingPx();
+      const step = dualSpacingPx(this.settings.dual);
       for (let guard = 0; guard < 10000 && this.dualNext <= end; guard++) {
         const f = (this.dualNext - this.pathDist) / dist;
         const at = lerpSample(f);

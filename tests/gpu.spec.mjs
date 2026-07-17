@@ -317,13 +317,13 @@ const TEST = `
   }
 
   // ---- 13. dual brush walks its own spacing train along a stroke ----
-  // (train pitch = spacing% x the dual tip's RADIUS: 5.0 x 8 = 40px steps
+  // (round tip: train pitch = spacing% x diameter, 2.5 x 16 = 40px steps
   // with 16px marks -> a dashed line)
   {
     const settings = makeBrush({
       tip: { size: 40, hardness: 1, spacing: 0.1 },
       dual: { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',
-        size: 16, spacing: 5.0, scatter: 0, bothAxes: false, count: 1 },
+        size: 16, spacing: 2.5, scatter: 0, bothAxes: false, count: 1 },
       smoothing: 0,
     });
     eng.beginStroke(NL.brush.engineStrokeParams(settings, 'paint'));
@@ -343,6 +343,40 @@ const TEST = `
     eng.cancelStroke();
     assert('dual spacing: dabs with gaps along the stroke (not a solid line)',
       dark >= 10 && light >= 10, 'dark=' + dark + ' light=' + light);
+  }
+
+  // ---- 13a. primary spacing uses the tip mark's short side too ----
+  // A 2:1-wide sampled tip (aspect 0.5) at 180% spacing paces dabs at
+  // 0.9 x its mark width, so the stroke stays connected where a round tip
+  // with the same settings would leave mark-sized gaps.
+  {
+    const wideTip = new Uint8Array(64 * 64);
+    for (let y = 16; y < 48; y++) {
+      for (let x = 0; x < 64; x++) wideTip[y * 64 + x] = 255;
+    }
+    NL.brush.patterns.registerTip('test-wide-tip', { size: 64, data: wideTip });
+    const samp = (x, y) => ({ x, y, pressure: 1, tiltX: 0, tiltY: 0, twist: 0 });
+    const runStroke = async (shape) => {
+      const b = makeBrush({ tip: { shape, size: 40, hardness: 1, spacing: 1.8 },
+        smoothing: 0 });
+      eng.beginStroke(NL.brush.engineStrokeParams(b, 'paint'));
+      const s = new NL.StrokeSession(eng, b,
+        { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 } });
+      s.down(samp(80, 150));
+      s.move([samp(320, 150)]);
+      s.up();
+      const d = await read();
+      let worst = 0;
+      for (let x = 90; x <= 310; x += 2) worst = Math.max(worst, px(d, x, 150)[0]);
+      eng.cancelStroke();
+      return worst;
+    };
+    const wideWorst = await runStroke('test-wide-tip');
+    const roundWorst = await runStroke('round');
+    assert('primary spacing: squat tip paces by its short side (connected)',
+      wideWorst <= 60, 'worst=' + wideWorst);
+    assert('primary spacing: round tip at 180% leaves gaps (diameter basis)',
+      roundWorst >= 250, 'worst=' + roundWorst);
   }
 
   // ---- 13b. tip angle sign: positive rotates counter-clockwise (Photoshop) ----
@@ -381,10 +415,10 @@ const TEST = `
     const settings = makeBrush({
       tip: { size: 10, hardness: 1, spacing: 0.5 },
       dual: { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',
-        size: 60, spacing: 4.0, scatter: 0, bothAxes: false, count: 1 },
+        size: 60, spacing: 2.0, scatter: 0, bothAxes: false, count: 1 },
       smoothing: 0,
     });
-    // train pitch 4.0 x 30 = 120px -> mask stamps at x = 80 (down), 200,
+    // train pitch 2.0 x 60 = 120px -> mask stamps at x = 80 (down), 200,
     // 320: coverage discs [50..110], [170..230], [290..350] with gaps
     eng.beginStroke(NL.brush.engineStrokeParams(settings, 'paint'));
     const session = new NL.StrokeSession(eng, settings,
@@ -447,12 +481,14 @@ const TEST = `
       holes === 0, 'unpainted rows=' + holes);
     eng.cancelStroke();
 
-    // With abutting mask stamps (spacing 100%, dual larger than primary) the
-    // stroke must be CONTINUOUS — the case that used to leave seams/gaps.
+    // With overlapping mask stamps (spacing 50%, dual larger than primary)
+    // the stroke must be CONTINUOUS — the case that used to leave seams.
+    // (At exactly 100% round marks only touch at a point, like Photoshop,
+    // so the gated stroke legitimately pinches there.)
     const cont = makeBrush({
       tip: { size: 40, hardness: 1, spacing: 0.1 },
       dual: { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',
-        size: 60, spacing: 1.0, scatter: 0, bothAxes: false, count: 1 },
+        size: 60, spacing: 0.5, scatter: 0, bothAxes: false, count: 1 },
       smoothing: 0,
     });
     eng.beginStroke(NL.brush.engineStrokeParams(cont, 'paint'));
@@ -464,7 +500,7 @@ const TEST = `
     const d3 = await read();
     let worst = 0;
     for (let x = 95; x <= 305; x += 2) worst = Math.max(worst, px(d3, x, 60)[0]);
-    assert('dual 100% spacing: abutting mask stamps paint a continuous mark',
+    assert('dual 50% spacing: overlapping mask stamps paint a continuous mark',
       worst <= 60, 'worst=' + worst);
     eng.cancelStroke();
   }
@@ -682,6 +718,24 @@ const TEST = `
       assert('dynamics: dual marks get implicit random flips, no rotation',
         flags.size >= 3 && spun === 0,
         'flags=' + [...flags].join('/') + ' spun=' + spun);
+
+      // dual spacing basis: spacing% x the tip MARK's short side. A round
+      // tip at 100% abuts (pitch = diameter); a 2:1-wide sampled tip packs
+      // twice as tight (Photoshop-verified with circle vs chalk dual tips).
+      const wideTip = new Uint8Array(64 * 64);
+      for (let y = 16; y < 48; y++) {
+        for (let x = 0; x < 64; x++) wideTip[y * 64 + x] = 255;
+      }
+      NL.brush.patterns.registerTip('test-wide-tip', { size: 64, data: wideTip });
+      const spacingBase = { enabled: true, hardness: 1, mode: 'multiply',
+        size: 40, spacing: 1, scatter: 0, bothAxes: false, count: 1,
+        countJitter: 0 };
+      const roundPitch = D.dualSpacingPx({ ...spacingBase, shape: 'round' });
+      const squatPitch = D.dualSpacingPx({ ...spacingBase, shape: 'test-wide-tip' });
+      assert('dual spacing: 100% of a round tip is its diameter',
+        near(roundPitch, 40, 1e-6), 'pitch=' + roundPitch);
+      assert('dual spacing: a squat tip packs tighter by its ink aspect',
+        near(squatPitch, 20, 1e-6), 'pitch=' + squatPitch);
     }
 
     const cd = { enabled: true, applyPerTip: true, fgBgJitter: 0,

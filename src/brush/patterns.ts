@@ -285,6 +285,44 @@ export function getTip(shape: TipShape): GrayMap {
 /** Registers a sampled tip (square alpha map) under an id, e.g. from an ABR. */
 export function registerTip(id: string, map: GrayMap): void {
   registeredTips.set(id, map);
+  tipAspectCache.delete(id);
+}
+
+const tipAspectCache = new Map<string, number>();
+
+/**
+ * Short/long side ratio of the tip's ink bounding box, in (0, 1]. Sampled
+ * ABR tips are stored cropped to their ink but padded square here, so the
+ * bounding box recovers the mark's true shape (e.g. "Chalk 44 pixels" is
+ * 44x32 -> 0.727). Round and square marks are 1.
+ */
+export function getTipAspect(shape: TipShape): number {
+  if (shape === 'round') return 1;
+  const cached = tipAspectCache.get(shape);
+  if (cached !== undefined) return cached;
+  const { size, data } = getTip(shape);
+  let minX = size;
+  let minY = size;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      if (data[y * size + x] > 0) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  let aspect = 1;
+  if (maxX >= minX && maxY >= minY) {
+    const w = maxX - minX + 1;
+    const h = maxY - minY + 1;
+    aspect = Math.min(w, h) / Math.max(w, h);
+  }
+  tipAspectCache.set(shape, aspect);
+  return aspect;
 }
 
 export function isRegisteredTip(id: string): boolean {
