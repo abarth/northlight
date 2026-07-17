@@ -127,9 +127,9 @@ export const AirbrushIcon = ({ size }: IconProps) => (
 /** Bent double-headed arrow for swapping the foreground/background colors. */
 export const SwapColorsIcon = ({ size }: IconProps) => (
   <svg {...base(size)} strokeWidth={2.4}>
-    <path d="M6 18C6 10 10 6 18 6" />
-    <path d="M14 2.5L18 6l-3.5 4" />
-    <path d="M2.5 14L6 18l4-3.5" />
+    <path d="M18 18c0-8-4-12-12-12" />
+    <path d="M10 2.5L6 6l3.5 4" />
+    <path d="M21.5 14L18 18l-4-3.5" />
   </svg>
 );
 
