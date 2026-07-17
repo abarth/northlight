@@ -226,13 +226,21 @@ fn applyTexToAlpha(a: f32, v: f32, mode: u32, depth: f32) -> f32 {
   }
 }
 
-// Dual Brush gate: the texture math above, except color burn resolves the
-// empty-mask case FIRST — applyTexToAlpha's case 8u lets a fully-covered
-// tip pixel (a >= 1) through any mask, but a dab must never escape the dual
-// train's marks.
-fn applyDualToTip(t: f32, v: f32, mode: u32) -> f32 {
+// Dual Brush gate: applied ONCE to the stroke's ACCUMULATED coverage when
+// it merges into the layer (compositor preview + commit) — never per dab.
+// Gating each dab and then accumulating overlapping low-flow dabs averages
+// the mask's texture away (soft dilated blobs); gating the accumulated
+// stroke preserves the secondary tip's marks crisply, which is what
+// Photoshop renders (validated against Size_Flow_Gang.abr "06 Gritty" at
+// 5% flow). Two guards on the texture math: the stroke must never escape
+// the dual train's marks (applyTexToAlpha's color-burn case lets a >= 1
+// pixels through any mask), and where the stroke has no coverage nothing
+// paints (additive modes like screen/lighten would otherwise draw the raw
+// mask onto the layer).
+fn applyDualToAlpha(a: f32, v: f32, mode: u32) -> f32 {
+  if (a <= 0.0) { return 0.0; }
   if (mode == 8u && v <= 0.0) { return 0.0; }
-  return applyTexToAlpha(t, v, mode, 1.0);
+  return applyTexToAlpha(a, v, mode, 1.0);
 }
 
 // Wet edges: interior settles at ~60% while the rim stays strong.
@@ -253,13 +261,15 @@ const MERGE_LIB = /* wgsl */ `
 /**
  * Merges the live/committing stroke into a premultiplied layer pixel.
  * st: premultiplied stroke texel. patRaw: raw pattern sample (whole-stroke
- * texture, i.e. Texture with "texture each tip" off). Dual Brush gating
- * happens per dab in the stamp shader, not here.
+ * texture, i.e. Texture with "texture each tip" off). dualV: the dual-brush
+ * coverage mask sample — the Dual Brush gate applies here, once, to the
+ * accumulated stroke (see applyDualToAlpha).
  */
 fn strokeMergeApply(
   l: vec4f,
   st: vec4f,
   patRaw: f32,
+  dualV: f32,
   mode: u32,        // 1 = paint, 2 = erase
   blend: u32,
   opacity: f32,
@@ -267,8 +277,13 @@ fn strokeMergeApply(
   texOn: f32,
   bci: vec4f,
   texMode: u32,
+  dualOn: f32,
+  dualMode: u32,
 ) -> vec4f {
   var cov = st.a;
+  if (dualOn > 0.5) {
+    cov = applyDualToAlpha(cov, dualV, dualMode);
+  }
   if (texOn > 0.5) {
     cov = applyTexToAlpha(cov, texValue(patRaw, bci), texMode, bci.w);
   }
@@ -307,8 +322,8 @@ struct LayerU {
   texScalePx: f32,
   texBCI: vec4f,       // brightness, contrast, invert, depth
   texMode: u32,
-  _p0: f32,
-  _p1: u32,
+  dualOn: f32,
+  dualMode: u32,
   _p2: f32,
   docSize: vec2f,
   _p3: vec2f,
@@ -321,6 +336,7 @@ struct LayerU {
 @group(0) @binding(4) var<uniform> U: LayerU;
 @group(0) @binding(5) var patternTex: texture_2d<f32>;
 @group(0) @binding(6) var repeatSamp: sampler;
+@group(0) @binding(7) var dualTex: texture_2d<f32>;
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
@@ -331,9 +347,10 @@ fn fs(in: VSOut) -> @location(0) vec4f {
     let st = textureSampleLevel(strokeTex, samp, in.uv, 0.0);
     let patUv = in.uv * U.docSize / max(U.texScalePx, 1.0);
     let patRaw = textureSampleLevel(patternTex, repeatSamp, patUv, 0.0).r;
+    let dualV = textureSampleLevel(dualTex, samp, in.uv, 0.0).r;
     l = strokeMergeApply(
-      l, st, patRaw, U.strokeMode, U.strokeBlend, U.strokeOpacity,
-      U.wetEdges, U.texOn, U.texBCI, U.texMode,
+      l, st, patRaw, dualV, U.strokeMode, U.strokeBlend, U.strokeOpacity,
+      U.wetEdges, U.texOn, U.texBCI, U.texMode, U.dualOn, U.dualMode,
     );
   }
 
@@ -349,8 +366,9 @@ fn fs(in: VSOut) -> @location(0) vec4f {
  * premultiplied stroke texture so flow builds up where stamps overlap but
  * saturates at 1. Supports rotated/elliptical analytic round tips (with the
  * Gaussian hardness falloff) and sampled texture tips, per-stamp color
- * (Color Dynamics), per-stamp texture (Texture Each Tip), dual-brush
- * modulation, noise, and selection clipping.
+ * (Color Dynamics), per-stamp texture (Texture Each Tip), noise, and
+ * selection clipping. Dual Brush stamps render through this same shader
+ * into the coverage mask; the gate itself applies at merge time.
  */
 export const STAMP_SHADER = /* wgsl */ `
 ${TEX_LIB}
@@ -364,9 +382,8 @@ struct StampU {
   noise: f32,
   texMode: u32,
   texBCI: vec4f,       // brightness, contrast, invert, depth
-  dualOn: f32,
-  dualMode: u32,
   _p0: vec2f,
+  _p1: vec2f,
 }
 
 @group(0) @binding(0) var<uniform> SU: StampU;
@@ -375,7 +392,6 @@ struct StampU {
 @group(0) @binding(3) var tipTex: texture_2d<f32>;
 @group(0) @binding(4) var patternTex: texture_2d<f32>;
 @group(0) @binding(5) var repeatSamp: sampler;
-@group(0) @binding(6) var dualTex: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -439,9 +455,6 @@ fn roundProfile(r: f32, hardness: f32, radiusPx: f32) -> f32 {
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
   var a: f32;
-  // the tip's footprint: additive dual ink (linear burn) never escapes it,
-  // so the quad's apron and corners stay clean
-  var support = 1.0;
   if (SU.tipTextured > 0.5) {
     var uv = in.tipPos * 0.5 + vec2f(0.5);
     let f = u32(in.flags + 0.5);
@@ -449,26 +462,9 @@ fn fs(in: VSOut) -> @location(0) vec4f {
     if ((f & 2u) != 0u) { uv.y = 1.0 - uv.y; }
     a = textureSampleLevel(tipTex, clampSamp, clamp(uv, vec2f(0.0), vec2f(1.0)), 0.0).r;
     // hide the apron outside the tip square
-    if (abs(in.tipPos.x) > 1.0 || abs(in.tipPos.y) > 1.0) { a = 0.0; support = 0.0; }
+    if (abs(in.tipPos.x) > 1.0 || abs(in.tipPos.y) > 1.0) { a = 0.0; }
   } else {
     a = roundProfile(length(in.tipPos), SU.hardness, in.radius);
-    if (length(in.tipPos) >= 1.0) { support = 0.0; }
-  }
-
-  // Photoshop dual brush: each dab is gated by the secondary tip's coverage
-  // mask as it exists right now (the dual train is drawn first each flush).
-  // Gating at dab time keeps painting incremental — already-painted areas
-  // never change retroactively when later dual stamps land on them.
-  // The mode combines the mask with the TIP coverage, before flow/opacity:
-  // the darkening modes are zero wherever the mask is empty, so the stroke
-  // stays contained to the dual train's marks, and burning steepens a dab's
-  // grain inside the mask but never pushes it past its flow (both validated
-  // against Photoshop renders of Size_Flow_Gang.abr "06 Gritty"). Masking
-  // cov by the tip footprint keeps modes with additive branches
-  // (screen/lighten/hard mix) inside it, off the stamp quad's apron.
-  if (SU.dualOn > 0.5) {
-    let cov = textureSampleLevel(dualTex, clampSamp, in.docPos / SU.docSize, 0.0).r;
-    a = applyDualToTip(a, cov * support, SU.dualMode);
   }
   a = a * in.alpha;
 
@@ -508,8 +504,8 @@ struct CommitU {
   texMode: u32,
   _p0: f32,
   texBCI: vec4f,
-  _p1: u32,
-  _p2: f32,
+  dualMode: u32,
+  dualOn: f32,
   _p3: f32,
   _p4: f32,
   docSize: vec2f,
@@ -522,6 +518,7 @@ struct CommitU {
 @group(0) @binding(3) var<uniform> U: CommitU;
 @group(0) @binding(4) var patternTex: texture_2d<f32>;
 @group(0) @binding(5) var repeatSamp: sampler;
+@group(0) @binding(6) var dualTex: texture_2d<f32>;
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
@@ -529,9 +526,10 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let st = textureSampleLevel(strokeTex, samp, in.uv, 0.0);
   let patUv = in.uv * U.docSize / max(U.texScalePx, 1.0);
   let patRaw = textureSampleLevel(patternTex, repeatSamp, patUv, 0.0).r;
+  let dualV = textureSampleLevel(dualTex, samp, in.uv, 0.0).r;
   return strokeMergeApply(
-    l, st, patRaw, U.mode, U.strokeBlend, U.opacity,
-    U.wetEdges, U.texOn, U.texBCI, U.texMode,
+    l, st, patRaw, dualV, U.mode, U.strokeBlend, U.opacity,
+    U.wetEdges, U.texOn, U.texBCI, U.texMode, U.dualOn, U.dualMode,
   );
 }
 `;

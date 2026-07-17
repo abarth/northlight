@@ -250,9 +250,10 @@ const TEST = `
     assert('texture each tip: sponge carves per stamp', s2 >= 60, 'spread=' + s2);
   }
 
-  // ---- 12. dual brush: each dab is gated by the mask AT STAMP TIME ----
-  // (like Photoshop: the secondary train renders first, and later dual
-  // stamps never retroactively reveal already-gated dabs)
+  // ---- 12. dual brush: the mask gates the stroke AT COMPOSITE TIME ----
+  // (like Photoshop: the accumulated stroke is combined with the accumulated
+  // mask when it merges into the layer — gating per dab and re-accumulating
+  // would average the mask's texture away at low flow)
   {
     const dual = { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',
       size: 30, spacing: 0.5, scatter: 0, bothAxes: true, count: 1 };
@@ -265,17 +266,17 @@ const TEST = `
     ), 2, 'dual');
     // then a big primary footprint
     eng.drawStamps(stamps(rec(200, 150, 80, 1)), 1);
-    // and a dual stamp AFTER the primary dab — it must not reveal anything
+    // and a dual stamp AFTER the primary dab — order does not matter
     eng.drawStamps(stamps(rec(240, 150, 15, 1, cov)), 1, 'dual');
     const d = await read();
     const atDual1 = px(d, 170, 150)[0];
     const late = px(d, 240, 150)[0];    // dual arrived after the dab
     const between = px(d, 205, 110)[0]; // inside primary, no dual coverage
     const outside = px(d, 340, 150)[0]; // dual coverage but no primary
-    assert('dual brush: dab paints where the mask already exists',
+    assert('dual brush: dab paints where the mask has ink',
       atDual1 <= 2, 'atDual1=' + atDual1);
-    assert('dual brush: later dual stamps are not retroactive', late === 255,
-      'late=' + late);
+    assert('dual brush: later dual stamps reveal the stroke (composite gate)',
+      late <= 2, 'late=' + late);
     assert('dual brush: primary alone is masked out', between === 255,
       'between=' + between);
     assert('dual brush: dual alone paints nothing', outside === 255,
@@ -283,45 +284,46 @@ const TEST = `
     eng.cancelStroke();
   }
 
-  // ---- 12b. dual brush burn modes: contained, tip-domain burn ----
-  // Photoshop's dual Color Burn / Linear Burn combine the mask with the
-  // dab's TIP coverage before flow applies: the primary paints only where
-  // the dual train has ink (contained, like multiply), the burn steepens
-  // the tip's values inside the mask, and even a saturated mask can never
-  // push a dab past its flow (Size_Flow_Gang.abr "06 Gritty" draws soft
-  // grain at 5% flow, not black clumps).
+  // ---- 12b. dual brush burn modes: applied once to accumulated coverage --
+  // Photoshop combines the mask with the stroke's ACCUMULATED coverage at
+  // composite time (coverage-domain formulas). The stroke stays contained
+  // to the dual train's marks, and a saturated mask passes the accumulated
+  // coverage through unchanged — the mask's texture survives crisply even
+  // when many low-flow dabs overlap (Size_Flow_Gang.abr "06 Gritty").
   for (const mode of ['color-burn', 'linear-burn']) {
     const dual = { enabled: true, shape: 'round', hardness: 1, mode,
       size: 30, spacing: 0.5, scatter: 0, bothAxes: true, count: 1 };
     eng.beginStroke(sp({ dual }));
-    // saturated dual ink at one spot, 60% ink at another, then a 0.5-flow dab
+    // saturated dual ink at one spot, 60% ink at another, then a 0.5 dab
     eng.drawStamps(stamps(
       rec(170, 150, 15, 1, { color: [1, 1, 1] }),
       rec(230, 150, 15, 0.6, { color: [1, 1, 1] }),
     ), 2, 'dual');
     eng.drawStamps(stamps(rec(200, 150, 80, 0.5)), 1);
     const d = await read();
-    const full = px(d, 170, 150)[0];    // v=1: tip burns to 1, times 0.5 flow
+    const full = px(d, 170, 150)[0];    // v=1: coverage passes unchanged
     const mid = px(d, 230, 150)[0];     // v=0.6: modes differ (see below)
     const empty = px(d, 255, 150)[0];   // v=0: contained -> unpainted
     eng.cancelStroke();
-    assert('dual ' + mode + ': paints at its flow under saturated mask',
+    assert('dual ' + mode + ': saturated mask passes coverage unchanged',
       near(full, 128, 3), 'full=' + full);
-    // color burn: t=1 stays 1 for any v>0 -> 128. linear burn:
-    // clamp(1 + 0.6 - 1) = 0.6 -> alpha 0.3 -> 178.
-    const wantMid = mode === 'color-burn' ? 128 : 178;
-    assert('dual ' + mode + ': burns the tip against the mask value',
+    // color burn: 1 - (1-0.5)/0.6 = 0.167 -> 213. linear burn:
+    // clamp(0.5 + 0.6 - 1) = 0.1 -> 230.
+    const wantMid = mode === 'color-burn' ? 213 : 230;
+    assert('dual ' + mode + ': burns the accumulated coverage against the mask',
       near(mid, wantMid, 3), 'mid=' + mid + ' want=' + wantMid);
     assert('dual ' + mode + ': contained to the dual marks', empty === 255,
       'empty=' + empty);
   }
 
   // ---- 13. dual brush walks its own spacing train along a stroke ----
+  // (train pitch = spacing% x the dual tip's RADIUS: 5.0 x 8 = 40px steps
+  // with 16px marks -> a dashed line)
   {
     const settings = makeBrush({
       tip: { size: 40, hardness: 1, spacing: 0.1 },
       dual: { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',
-        size: 16, spacing: 2.5, scatter: 0, bothAxes: false, count: 1 },
+        size: 16, spacing: 5.0, scatter: 0, bothAxes: false, count: 1 },
       smoothing: 0,
     });
     eng.beginStroke(NL.brush.engineStrokeParams(settings, 'paint'));
@@ -370,21 +372,20 @@ const TEST = `
     eng.cancelStroke();
   }
 
-  // ---- 13c. dual brush paints incrementally, never retroactively ----
-  // The mask train runs ahead of the pen (by primary radius + dual radius,
-  // extrapolated along the stroke direction), so every dab finds its mask
-  // already in place: painting fills in smoothly under the brush, coverage
-  // gaps are purely geometric (spacing > 100%), and already-visible paint
-  // never changes as the stroke continues (no Photoshop lag-then-snap).
+  // ---- 13c. dual brush gates at composite: retroactive, order-free ----
+  // The train stamps the mask exactly where the path crosses its spacing
+  // marks; because the gate reads the mask at merge time, dabs painted past
+  // the last mask stamp stay hidden until the next stamp lands and reveals
+  // them (Photoshop's dual texture filling in under the brush).
   {
     const settings = makeBrush({
       tip: { size: 10, hardness: 1, spacing: 0.5 },
       dual: { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',
-        size: 60, spacing: 2.0, scatter: 0, bothAxes: false, count: 1 },
+        size: 60, spacing: 4.0, scatter: 0, bothAxes: false, count: 1 },
       smoothing: 0,
     });
-    // dual mask stamps at x = 80 (down), 200, 320 -> coverage discs
-    // [50..110], [170..230], [290..350] with geometric gaps between
+    // train pitch 4.0 x 30 = 120px -> mask stamps at x = 80 (down), 200,
+    // 320: coverage discs [50..110], [170..230], [290..350] with gaps
     eng.beginStroke(NL.brush.engineStrokeParams(settings, 'paint'));
     const session = new NL.StrokeSession(eng, settings,
       { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 } });
@@ -395,20 +396,13 @@ const TEST = `
     for (let x = 200; x <= 320; x += 10) session.move([samp(x, 150)]);
     session.up();
     const b = await read();
-    let changed = -1;
-    for (let x = 0; x < 185 && changed < 0; x++) {
-      for (let y = 120; y <= 180; y++) {
-        const i = (y * 400 + x) * 4;
-        if (Math.abs(a[i] - b[i]) > 2) { changed = x; break; }
-      }
-    }
-    assert('dual incremental: painted areas never change behind the brush',
-      changed === -1, 'changed at x=' + changed);
-    assert('dual incremental: mask stamped ahead keeps coverage continuous',
-      px(b, 178, 150)[0] <= 60, 'v=' + px(b, 178, 150)[0]);
-    assert('dual incremental: geometric gaps between mask stamps stay clear',
+    assert('dual composite gate: dabs past the last mask stamp stay hidden',
+      px(a, 185, 150)[0] >= 250, 'v=' + px(a, 185, 150)[0]);
+    assert('dual composite gate: the next mask stamp reveals them',
+      px(b, 185, 150)[0] <= 60, 'v=' + px(b, 185, 150)[0]);
+    assert('dual composite gate: geometric gaps between stamps stay clear',
       px(b, 140, 150)[0] >= 250, 'v=' + px(b, 140, 150)[0]);
-    assert('dual incremental: painting continues past the mask stamp',
+    assert('dual composite gate: painting continues past the mask stamp',
       px(b, 210, 150)[0] <= 60, 'v=' + px(b, 210, 150)[0]);
     eng.cancelStroke();
 
@@ -428,9 +422,8 @@ const TEST = `
       px(d2, 210, 220)[0] <= 60, 'v=' + px(d2, 210, 220)[0]);
     eng.cancelStroke();
 
-    // Direction reversal: stamps predicted ahead along the initial (upward)
-    // direction must be re-placed when the stroke turns around — otherwise
-    // the downward leg is missing a band of mask (a rectangular hole).
+    // Direction reversal: mask stamps land on the walked path, so a stroke
+    // that doubles back must not leave an unmasked band on the return leg.
     const rev = makeBrush({
       tip: { size: 40, hardness: 1, spacing: 0.1 },
       dual: { enabled: true, shape: 'round', hardness: 1, mode: 'multiply',

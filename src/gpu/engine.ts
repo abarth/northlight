@@ -227,6 +227,7 @@ export class PaintEngine {
               },
               { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: {} },
               { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+              { binding: 7, visibility: GPUShaderStage.FRAGMENT, texture: {} },
             ],
           }),
         ],
@@ -562,7 +563,6 @@ export class PaintEngine {
     tipTextured: boolean,
     tex: EngineTextureParams | null,
     noise: boolean,
-    dual: DualBrush | null,
   ): void {
     const u = new ArrayBuffer(64);
     const f = new Float32Array(u);
@@ -579,8 +579,6 @@ export class PaintEngine {
     f[9] = tex ? tex.contrast : 0;
     f[10] = tex && tex.invert ? 1 : 0;
     f[11] = tex ? tex.depth : 1;
-    f[12] = dual ? 1 : 0;
-    i[13] = dual ? TEXTURE_BLEND_INDEX[dual.mode] : 0;
     this.uploadBuffer(target, 0, u);
   }
 
@@ -607,17 +605,14 @@ export class PaintEngine {
       params.tipShape !== 'round',
       params.texture,
       params.noise,
-      params.dual,
     );
     if (params.dual) {
-      // the dual mask itself is never gated
       this.fillStampUniforms(
         this.dualStampUniforms,
         params.dual.hardness,
         params.dual.shape !== 'round',
         null,
         false,
-        null,
       );
     }
   }
@@ -665,9 +660,6 @@ export class PaintEngine {
         },
         { binding: 4, resource: this.strokePatternTex?.createView() ?? white },
         { binding: 5, resource: this.sampRepeat },
-        // primary dabs sample the dual coverage mask; the dual pass itself
-        // renders INTO that mask, so it binds white instead
-        { binding: 6, resource: dual ? white : this.dualStrokeTex.createView() },
       ],
     });
 
@@ -716,6 +708,8 @@ export class PaintEngine {
     f[9] = tex ? tex.contrast : 0;
     f[10] = tex && tex.invert ? 1 : 0;
     f[11] = tex ? tex.depth : 1;
+    i[12] = stroke.dual ? TEXTURE_BLEND_INDEX[stroke.dual.mode] : 0;
+    f[13] = stroke.dual ? 1 : 0;
     f[16] = this.docWidth;
     f[17] = this.docHeight;
     this.uploadBuffer(this.commitUniforms, 0, u);
@@ -729,6 +723,7 @@ export class PaintEngine {
         { binding: 3, resource: { buffer: this.commitUniforms } },
         { binding: 4, resource: (this.strokePatternTex ?? this.whiteTex).createView() },
         { binding: 5, resource: this.sampRepeat },
+        { binding: 6, resource: this.dualStrokeTex.createView() },
       ],
     });
 
@@ -1032,6 +1027,7 @@ export class PaintEngine {
         { binding: 4, resource: { buffer: this.layerUniforms, size: LAYER_U_SIZE } },
         { binding: 5, resource: white },
         { binding: 6, resource: this.sampRepeat },
+        { binding: 7, resource: this.dualStrokeTex.createView() },
       ],
     });
     const enc = this.device.createCommandEncoder();
@@ -1261,6 +1257,8 @@ export class PaintEngine {
         f[10] = tex && tex.invert ? 1 : 0;
         f[11] = tex ? tex.depth : 1;
         u[12] = tex ? TEXTURE_BLEND_INDEX[tex.mode] : 0;
+        f[13] = stroke.dual ? 1 : 0;
+        u[14] = stroke.dual ? TEXTURE_BLEND_INDEX[stroke.dual.mode] : 0;
       }
       f[16] = this.docWidth;
       f[17] = this.docHeight;
@@ -1295,6 +1293,7 @@ export class PaintEngine {
           { binding: 4, resource: { buffer: this.layerUniforms, size: LAYER_U_SIZE } },
           { binding: 5, resource: patternView },
           { binding: 6, resource: this.sampRepeat },
+          { binding: 7, resource: this.dualStrokeTex.createView() },
         ],
       });
       const pass = enc.beginRenderPass({

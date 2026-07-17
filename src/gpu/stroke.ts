@@ -48,15 +48,9 @@ export class StrokeSession {
   /** path distance at which the next dual mask stamp is due */
   private dualNext = 0;
   /**
-   * Ahead-of-pen mask stamps placed at PREDICTED positions (path
-   * extrapolation). If the stroke turns away from the prediction, the stamp
-   * is re-placed so the walked path never loses mask coverage.
-   */
-  private pendingDual: { t: number; x: number; y: number }[] = [];
-  /**
-   * Pending stamp batches in emission order. Order matters for the dual
-   * brush: a primary dab is gated by the dual mask as it exists when the
-   * dab is drawn, so each segment's mask stamps render before its dabs.
+   * Pending stamp batches in emission order. The dual mask gates the stroke
+   * at composite time, so ordering between mask and dab batches is not
+   * load-bearing; batching just keeps draw calls large.
    */
   private queue: { target: 'primary' | 'dual'; records: number[] }[] = [];
   private airbrushTimer: ReturnType<typeof setInterval> | null = null;
@@ -119,7 +113,10 @@ export class StrokeSession {
 
   private dualSpacingPx(): number {
     const dual = this.settings.dual;
-    return Math.max(dual.spacing * dual.size, 0.5);
+    // Photoshop paces the dual train at spacing% x the dual tip's RADIUS
+    // (verified against isolated dual marks at 200% spacing: marks abut
+    // rather than leaving a mark-sized gap)
+    return Math.max((dual.spacing * dual.size) / 2, 0.5);
   }
 
   down(sample: PointerSample): void {
@@ -128,9 +125,6 @@ export class StrokeSession {
     this.residual = 0;
     this.stepIndex = 0;
     this.pathDist = 0;
-    this.pendingDual = [];
-    // dual mask first so the very first dab is gated by it; the train's
-    // next stamp fires ahead of the pen once a direction exists
     this.emitDual(sample.x, sample.y, sample);
     this.dualNext = this.dualSpacingPx();
     this.emit(sample.x, sample.y, sample);
@@ -208,58 +202,17 @@ export class StrokeSession {
       twist: a.twist + (b.twist - a.twist) * t,
     });
 
-    // The dual mask train runs AHEAD of the pen: a dab at position p paints
-    // fragments up to p + primaryRadius, and every fragment is gated by the
-    // mask as it exists when the dab is drawn — so the stamp covering those
-    // fragments must already be down. Firing each stamp once the pen is
-    // within (primaryRadius + dualRadius) of its train position (stamps
-    // beyond the walked path are extrapolated along the current direction)
-    // keeps painting continuous when the mask stamps abut (spacing <= 100%)
-    // and incremental — later stamps still never reveal old dabs. This is
-    // how Photoshop's dual texture fills in smoothly under the brush.
+    // The dual mask train walks the path at its own spacing. The mask gates
+    // the stroke when it merges into the layer, so a stamp that lands after
+    // some dabs still reveals them — no need to run ahead of the pen.
     if (this.settings.dual.enabled) {
-      const dual = this.settings.dual;
-      const lookahead = (this.settings.tip.size + dual.size) / 2;
       const end = this.pathDist + dist;
       const step = this.dualSpacingPx();
-      // On-path position for train distance t, or the straight-line
-      // prediction beyond the walked path.
-      const posAt = (t: number): { x: number; y: number } => {
-        if (t <= end) {
-          const f = Math.max(t - this.pathDist, 0) / dist;
-          return { x: a.x + dx * f, y: a.y + dy * f };
-        }
-        const ahead = t - end;
-        return {
-          x: b.x + Math.cos(this.direction) * ahead,
-          y: b.y + Math.sin(this.direction) * ahead,
-        };
-      };
-      // Predictions are provisional: whenever the actual path (or a fresher
-      // prediction) diverges from where a pending stamp was placed, stamp
-      // again — the mask only ever gains coverage, so a wrong guess after a
-      // direction reversal can't leave the real path without its mask.
-      const tol = dual.size * 0.25;
-      for (const rec of this.pendingDual) {
-        const p = posAt(rec.t);
-        if (Math.hypot(p.x - rec.x, p.y - rec.y) > tol) {
-          const at = rec.t <= end ? lerpSample(Math.max(rec.t - this.pathDist, 0) / dist) : b;
-          this.emitDual(p.x, p.y, at);
-          rec.x = p.x;
-          rec.y = p.y;
-        }
-      }
-      this.pendingDual = this.pendingDual.filter((rec) => rec.t > end);
-      for (let guard = 0; guard < 10000 && this.dualNext <= end + lookahead; guard++) {
-        const t = this.dualNext;
+      for (let guard = 0; guard < 10000 && this.dualNext <= end; guard++) {
+        const f = (this.dualNext - this.pathDist) / dist;
+        const at = lerpSample(f);
+        this.emitDual(at.x, at.y, at);
         this.dualNext += step;
-        const p = posAt(t);
-        if (t <= end) {
-          this.emitDual(p.x, p.y, lerpSample((t - this.pathDist) / dist));
-        } else {
-          this.emitDual(p.x, p.y, b);
-          this.pendingDual.push({ t, ...p });
-        }
       }
     }
 
@@ -283,8 +236,6 @@ export class StrokeSession {
   }
 
   private flush(): void {
-    // Batches draw in path order (see `queue`), which is what makes per-dab
-    // dual gating behave like Photoshop.
     for (const batch of this.queue) {
       if (batch.records.length === 0) continue;
       const arr = new Float32Array(batch.records);
