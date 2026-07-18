@@ -278,7 +278,9 @@ struct MergeU {
  * st: premultiplied stroke texel. patRaw: raw pattern sample (whole-stroke
  * texture, i.e. Texture with "texture each tip" off). dualV: the dual-brush
  * coverage mask sample — the Dual Brush gate applies here, once, to the
- * accumulated stroke (see applyDualToAlpha).
+ * accumulated stroke (see applyDualToAlpha). lockAlpha is Photoshop's Lock
+ * Transparent Pixels: paint is confined to existing coverage and the alpha
+ * channel never changes.
  */
 fn strokeMergeApply(
   l: vec4f,
@@ -286,6 +288,7 @@ fn strokeMergeApply(
   patRaw: f32,
   dualV: f32,
   mode: u32,        // 1 = paint, 2 = erase
+  lockAlpha: f32,
   m: MergeU,
 ) -> vec4f {
   var cov = st.a;
@@ -300,10 +303,17 @@ fn strokeMergeApply(
   }
   let sa = cov * m.opacity;
   if (mode == 2u) {
+    if (lockAlpha > 0.5) { return l; }
     return l * (1.0 - sa);
   }
   var cs = vec3f(0.0);
   if (st.a > 0.0) { cs = st.rgb / st.a; }
+  if (lockAlpha > 0.5) {
+    if (l.a <= 0.0) { return l; }
+    let cb = l.rgb / l.a;
+    let cnew = mix(cb, blendPixel(m.blend, cb, cs), sa);
+    return vec4f(cnew * l.a, l.a);
+  }
   return compositePixel(l, cs, sa, m.blend);
 }
 `;
@@ -323,7 +333,7 @@ struct LayerU {
   blendMode: u32,      // layer blend mode
   layerOpacity: f32,
   strokeMode: u32,     // 0 = none, 1 = paint, 2 = erase
-  _p0: f32,
+  lockAlpha: f32,      // Lock Transparent Pixels on the stroked layer
   docSize: vec2f,
   _p1: vec2f,
   merge: MergeU,       // valid when strokeMode != 0
@@ -348,7 +358,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
     let patUv = in.uv * U.docSize / max(U.merge.texScalePx, 1.0);
     let patRaw = textureSampleLevel(patternTex, repeatSamp, patUv, 0.0).r;
     let dualV = textureSampleLevel(dualTex, samp, in.uv, 0.0).r;
-    l = strokeMergeApply(l, st, patRaw, dualV, U.strokeMode, U.merge);
+    l = strokeMergeApply(l, st, patRaw, dualV, U.strokeMode, U.lockAlpha, U.merge);
   }
 
   let as_ = l.a * U.layerOpacity;
@@ -493,7 +503,7 @@ ${MERGE_LIB}
 
 struct CommitU {
   mode: u32,           // 1 = paint, 2 = erase
-  _p0: f32,
+  lockAlpha: f32,      // Lock Transparent Pixels
   docSize: vec2f,
   merge: MergeU,
 }
@@ -513,7 +523,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let patUv = in.uv * U.docSize / max(U.merge.texScalePx, 1.0);
   let patRaw = textureSampleLevel(patternTex, repeatSamp, patUv, 0.0).r;
   let dualV = textureSampleLevel(dualTex, samp, in.uv, 0.0).r;
-  return strokeMergeApply(l, st, patRaw, dualV, U.mode, U.merge);
+  return strokeMergeApply(l, st, patRaw, dualV, U.mode, U.lockAlpha, U.merge);
 }
 `;
 
@@ -529,7 +539,7 @@ ${FULLSCREEN_VS}
 struct FillU {
   color: vec4f,   // premultiplied fill color
   mode: u32,      // 1 = fill, 2 = erase
-  _p0: f32,
+  lockAlpha: f32, // Lock Transparent Pixels: alpha never changes
   _p1: f32,
   _p2: f32,
 }
@@ -543,6 +553,12 @@ struct FillU {
 fn fs(in: VSOut) -> @location(0) vec4f {
   let l = textureSampleLevel(layerTex, samp, in.uv, 0.0);
   let cov = textureSampleLevel(selTex, samp, in.uv, 0.0).r;
+  if (U.lockAlpha > 0.5) {
+    // fill only the existing coverage; clears cannot touch locked alpha
+    if (U.mode == 2u || l.a <= 0.0) { return l; }
+    let cnew = mix(l.rgb / l.a, U.color.rgb, cov);
+    return vec4f(cnew * l.a, l.a);
+  }
   if (U.mode == 2u) {
     return l * (1.0 - cov);
   }

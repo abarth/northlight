@@ -2,11 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 import {
   MAX_ZOOM,
   MIN_ZOOM,
+  activeLocks,
   applySelectionShape,
   applyTransformPreview,
   applyZoom,
+  arrangeActiveLayer,
   autoSelectMoveTarget,
   buildRenderState,
+  canEditActivePixels,
   cancelTransform,
   commitTransform,
   copySelection,
@@ -15,20 +18,27 @@ import {
   fillActiveLayer,
   fitOnScreen,
   getEngine,
+  groupActiveLayer,
   invertSelection,
+  layerViaCopy,
   mergeDown,
+  mergeVisible,
   nextZoomStop,
   nudgeMoveSession,
   paste,
   redo,
   reselect,
   sampleCanvasColor,
+  selectNeighborLayer,
   setEngine,
   setSelection,
   selectAll,
   startMoveSession,
   startTransform,
+  toggleActiveLayerLock,
+  toggleActiveLayerVisibility,
   transformQuadBy,
+  ungroupActiveLayer,
   zoomIn,
   zoomOut,
   addLayer,
@@ -410,9 +420,38 @@ export function CanvasView() {
         void startTransform('layer', 'free');
         return;
       }
+      // Layer shortcuts: Ctrl+E merge down (or group), Shift+Ctrl+E merge
+      // visible, Ctrl+G / Shift+Ctrl+G group / ungroup, Ctrl+J / Shift+Ctrl+J
+      // layer via copy / cut, Ctrl+, hide layer — all like Photoshop.
       if (mod && e.key.toLowerCase() === 'e') {
         e.preventDefault();
-        mergeDown();
+        if (e.shiftKey) void mergeVisible();
+        else mergeDown();
+        return;
+      }
+      if (mod && e.key.toLowerCase() === 'g') {
+        e.preventDefault();
+        if (e.shiftKey) ungroupActiveLayer();
+        else groupActiveLayer();
+        return;
+      }
+      if (mod && e.key.toLowerCase() === 'j') {
+        e.preventDefault();
+        void layerViaCopy(e.shiftKey);
+        return;
+      }
+      if (mod && e.key === ',') {
+        e.preventDefault();
+        toggleActiveLayerVisibility();
+        return;
+      }
+      // Ctrl+[ / Ctrl+] rearrange the layer stack (Shift jumps to the ends)
+      if (mod && (e.code === 'BracketRight' || e.code === 'BracketLeft')) {
+        e.preventDefault();
+        const up = e.code === 'BracketRight';
+        arrangeActiveLayer(
+          e.shiftKey ? (up ? 'front' : 'back') : up ? 'forward' : 'backward',
+        );
         return;
       }
       if (mod && e.key.toLowerCase() === 'd') {
@@ -462,6 +501,13 @@ export function CanvasView() {
       }
       if (mod) return;
 
+      // Alt+[ / Alt+] step the active layer down/up the stack, like Photoshop
+      if (e.altKey && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
+        e.preventDefault();
+        selectNeighborLayer(e.code === 'BracketRight' ? 'up' : 'down');
+        return;
+      }
+
       // Photoshop numeric shortcuts: digits set opacity, Shift+digits set
       // flow — swapped while the airbrush toggle is on. Two digits typed
       // quickly combine (4 then 5 -> 45%); 0 means 100%. Match on e.code so
@@ -510,6 +556,7 @@ export function CanvasView() {
         case 'p': s.setTool('polyLasso'); break;
         case 'x': s.swapColors(); break;
         case 'd': s.resetColors(); break;
+        case '/': toggleActiveLayerLock('transparency'); break;
         case '[': {
           const t = s.tool === 'eraser' ? 'eraser' : 'brush';
           const tip = s[t].tip;
@@ -1060,15 +1107,21 @@ export function CanvasView() {
     switch (t) {
       case 'brush':
       case 'eraser': {
+        // locked / hidden layers and groups reject the stroke, like Photoshop
+        if (!canEditActivePixels()) break;
         const settings = t === 'eraser' ? s.eraser : s.brush;
-        // On the Background layer the eraser paints the background color
+        const locks = activeLocks();
+        // On the Background layer — and on transparency-locked layers, where
+        // alpha cannot change — the eraser paints the background color
         // instead of clearing to transparency, like Photoshop.
-        const eraseToBg = t === 'eraser' && s.activeLayerId === 'background';
+        const eraseToBg =
+          t === 'eraser' && (s.activeLayerId === 'background' || locks.transparency);
         const params = engineStrokeParams(
           settings,
           t === 'eraser' && !eraseToBg ? 'erase' : 'paint',
         );
         if (eraseToBg) params.blendMode = 'normal';
+        params.lockTransparent = locks.transparency;
         engine.beginStroke(params);
         const session = new StrokeSession(
           engine,

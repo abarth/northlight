@@ -1,32 +1,46 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  addGroup,
   addLayer,
   applyZoom,
+  arrangeActiveLayer,
+  canDeleteActiveLayer,
+  canMergeDown,
   copySelection,
   cropToSelection,
   cutSelection,
+  deleteHiddenLayers,
   deleteLayer,
   deleteSelectionContents,
+  duplicateActiveLayer,
   exportPng,
   fillActiveLayer,
   fitOnScreen,
   flattenImage,
+  groupActiveLayer,
   invertSelection,
+  layerViaCopy,
   mergeDown,
+  mergeVisible,
   openImageFile,
   paste,
   placeImageFile,
   redo,
+  renameActiveLayer,
   reselect,
   rotateCanvas,
   selectAll,
   setSelection,
   startTransform,
+  toggleActiveLayerLock,
+  toggleActiveLayerVisibility,
   transformImmediate,
   undo,
+  ungroupActiveLayer,
   zoomIn,
   zoomOut,
 } from '../controller';
+import { resolveRenderLayers } from '../layers';
 import { useStore } from '../store';
 
 interface Item {
@@ -66,7 +80,11 @@ export function MenuBar() {
     return () => window.removeEventListener('pointerdown', close, true);
   }, [open]);
 
-  const activeIdx = layers.findIndex((l) => l.id === activeLayerId);
+  const active = layers.find((l) => l.id === activeLayerId);
+  const isGroup = active?.kind === 'group';
+  const locks = active?.locks;
+  const anyHidden = layers.some((l) => !l.visible);
+  const visiblePixelCount = resolveRenderLayers(layers).filter((l) => l.visible).length;
 
   const transformItems: Entry[] = [
     { label: 'Scale', action: () => void startTransform('layer', 'scale') },
@@ -191,18 +209,122 @@ export function MenuBar() {
     {
       label: 'Layer',
       items: [
-        { label: 'New Layer', shortcut: 'Shift+Ctrl+N', action: addLayer },
         {
-          label: 'Delete Layer',
-          disabled: layers.length <= 1,
-          action: () => deleteLayer(activeLayerId),
+          label: 'New',
+          children: [
+            { label: 'Layer', shortcut: 'Shift+Ctrl+N', action: addLayer },
+            { label: 'Group', action: addGroup },
+            'sep',
+            {
+              label: 'Layer Via Copy',
+              shortcut: 'Ctrl+J',
+              disabled: isGroup,
+              action: () => void layerViaCopy(false),
+            },
+            {
+              label: 'Layer Via Cut',
+              shortcut: 'Shift+Ctrl+J',
+              disabled: isGroup || !hasSelection,
+              action: () => void layerViaCopy(true),
+            },
+          ],
+        },
+        {
+          label: isGroup ? 'Duplicate Group' : 'Duplicate Layer',
+          action: duplicateActiveLayer,
+        },
+        {
+          label: 'Delete',
+          children: [
+            {
+              label: isGroup ? 'Group' : 'Layer',
+              disabled: !canDeleteActiveLayer(),
+              action: () => deleteLayer(activeLayerId),
+            },
+            {
+              label: 'Hidden Layers',
+              disabled: !anyHidden,
+              action: deleteHiddenLayers,
+            },
+          ],
+        },
+        'sep',
+        { label: 'Rename Layer…', action: renameActiveLayer },
+        'sep',
+        { label: 'Group Layers', shortcut: 'Ctrl+G', action: groupActiveLayer },
+        {
+          label: 'Ungroup Layers',
+          shortcut: 'Shift+Ctrl+G',
+          disabled: !isGroup,
+          action: ungroupActiveLayer,
+        },
+        {
+          label: active?.visible === false ? 'Show Layers' : 'Hide Layers',
+          shortcut: 'Ctrl+,',
+          action: toggleActiveLayerVisibility,
         },
         'sep',
         {
-          label: 'Merge Down',
+          label: 'Arrange',
+          children: [
+            {
+              label: 'Bring to Front',
+              shortcut: 'Shift+Ctrl+]',
+              action: () => arrangeActiveLayer('front'),
+            },
+            {
+              label: 'Bring Forward',
+              shortcut: 'Ctrl+]',
+              action: () => arrangeActiveLayer('forward'),
+            },
+            {
+              label: 'Send Backward',
+              shortcut: 'Ctrl+[',
+              action: () => arrangeActiveLayer('backward'),
+            },
+            {
+              label: 'Send to Back',
+              shortcut: 'Shift+Ctrl+[',
+              action: () => arrangeActiveLayer('back'),
+            },
+          ],
+        },
+        'sep',
+        {
+          label: 'Lock Transparent Pixels',
+          shortcut: '/',
+          checked: locks?.transparency,
+          disabled: isGroup,
+          action: () => toggleActiveLayerLock('transparency'),
+        },
+        {
+          label: 'Lock Image Pixels',
+          checked: locks?.pixels,
+          disabled: isGroup,
+          action: () => toggleActiveLayerLock('pixels'),
+        },
+        {
+          label: 'Lock Position',
+          checked: locks?.position,
+          action: () => toggleActiveLayerLock('position'),
+        },
+        {
+          label: 'Lock All',
+          checked: locks?.all,
+          action: () => toggleActiveLayerLock('all'),
+        },
+        'sep',
+        {
+          label: isGroup ? 'Merge Group' : 'Merge Down',
           shortcut: 'Ctrl+E',
-          disabled: activeIdx <= 0,
+          disabled: !canMergeDown(),
           action: mergeDown,
+        },
+        {
+          label: 'Merge Visible',
+          shortcut: 'Shift+Ctrl+E',
+          disabled: visiblePixelCount <= 1,
+          action: () => void mergeVisible(),
         },
         {
           label: 'Flatten Image',

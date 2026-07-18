@@ -24,6 +24,19 @@ Document size defaults to 1600x1000; override with `?w=2048&h=1536` in the URL.
 ### Layers & compositing
 - Unlimited layers (add, duplicate, delete, reorder, rename, hide, per-layer
   opacity), each stored as a GPU texture with premultiplied alpha.
+- **Layer groups** with a Photoshop-style panel: nested folders with
+  collapse/expand, drag layers into/out of groups, group visibility and
+  opacity apply to everything inside (pass-through blending).
+- **Locks**, like Photoshop's Lock row: transparent pixels (`/`), image
+  pixels, position, and lock-all — enforced in the paint/fill/transform
+  pipeline (Lock Transparent Pixels confines strokes and fills to existing
+  coverage on the GPU) and inherited from enclosing groups.
+- The full **Layer menu**: New (Layer / Group / Layer Via Copy `Ctrl+J` /
+  Layer Via Cut `Shift+Ctrl+J`), Duplicate, Delete (Layer / Hidden Layers),
+  Rename, Group `Ctrl+G` / Ungroup `Shift+Ctrl+G`, Hide `Ctrl+,`, Arrange
+  (`Ctrl+[` / `Ctrl+]`, `Shift` jumps to front/back), per-lock toggles,
+  **Merge Down** `Ctrl+E` (merges a selected group), **Merge Visible**
+  `Shift+Ctrl+E`, and **Flatten Image**.
 - 23 Photoshop blend modes (Multiply, Screen, Overlay, Soft/Hard/Vivid/Linear
   /Pin Light, Color Dodge/Burn, Linear Dodge/Burn, Difference, Exclusion,
   Subtract, Divide, Hue, Saturation, Color, Luminosity, ...) implemented from
@@ -178,8 +191,10 @@ airbrush toggle, **Smoothing**, and the pressure-controls-size button.
   **Crop** to selection.
 - **File > Open / Place** import images (PNG, JPEG, …) as a new document or
   as a new layer scaled to fit.
-- Layers: drag-and-drop reordering, **Merge Down** (`Ctrl+E`), **Flatten
-  Image**.
+- Layers panel: drag-and-drop reordering (drop onto a group header to move
+  a layer inside), collapse/expand groups, double-click to rename, blend
+  mode + opacity controls, the Lock row, and new-layer / new-group /
+  delete buttons.
 
 ### Color
 - Model-specific pickers (tabs at the top of the panel): **HSB** with the
@@ -238,7 +253,14 @@ airbrush toggle, **Smoothing**, and the pressure-controls-size button.
 | Ctrl+Shift+D / Ctrl+Shift+I | Reselect / Inverse |
 | Alt+Backspace / Ctrl+Backspace / Delete | Fill foreground / fill background / clear |
 | Arrows (Move tool or transform) | Nudge 1 px (Shift = 10 px) |
-| Ctrl+Shift+N / Ctrl+E | New layer / Merge down |
+| Ctrl+Shift+N | New layer |
+| Ctrl+J / Ctrl+Shift+J | Layer via copy / via cut |
+| Ctrl+G / Ctrl+Shift+G | Group / ungroup layers |
+| Ctrl+E / Ctrl+Shift+E | Merge down (or group) / merge visible |
+| Ctrl+[ / Ctrl+] | Send layer backward / bring forward (Shift = to back/front) |
+| Alt+[ / Alt+] | Select the layer below / above |
+| Ctrl+, | Hide/show the active layer |
+| / | Lock transparent pixels |
 | Alt+Ctrl+I / Alt+Ctrl+C | Image Size / Canvas Size |
 | Ctrl+= / Ctrl+- | Zoom in / out through the zoom stops |
 | Ctrl+0 / Ctrl+1 (or Alt+Ctrl+0) | Fit view / 100% |
@@ -330,5 +352,6 @@ this matters.
 ## Known limitations
 
 - Undo history covers paint/erase strokes (24 steps), not layer operations.
-- One selection at a time (no add/subtract combining yet).
-- No document resizing/cropping UI; set size via URL params.
+- Groups always blend as **Pass Through** (Photoshop's default); a group
+  cannot yet take its own blend mode, and the Move tool moves layers, not
+  whole groups.

@@ -65,6 +65,18 @@ export const BLEND_MODE_INDEX: Record<BlendMode, number> = Object.fromEntries(
   BLEND_MODES.map((m, i) => [m.id, i]),
 ) as Record<BlendMode, number>;
 
+/** Per-layer lock switches, mirroring Photoshop's Lock row. */
+export interface LayerLocks {
+  /** Lock Transparent Pixels: painting cannot change the alpha channel. */
+  transparency: boolean;
+  /** Lock Image Pixels: no painting, erasing, or fills. */
+  pixels: boolean;
+  /** Lock Position: no move or transform. */
+  position: boolean;
+  /** Lock All. */
+  all: boolean;
+}
+
 export interface LayerMeta {
   id: string;
   name: string;
@@ -72,6 +84,38 @@ export interface LayerMeta {
   /** 0..1 */
   opacity: number;
   blendMode: BlendMode;
+  /** groups are containers with no pixels of their own */
+  kind: 'layer' | 'group';
+  /** enclosing group id, or null at the root level */
+  parentId: string | null;
+  /** groups only: children hidden in the Layers panel */
+  collapsed: boolean;
+  locks: LayerLocks;
+}
+
+export const NO_LOCKS: LayerLocks = {
+  transparency: false,
+  pixels: false,
+  position: false,
+  all: false,
+};
+
+/** LayerMeta factory with Photoshop-style defaults. */
+export function makeLayerMeta(
+  init: Partial<LayerMeta> & { id: string; name: string },
+): LayerMeta {
+  return {
+    visible: true,
+    opacity: 1,
+    blendMode: 'normal',
+    kind: 'layer',
+    parentId: null,
+    collapsed: false,
+    locks: { ...NO_LOCKS },
+    ...init,
+    // never share a locks object between layers
+    ...(init.locks ? { locks: { ...init.locks } } : {}),
+  };
 }
 
 export interface Viewport {

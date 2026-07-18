@@ -28,7 +28,21 @@ import {
   type Mat3,
 } from './transform/matrix';
 import { DOC_SIZE, nextLayerId, useStore, type TransformMode } from './store';
-import type { LayerMeta, Point } from './types';
+import type { LayerLocks, LayerMeta, Point } from './types';
+import { makeLayerMeta } from './types';
+import {
+  childrenOf,
+  descendantIds,
+  displayRows,
+  effectiveLocks,
+  effectiveVisible,
+  layerById,
+  moveSubtree,
+  nextName,
+  pixelLayers,
+  resolveRenderLayers,
+  subtreeRange,
+} from './layers';
 
 /**
  * Bridges UI actions that need both the zustand store (metadata) and the
@@ -66,6 +80,28 @@ declare global {
         cutSelection: typeof cutSelection;
         paste: typeof paste;
       };
+      layersUtil: {
+        resolveRenderLayers: typeof resolveRenderLayers;
+        effectiveLocks: typeof effectiveLocks;
+        displayRows: typeof displayRows;
+        moveSubtree: typeof moveSubtree;
+      };
+      layerOps: {
+        addLayer: typeof addLayer;
+        addGroup: typeof addGroup;
+        groupActiveLayer: typeof groupActiveLayer;
+        ungroupActiveLayer: typeof ungroupActiveLayer;
+        duplicateActiveLayer: typeof duplicateActiveLayer;
+        layerViaCopy: typeof layerViaCopy;
+        deleteLayer: typeof deleteLayer;
+        deleteHiddenLayers: typeof deleteHiddenLayers;
+        arrangeActiveLayer: typeof arrangeActiveLayer;
+        toggleActiveLayerLock: typeof toggleActiveLayerLock;
+        mergeDown: typeof mergeDown;
+        mergeGroup: typeof mergeGroup;
+        mergeVisible: typeof mergeVisible;
+        flattenImage: typeof flattenImage;
+      };
       view: {
         zoomIn: typeof zoomIn;
         zoomOut: typeof zoomOut;
@@ -96,6 +132,23 @@ window.__northlight = {
   },
   setEngine,
   edit: { selectAll, setSelection, copySelection, cutSelection, paste },
+  layersUtil: { resolveRenderLayers, effectiveLocks, displayRows, moveSubtree },
+  layerOps: {
+    addLayer,
+    addGroup,
+    groupActiveLayer,
+    ungroupActiveLayer,
+    duplicateActiveLayer,
+    layerViaCopy,
+    deleteLayer,
+    deleteHiddenLayers,
+    arrangeActiveLayer,
+    toggleActiveLayerLock,
+    mergeDown,
+    mergeGroup,
+    mergeVisible,
+    flattenImage,
+  },
   view: { zoomIn, zoomOut, zoomTo, fitOnScreen, nextZoomStop },
 };
 
@@ -112,38 +165,297 @@ export function getEngine(): PaintEngine | null {
   return engine;
 }
 
+/**
+ * Groups compose as pass-through containers: the compositor sees only pixel
+ * layers, with group visibility/opacity folded into each child.
+ */
 export function buildRenderState(): RenderState {
   const s = useStore.getState();
-  return { layers: s.layers, activeLayerId: s.activeLayerId, view: s.view };
+  return {
+    layers: resolveRenderLayers(s.layers),
+    activeLayerId: s.activeLayerId,
+    view: s.view,
+  };
 }
 
 export const MAX_LAYERS = 64; // matches the compositor's uniform buffer
 
+// ---------------------------------------------------------------------------
+// Layer / group management (Layer menu, layers panel)
+// ---------------------------------------------------------------------------
+
+function activeLayer(): LayerMeta | undefined {
+  const s = useStore.getState();
+  return layerById(s.layers, s.activeLayerId);
+}
+
+/** Locks on the active layer, including locks inherited from its groups. */
+export function activeLocks(): LayerLocks {
+  const s = useStore.getState();
+  return effectiveLocks(s.layers, s.activeLayerId);
+}
+
+/** Whether painting / erasing / filling may touch the active layer. */
+export function canEditActivePixels(): boolean {
+  const s = useStore.getState();
+  const a = activeLayer();
+  if (!a || a.kind !== 'layer' || !effectiveVisible(s.layers, a.id)) return false;
+  const locks = activeLocks();
+  return !locks.pixels && !locks.all;
+}
+
+/** Whether the active layer may be moved or transformed. */
+export function canMoveActiveLayer(): boolean {
+  const s = useStore.getState();
+  const a = activeLayer();
+  if (!a || a.kind !== 'layer' || !effectiveVisible(s.layers, a.id)) return false;
+  const locks = activeLocks();
+  return !locks.position && !locks.all;
+}
+
 export function addLayer(): void {
   if (!engine) return;
   const s = useStore.getState();
-  if (s.layers.length >= MAX_LAYERS) return;
+  if (pixelLayers(s.layers).length >= MAX_LAYERS) return;
   const id = nextLayerId();
   engine.ensureLayer(id);
   s.addLayerMeta(
-    {
-      id,
-      name: `Layer ${s.layers.length + 1}`,
-      visible: true,
-      opacity: 1,
-      blendMode: 'normal',
-    },
+    makeLayerMeta({ id, name: nextName(s.layers, 'Layer') }),
     s.activeLayerId,
   );
 }
 
+/** Layer > New > Group: an empty group above (or inside) the active layer. */
+export function addGroup(): void {
+  const s = useStore.getState();
+  s.addLayerMeta(
+    makeLayerMeta({ id: nextLayerId(), name: nextName(s.layers, 'Group'), kind: 'group' }),
+    s.activeLayerId,
+  );
+}
+
+/** Layer > Group Layers (Ctrl+G): wraps the active layer/group in a group. */
+export function groupActiveLayer(): void {
+  commitTransform();
+  const s = useStore.getState();
+  const active = layerById(s.layers, s.activeLayerId);
+  if (!active) return;
+  const range = subtreeRange(s.layers, active.id)!;
+  const id = nextLayerId();
+  const group = makeLayerMeta({
+    id,
+    name: nextName(s.layers, 'Group'),
+    kind: 'group',
+    parentId: active.parentId,
+  });
+  const layers = s.layers.map((l, i) =>
+    i === range[1] ? { ...l, parentId: id } : l,
+  );
+  layers.splice(range[1] + 1, 0, group);
+  s.setLayers(layers, id);
+}
+
+/** Layer > Ungroup Layers (Shift+Ctrl+G): dissolves the active group. */
+export function ungroupActiveLayer(): void {
+  const s = useStore.getState();
+  const g = layerById(s.layers, s.activeLayerId);
+  if (!g || g.kind !== 'group') return;
+  const kids = childrenOf(s.layers, g.id);
+  const layers = s.layers
+    .filter((l) => l.id !== g.id)
+    .map((l) => (l.parentId === g.id ? { ...l, parentId: g.parentId } : l));
+  const active = kids.length > 0 ? kids[kids.length - 1].id : layers[0]?.id;
+  if (!active) return;
+  s.setLayers(layers, active);
+}
+
+/** Deleting must always leave at least one pixel layer behind. */
+export function canDeleteActiveLayer(): boolean {
+  const s = useStore.getState();
+  const a = layerById(s.layers, s.activeLayerId);
+  if (!a) return false;
+  const inTree = a.kind === 'group' ? descendantIds(s.layers, a.id) : new Set<string>();
+  return s.layers.some(
+    (l) => l.kind === 'layer' && l.id !== a.id && !inTree.has(l.id),
+  );
+}
+
+/** Deletes a layer, or a group with everything in it. */
 export function deleteLayer(id: string): void {
   const s = useStore.getState();
-  if (s.transform?.layerId === id) cancelTransform();
+  const range = subtreeRange(s.layers, id);
+  if (!range) return;
+  const block = s.layers.slice(range[0], range[1] + 1);
+  const blockIds = new Set(block.map((l) => l.id));
+  if (s.transform && blockIds.has(s.transform.layerId)) cancelTransform();
   else commitTransform();
-  if (s.layers.length <= 1) return;
-  s.removeLayerMeta(id);
-  engine?.deleteLayer(id);
+  const remaining = s.layers.filter((l) => !blockIds.has(l.id));
+  if (!remaining.some((l) => l.kind === 'layer')) return; // keep >= 1 layer
+  for (const l of block) {
+    if (l.kind === 'layer') engine?.deleteLayer(l.id);
+  }
+  const active = blockIds.has(s.activeLayerId)
+    ? remaining[Math.min(Math.max(range[0] - 1, 0), remaining.length - 1)].id
+    : s.activeLayerId;
+  useStore.getState().setLayers(remaining, active);
+}
+
+/** Layer > Delete > Hidden Layers. */
+export function deleteHiddenLayers(): void {
+  commitTransform();
+  const s = useStore.getState();
+  const doomed = s.layers.filter((l) => !effectiveVisible(s.layers, l.id));
+  if (doomed.length === 0) return;
+  const doomedIds = new Set(doomed.map((l) => l.id));
+  const remaining = s.layers.filter((l) => !doomedIds.has(l.id));
+  if (!remaining.some((l) => l.kind === 'layer')) return;
+  for (const l of doomed) {
+    if (l.kind === 'layer') engine?.deleteLayer(l.id);
+  }
+  const active = doomedIds.has(s.activeLayerId)
+    ? remaining[remaining.length - 1].id
+    : s.activeLayerId;
+  s.setLayers(remaining, active);
+}
+
+/** Layer > Duplicate Layer: copies the active layer or whole group. */
+export function duplicateActiveLayer(): void {
+  if (!engine) return;
+  commitTransform();
+  const s = useStore.getState();
+  const active = layerById(s.layers, s.activeLayerId);
+  if (!active) return;
+  const range = subtreeRange(s.layers, active.id)!;
+  const block = s.layers.slice(range[0], range[1] + 1);
+  const copiesNeeded = block.filter((l) => l.kind === 'layer').length;
+  if (pixelLayers(s.layers).length + copiesNeeded > MAX_LAYERS) return;
+  const idMap = new Map(block.map((l) => [l.id, nextLayerId()]));
+  const copies = block.map((l) =>
+    makeLayerMeta({
+      ...l,
+      id: idMap.get(l.id)!,
+      parentId:
+        l.parentId !== null && idMap.has(l.parentId)
+          ? idMap.get(l.parentId)!
+          : l.parentId,
+      name: l.id === active.id ? `${l.name} copy` : l.name,
+    }),
+  );
+  for (const l of block) {
+    if (l.kind === 'layer') engine.copyLayer(l.id, idMap.get(l.id)!);
+  }
+  const layers = [...s.layers];
+  layers.splice(range[1] + 1, 0, ...copies);
+  s.setLayers(layers, idMap.get(active.id)!);
+}
+
+/**
+ * Layer > New > Layer Via Copy / Via Cut (Ctrl+J / Shift+Ctrl+J): lifts the
+ * selected pixels of the active layer onto a new layer above it. Without a
+ * selection, Via Copy duplicates the layer.
+ */
+export async function layerViaCopy(cut: boolean): Promise<void> {
+  if (!engine) return;
+  const s = useStore.getState();
+  const active = layerById(s.layers, s.activeLayerId);
+  if (!active || active.kind !== 'layer') return;
+  if (cut && !canEditActivePixels()) return;
+  commitTransform();
+  if (!selectionMask) {
+    if (!cut) duplicateActiveLayer();
+    return;
+  }
+  if (pixelLayers(s.layers).length >= MAX_LAYERS) return;
+  const { width: dw, height: dh } = DOC_SIZE;
+  const src = await engine.readLayerPixels(active.id);
+  if (src.length < dw * dh * 4) return;
+  const out = new Uint8Array(dw * dh * 4);
+  for (let i = 0; i < dw * dh; i++) {
+    const m = selectionMask[i];
+    if (m === 0) continue;
+    out[i * 4] = (src[i * 4] * m + 127) / 255;
+    out[i * 4 + 1] = (src[i * 4 + 1] * m + 127) / 255;
+    out[i * 4 + 2] = (src[i * 4 + 2] * m + 127) / 255;
+    out[i * 4 + 3] = (src[i * 4 + 3] * m + 127) / 255;
+  }
+  const id = nextLayerId();
+  engine.putLayerImage(id, out, dw, dh);
+  const st = useStore.getState();
+  st.addLayerMeta(
+    makeLayerMeta({ id, name: nextName(st.layers, 'Layer') }),
+    active.id,
+  );
+  if (cut) {
+    // clear the selected pixels out of the source, like Edit > Clear
+    if (active.id === 'background') {
+      const rgb = color.hsvToRgb(st.bg);
+      engine.fillRegion(active.id, [rgb.r, rgb.g, rgb.b]);
+    } else {
+      engine.fillRegion(active.id, null);
+    }
+  }
+  setSelection(null);
+}
+
+export type ArrangeOp = 'front' | 'forward' | 'backward' | 'back';
+
+/** Layer > Arrange: moves the active layer/group among its siblings. */
+export function arrangeActiveLayer(op: ArrangeOp): void {
+  commitTransform();
+  const s = useStore.getState();
+  const active = layerById(s.layers, s.activeLayerId);
+  if (!active) return;
+  const siblings = childrenOf(s.layers, active.parentId); // bottom -> top
+  const pos = siblings.findIndex((l) => l.id === active.id);
+  const target =
+    op === 'forward'
+      ? Math.min(pos + 1, siblings.length - 1)
+      : op === 'backward'
+        ? Math.max(pos - 1, 0)
+        : op === 'front'
+          ? siblings.length - 1
+          : 0;
+  if (target === pos) return;
+  const layers = moveSubtree(
+    s.layers,
+    active.id,
+    siblings[target].id,
+    target > pos ? 'above' : 'below',
+  );
+  if (layers) s.setLayers(layers, active.id);
+}
+
+/** Layer > Hide Layers (Ctrl+,): toggles the active layer's visibility. */
+export function toggleActiveLayerVisibility(): void {
+  const s = useStore.getState();
+  const active = layerById(s.layers, s.activeLayerId);
+  if (active) s.patchLayer(active.id, { visible: !active.visible });
+}
+
+/** Toggles one of the active layer's own locks. */
+export function toggleActiveLayerLock(kind: keyof LayerLocks): void {
+  const s = useStore.getState();
+  const active = layerById(s.layers, s.activeLayerId);
+  if (!active) return;
+  s.patchLayer(active.id, {
+    locks: { ...active.locks, [kind]: !active.locks[kind] },
+  });
+}
+
+/** Layer > Rename Layer: opens the panel's inline rename on the active row. */
+export function renameActiveLayer(): void {
+  useStore.getState().requestRename();
+}
+
+/** Alt+[ / Alt+]: steps the active layer down/up through the panel rows. */
+export function selectNeighborLayer(dir: 'up' | 'down'): void {
+  const s = useStore.getState();
+  const rows = displayRows(s.layers);
+  const i = rows.findIndex((r) => r.meta.id === s.activeLayerId);
+  if (i < 0) return;
+  const j = dir === 'up' ? i - 1 : i + 1; // rows are top-first
+  if (j < 0 || j >= rows.length) return;
+  s.setActiveLayer(rows[j].meta.id);
 }
 
 // ---------------------------------------------------------------------------
@@ -213,9 +525,14 @@ export function selectionBounds(): { x: number; y: number; w: number; h: number 
  */
 export function fillActiveLayer(which: 'fg' | 'bg'): void {
   commitTransform();
+  if (!canEditActivePixels()) return;
   const s = useStore.getState();
   const rgb = color.hsvToRgb(which === 'fg' ? s.fg : s.bg);
-  engine?.fillRegion(s.activeLayerId, [rgb.r, rgb.g, rgb.b]);
+  engine?.fillRegion(
+    s.activeLayerId,
+    [rgb.r, rgb.g, rgb.b],
+    activeLocks().transparency,
+  );
 }
 
 /**
@@ -225,11 +542,12 @@ export function fillActiveLayer(which: 'fg' | 'bg'): void {
 export function deleteSelectionContents(): void {
   commitTransform();
   const s = useStore.getState();
-  if (!s.selectionPaths) return;
+  if (!s.selectionPaths || !canEditActivePixels()) return;
   if (s.activeLayerId === 'background') {
     const rgb = color.hsvToRgb(s.bg);
     engine?.fillRegion(s.activeLayerId, [rgb.r, rgb.g, rgb.b]);
-  } else {
+  } else if (!activeLocks().transparency) {
+    // clearing changes alpha, which Lock Transparent Pixels forbids
     engine?.fillRegion(s.activeLayerId, null);
   }
 }
@@ -246,7 +564,7 @@ export async function sampleCanvasColor(x: number, y: number): Promise<color.RGB
   if (s.eyedropperSample === 'current') {
     result = await engine.sampleColor(x, y, size, { layerId: s.activeLayerId });
   } else {
-    let layers = s.layers;
+    let layers = resolveRenderLayers(s.layers);
     if (s.eyedropperSample === 'currentBelow') {
       const idx = layers.findIndex((l) => l.id === s.activeLayerId);
       if (idx >= 0) layers = layers.slice(0, idx + 1);
@@ -363,6 +681,8 @@ export async function copySelection(merged = false): Promise<boolean> {
   if (!engine || !selectionMask) return false;
   commitTransform();
   const s = useStore.getState();
+  const active = layerById(s.layers, s.activeLayerId);
+  if (!merged && active?.kind !== 'layer') return false;
   const b = maskBounds(selectionMask, DOC_SIZE.width, DOC_SIZE.height);
   if (!b) return false;
   const src = merged
@@ -401,7 +721,7 @@ export async function cutSelection(): Promise<void> {
 export function paste(inPlace = false): void {
   if (!engine || !clipboard) return;
   const s = useStore.getState();
-  if (s.layers.length >= MAX_LAYERS) return;
+  if (pixelLayers(s.layers).length >= MAX_LAYERS) return;
   commitTransform();
   setSelection(null);
   const { width: dw, height: dh } = DOC_SIZE;
@@ -420,13 +740,7 @@ export function paste(inPlace = false): void {
   const id = nextLayerId();
   engine.putLayerImage(id, buf, dw, dh);
   s.addLayerMeta(
-    {
-      id,
-      name: `Layer ${s.layers.length + 1}`,
-      visible: true,
-      opacity: 1,
-      blendMode: 'normal',
-    },
+    makeLayerMeta({ id, name: nextName(s.layers, 'Layer') }),
     s.activeLayerId,
   );
 }
@@ -494,6 +808,7 @@ export async function startTransform(
     if (!rect) return false;
   } else {
     if (!engine || engine.transformActive) return false;
+    if (!canMoveActiveLayer()) return false;
     if (!rect) rect = await layerContentBounds(s.activeLayerId);
     if (!rect) rect = { x: 0, y: 0, w: DOC_SIZE.width, h: DOC_SIZE.height };
     if (!engine.beginTransform(s.activeLayerId)) return false;
@@ -524,6 +839,7 @@ export function startMoveSession(duplicate: boolean): boolean {
   const s = useStore.getState();
   if (s.transform) return true;
   if (!engine || engine.transformActive) return false;
+  if (!canMoveActiveLayer()) return false;
   const rect = selectionBounds() ?? { x: 0, y: 0, w: DOC_SIZE.width, h: DOC_SIZE.height };
   if (!engine.beginTransform(s.activeLayerId)) return false;
   rect.w = Math.max(rect.w, 1);
@@ -557,7 +873,7 @@ export async function autoSelectMoveTarget(x: number, y: number): Promise<void> 
   const s = useStore.getState();
   for (let i = s.layers.length - 1; i >= 0; i--) {
     const l = s.layers[i];
-    if (!l.visible) continue;
+    if (l.kind !== 'layer' || !effectiveVisible(s.layers, l.id)) continue;
     const c = await engine.sampleColor(x, y, 1, { layerId: l.id });
     if (c && c.a > 0.1) {
       if (l.id !== s.activeLayerId) s.setActiveLayer(l.id);
@@ -704,10 +1020,7 @@ export function newDocument(
     const c = color.hsvToRgb(s.bg);
     engine.fillLayer('background', [c.r, c.g, c.b, 1]);
   }
-  s.setLayers(
-    [{ id: 'background', name: 'Background', visible: true, opacity: 1, blendMode: 'normal' }],
-    'background',
-  );
+  s.setLayers([makeLayerMeta({ id: 'background', name: 'Background' })], 'background');
   setDocMeta(width, height, resolution);
 }
 
@@ -794,24 +1107,160 @@ export function cropToSelection(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Layer operations (Layer > Merge Down / Flatten Image)
+// Merges (Layer > Merge Down / Merge Group / Merge Visible / Flatten Image)
 // ---------------------------------------------------------------------------
 
-export function mergeDown(): void {
+/** The sibling directly below the active layer, when both are mergeable. */
+function mergeDownTarget(): LayerMeta | null {
   const s = useStore.getState();
-  const idx = s.layers.findIndex((l) => l.id === s.activeLayerId);
-  if (idx <= 0 || !engine) return;
-  const top = s.layers[idx];
-  const bottom = s.layers[idx - 1];
-  engine.mergeDown(top.id, bottom.id, top.opacity, top.blendMode);
-  s.removeLayerMeta(top.id);
-  engine.deleteLayer(top.id);
+  const a = layerById(s.layers, s.activeLayerId);
+  if (!a || a.kind !== 'layer' || !a.visible) return null;
+  const siblings = childrenOf(s.layers, a.parentId);
+  const pos = siblings.findIndex((l) => l.id === a.id);
+  const below = pos > 0 ? siblings[pos - 1] : null;
+  if (!below || below.kind !== 'layer' || !below.visible) return null;
+  for (const id of [a.id, below.id]) {
+    const locks = effectiveLocks(s.layers, id);
+    if (locks.pixels || locks.position || locks.all) return null;
+  }
+  return below;
 }
 
+/** Whether Ctrl+E can do anything (merge down, or merge the active group). */
+export function canMergeDown(): boolean {
+  const s = useStore.getState();
+  const a = layerById(s.layers, s.activeLayerId);
+  if (!a) return false;
+  if (a.kind === 'group') {
+    return [...descendantIds(s.layers, a.id)].some(
+      (id) => layerById(s.layers, id)?.kind === 'layer',
+    );
+  }
+  return mergeDownTarget() !== null;
+}
+
+/** Ctrl+E: merges the active layer into the one below, or bakes a group. */
+export function mergeDown(): void {
+  commitTransform();
+  const s = useStore.getState();
+  const a = layerById(s.layers, s.activeLayerId);
+  if (!a || !engine) return;
+  if (a.kind === 'group') {
+    void mergeGroup();
+    return;
+  }
+  const below = mergeDownTarget();
+  if (!below) return;
+  engine.mergeDown(a.id, below.id, a.opacity, a.blendMode);
+  s.removeLayerMeta(a.id);
+  engine.deleteLayer(a.id);
+}
+
+/** Layer > Merge Group: bakes the active group into a single layer. */
+export async function mergeGroup(): Promise<void> {
+  if (!engine) return;
+  commitTransform();
+  const s = useStore.getState();
+  const g = layerById(s.layers, s.activeLayerId);
+  if (!g || g.kind !== 'group') return;
+  const range = subtreeRange(s.layers, g.id)!;
+  const block = s.layers.slice(range[0], range[1] + 1);
+  const members = block.filter((l) => l.id !== g.id);
+  // resolve visibility/opacity relative to the group: the group's own
+  // opacity and visibility stay on the merged layer's meta
+  const resolved = resolveRenderLayers(members);
+  if (!resolved.some((l) => l.visible)) return;
+  const data = await engine.readComposite({
+    layers: resolved,
+    activeLayerId: s.activeLayerId,
+    view: s.view,
+  });
+  if (data.length === 0) return;
+  const id = nextLayerId();
+  engine.putLayerImage(id, data, DOC_SIZE.width, DOC_SIZE.height);
+  const merged = makeLayerMeta({
+    id,
+    name: g.name,
+    visible: g.visible,
+    opacity: g.opacity,
+    parentId: g.parentId,
+    locks: g.locks,
+  });
+  for (const l of members) {
+    if (l.kind === 'layer') engine.deleteLayer(l.id);
+  }
+  const st = useStore.getState();
+  const blockIds = new Set(block.map((l) => l.id));
+  const layers = st.layers.filter((l) => !blockIds.has(l.id));
+  const at = st.layers.slice(0, range[0]).filter((l) => !blockIds.has(l.id)).length;
+  layers.splice(at, 0, merged);
+  st.setLayers(layers, id);
+}
+
+/**
+ * Layer > Merge Visible (Shift+Ctrl+E): bakes every visible layer into the
+ * bottom-most visible one; hidden layers survive untouched.
+ */
+export async function mergeVisible(): Promise<void> {
+  if (!engine) return;
+  commitTransform();
+  const s = useStore.getState();
+  const resolved = resolveRenderLayers(s.layers);
+  const visible = resolved.filter((l) => l.visible);
+  if (visible.length <= 1) return;
+  // a locked visible layer blocks the merge, like Photoshop
+  for (const l of visible) {
+    const locks = effectiveLocks(s.layers, l.id);
+    if (locks.pixels || locks.position || locks.all) return;
+  }
+  const data = await engine.readComposite({
+    layers: resolved,
+    activeLayerId: s.activeLayerId,
+    view: s.view,
+  });
+  if (data.length === 0) return;
+
+  const st = useStore.getState();
+  const target = layerById(st.layers, visible[0].id)!;
+  const visibleIds = new Set(visible.map((l) => l.id));
+  // keep hidden pixel layers, and groups that still contain one
+  const keptPixels = new Set(
+    resolved.filter((l) => !visibleIds.has(l.id)).map((l) => l.id),
+  );
+  const keep = (l: LayerMeta) =>
+    l.kind === 'layer'
+      ? keptPixels.has(l.id)
+      : [...descendantIds(st.layers, l.id)].some((id) => keptPixels.has(id));
+  // the merged result lands at the root, where the target's top-level
+  // ancestor sat in the stack
+  let root = target;
+  while (root.parentId !== null) root = layerById(st.layers, root.parentId)!;
+  const rootStart = subtreeRange(st.layers, root.id)![0];
+  const merged = makeLayerMeta({
+    ...target,
+    parentId: null,
+    visible: true,
+    opacity: 1,
+    blendMode: 'normal',
+  });
+  const remaining = st.layers.filter(keep);
+  const at = st.layers.slice(0, rootStart).filter(keep).length;
+  remaining.splice(at, 0, merged);
+  engine.putLayerImage(target.id, data, DOC_SIZE.width, DOC_SIZE.height);
+  for (const l of visible) {
+    if (l.id !== target.id) engine.deleteLayer(l.id);
+  }
+  st.setLayers(remaining, target.id);
+}
+
+/** Layer > Flatten Image: everything visible onto one opaque Background. */
 export async function flattenImage(): Promise<void> {
   if (!engine) return;
+  commitTransform();
   const s = useStore.getState();
-  if (s.layers.length <= 1 && s.layers[0]?.opacity === 1) return;
+  if (s.layers.length === 1 && s.layers[0].opacity === 1 && s.layers[0].kind === 'layer') {
+    return;
+  }
   const data = await engine.readComposite(buildRenderState());
   if (data.length === 0) return;
   // flatten composites onto opaque white, like Photoshop
@@ -822,15 +1271,14 @@ export async function flattenImage(): Promise<void> {
     data[i + 2] = Math.min(255, data[i + 2] + inv);
     data[i + 3] = 255;
   }
-  const keepId = s.layers.some((l) => l.id === 'background') ? 'background' : s.layers[0].id;
+  const keepId = s.layers.some((l) => l.id === 'background')
+    ? 'background'
+    : pixelLayers(s.layers)[0].id;
   engine.putLayerImage(keepId, data, DOC_SIZE.width, DOC_SIZE.height);
   for (const l of s.layers) {
-    if (l.id !== keepId) engine.deleteLayer(l.id);
+    if (l.id !== keepId && l.kind === 'layer') engine.deleteLayer(l.id);
   }
-  s.setLayers(
-    [{ id: keepId, name: 'Background', visible: true, opacity: 1, blendMode: 'normal' }],
-    keepId,
-  );
+  s.setLayers([makeLayerMeta({ id: keepId, name: 'Background' })], keepId);
 }
 
 // ---------------------------------------------------------------------------
@@ -871,19 +1319,15 @@ function bitmapToDocPixels(
 export async function placeImageFile(file: File): Promise<void> {
   if (!engine) return;
   const s = useStore.getState();
-  if (s.layers.length >= MAX_LAYERS) return;
+  if (pixelLayers(s.layers).length >= MAX_LAYERS) return;
   const bmp = await createImageBitmap(file);
   const id = nextLayerId();
   engine.putLayerImage(id, bitmapToDocPixels(bmp, true), DOC_SIZE.width, DOC_SIZE.height);
   bmp.close();
-  const meta: LayerMeta = {
-    id,
-    name: file.name.replace(/\.[^.]+$/, '') || 'Placed Image',
-    visible: true,
-    opacity: 1,
-    blendMode: 'normal',
-  };
-  s.addLayerMeta(meta, s.activeLayerId);
+  s.addLayerMeta(
+    makeLayerMeta({ id, name: file.name.replace(/\.[^.]+$/, '') || 'Placed Image' }),
+    s.activeLayerId,
+  );
 }
 
 /** File > Open: replaces the document with one sized to the image. */

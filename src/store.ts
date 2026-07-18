@@ -1,9 +1,11 @@
 import { create } from 'zustand';
 import type { BlendMode, HSV, LayerMeta, Point, ToolId, Viewport } from './types';
+import { makeLayerMeta } from './types';
 import type { BrushSettings } from './brush/types';
 import type { SelectionOp } from './gpu/selection';
 import { defaultBrush, makeBrush } from './brush/defaults';
 import { findPreset } from './brush/presets';
+import { insertionPoint, pixelLayers } from './layers';
 
 export const DOC_DEFAULT_WIDTH = 1600;
 export const DOC_DEFAULT_HEIGHT = 1000;
@@ -109,8 +111,10 @@ export interface AppState {
 
   dialog: DialogId;
 
-  layers: LayerMeta[]; // bottom -> top
+  layers: LayerMeta[]; // bottom -> top; group children sit just below their header
   activeLayerId: string;
+  /** bumped by Layer > Rename Layer to open the panel's inline rename */
+  renameNonce: number;
 
   view: Viewport;
   selectionPaths: Point[][] | null;
@@ -149,6 +153,7 @@ export interface AppState {
   addLayerMeta: (meta: LayerMeta, aboveId?: string) => void;
   removeLayerMeta: (id: string) => void;
   patchLayer: (id: string, patch: Partial<LayerMeta>) => void;
+  requestRename: () => void;
   /** Reorders layers to match `ids` (bottom -> top). Must be a permutation. */
   setLayerOrder: (ids: string[]) => void;
   /** Replaces the whole layer stack (new document / flatten). */
@@ -189,16 +194,9 @@ export const useStore = create<AppState>((set) => ({
   fitNonce: 0,
   dialog: null,
 
-  layers: [
-    {
-      id: 'background',
-      name: 'Background',
-      visible: true,
-      opacity: 1,
-      blendMode: 'normal',
-    },
-  ],
+  layers: [makeLayerMeta({ id: 'background', name: 'Background' })],
   activeLayerId: 'background',
+  renameNonce: 0,
 
   view: { zoom: 1, panX: 0, panY: 0 },
   selectionPaths: null,
@@ -261,15 +259,21 @@ export const useStore = create<AppState>((set) => ({
   addLayerMeta: (meta, aboveId) =>
     set((s) => {
       const layers = [...s.layers];
-      const idx = aboveId ? layers.findIndex((l) => l.id === aboveId) : -1;
-      if (idx >= 0) layers.splice(idx + 1, 0, meta);
-      else layers.push(meta);
+      if (aboveId && layers.some((l) => l.id === aboveId)) {
+        // above the active layer, or inside the active group, like Photoshop
+        const at = insertionPoint(layers, aboveId);
+        layers.splice(at.index, 0, { ...meta, parentId: at.parentId });
+      } else {
+        layers.push({ ...meta, parentId: null });
+      }
       return { layers, activeLayerId: meta.id };
     }),
 
   removeLayerMeta: (id) =>
     set((s) => {
-      if (s.layers.length <= 1) return {};
+      const meta = s.layers.find((l) => l.id === id);
+      if (!meta) return {};
+      if (meta.kind === 'layer' && pixelLayers(s.layers).length <= 1) return {};
       const idx = s.layers.findIndex((l) => l.id === id);
       const layers = s.layers.filter((l) => l.id !== id);
       const active =
@@ -278,6 +282,8 @@ export const useStore = create<AppState>((set) => ({
           : s.activeLayerId;
       return { layers, activeLayerId: active };
     }),
+
+  requestRename: () => set((s) => ({ renameNonce: s.renameNonce + 1 })),
 
   patchLayer: (id, patch) =>
     set((s) => ({

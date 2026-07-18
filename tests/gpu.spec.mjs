@@ -1519,6 +1519,109 @@ kbAssert('Copy captures the selection and Paste adds a layer',
   clip.copied && clip.after === clip.before + 1 && clip.hasClipboard && clip.deselected,
   JSON.stringify(clip));
 
+// ---- layer system: groups, locks, merges (uses the offscreen engine) ----
+const layerRes = await page.evaluate(async () => {
+  const NL = window.__northlight;
+  const store = NL.store;
+  const ops = NL.layerOps;
+  const util = NL.layersUtil;
+  const eng = NL.engine();
+  const s = () => store.getState();
+  const out = {};
+
+  // start from a clean two-layer stack: white background + red layer
+  for (const l of s().layers.filter((x) => x.id !== 'background')) {
+    ops.deleteLayer(l.id);
+  }
+  s().setActiveLayer('background');
+  ops.addLayer();
+  const layerA = s().activeLayerId;
+  eng.fillRegion(layerA, [1, 0, 0]); // opaque red
+  out.addedAboveBackground =
+    s().layers.length === 2 && s().layers[1].id === layerA;
+
+  // Ctrl+G: wrap the active layer in a group
+  ops.groupActiveLayer();
+  const groupId = s().activeLayerId;
+  out.grouped =
+    s().layers.find((l) => l.id === groupId)?.kind === 'group' &&
+    s().layers.find((l) => l.id === layerA)?.parentId === groupId;
+
+  // group opacity and visibility fold into the composited layers
+  s().patchLayer(groupId, { opacity: 0.5 });
+  let resolved = util.resolveRenderLayers(s().layers);
+  out.opacityFolds =
+    Math.abs(resolved.find((l) => l.id === layerA).opacity - 0.5) < 1e-6;
+  s().patchLayer(groupId, { visible: false });
+  resolved = util.resolveRenderLayers(s().layers);
+  out.visibilityFolds =
+    resolved.find((l) => l.id === layerA).visible === false &&
+    s().layers.find((l) => l.id === layerA).visible === true;
+  s().patchLayer(groupId, { visible: true, opacity: 1 });
+
+  // locking the group locks its children too
+  ops.toggleActiveLayerLock('all'); // active is still the group
+  out.groupLockInherited = util.effectiveLocks(s().layers, layerA).all === true;
+  ops.toggleActiveLayerLock('all');
+
+  // Shift+Ctrl+G: dissolve the group
+  ops.ungroupActiveLayer();
+  out.ungrouped =
+    !s().layers.some((l) => l.id === groupId) &&
+    s().layers.find((l) => l.id === layerA)?.parentId === null &&
+    s().activeLayerId === layerA;
+
+  // Lock Transparent Pixels: fills cannot conjure alpha on a locked layer
+  ops.addLayer();
+  const layerB = s().activeLayerId; // fully transparent
+  eng.fillRegion(layerB, [0, 0, 0], true); // preserveTransparency
+  const lockedFill = await eng.sampleColor(10, 10, 1, { layerId: layerB });
+  out.lockKeepsTransparency = lockedFill === null;
+  eng.fillRegion(layerB, [0, 1, 0], false);
+  const freeFill = await eng.sampleColor(10, 10, 1, { layerId: layerB });
+  out.unlockedFillWorks = !!freeFill && freeFill.g > 0.9 && freeFill.a > 0.9;
+
+  // Ctrl+E: merge down (green B into red A)
+  const before = s().layers.length;
+  ops.mergeDown();
+  const aColor = await eng.sampleColor(10, 10, 1, { layerId: layerA });
+  out.mergeDown =
+    s().layers.length === before - 1 &&
+    !s().layers.some((l) => l.id === layerB) &&
+    !!aColor && aColor.g > 0.9;
+
+  // Shift+Ctrl+E: merge visible into the bottom-most visible layer;
+  // hidden layers survive untouched
+  ops.addLayer();
+  const hidden = s().activeLayerId;
+  s().patchLayer(hidden, { visible: false });
+  s().setActiveLayer(layerA);
+  await ops.mergeVisible();
+  const bg = await eng.sampleColor(10, 10, 1, { layerId: 'background' });
+  out.mergeVisible =
+    s().layers.some((l) => l.id === hidden) &&
+    !s().layers.some((l) => l.id === layerA) &&
+    s().layers.filter((l) => l.kind === 'layer').length === 2 &&
+    !!bg && bg.g > 0.9 && bg.r < 0.1;
+
+  // Flatten Image: one opaque Background remains, hidden layers dropped
+  await ops.flattenImage();
+  out.flattened =
+    s().layers.length === 1 &&
+    s().layers[0].id === 'background' &&
+    s().layers[0].kind === 'layer';
+
+  // Ctrl+J without a selection duplicates the layer
+  await ops.layerViaCopy(false);
+  out.viaCopy = s().layers.length === 2;
+  ops.deleteLayer(s().activeLayerId);
+
+  return out;
+});
+for (const [name, ok] of Object.entries(layerRes)) {
+  kbAssert(`layer system: ${name}`, ok === true, JSON.stringify(layerRes));
+}
+
 console.log(kb.join('\n'));
 
 const all = [...res, ...realResults, ...kb];

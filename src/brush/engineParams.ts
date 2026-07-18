@@ -29,5 +29,6 @@ export function engineStrokeParams(
         }
       : null,
     dual: s.dual.enabled ? s.dual : null,
+    lockTransparent: false, // set by the caller from the layer's locks
   };
 }

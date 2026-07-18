@@ -1065,6 +1065,23 @@ input.ok-num {
   flex: 1;
 }
 
+/* Photoshop-style Lock row */
+
+.layers-locks {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.layers-locks span {
+  color: var(--text-dim);
+  margin-right: 2px;
+}
+
+.layers-locks .icon-btn {
+  padding: 2px 4px;
+}
+
 .num-label {
   width: 32px;
   text-align: right;
@@ -1108,6 +1125,42 @@ input.ok-num {
   font-size: 10px;
 }
 
+/* groups */
+
+.layer-indent {
+  flex-shrink: 0;
+}
+
+.layer-row .caret {
+  padding: 0 2px;
+  color: var(--text-dim);
+  transition: transform 0.1s;
+}
+
+.layer-row .caret.open {
+  transform: rotate(90deg);
+}
+
+.layer-kind-icon {
+  display: inline-flex;
+  color: var(--text-dim);
+}
+
+/* the layer is visible but an enclosing group is hidden */
+.layer-row.dim .layer-name {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.layer-lock-badge {
+  display: inline-flex;
+  color: var(--text-dim);
+}
+
+.layer-lock-badge.full {
+  color: var(--text);
+}
+
 .rename {
   flex: 1;
   background: var(--bg-0);
@@ -1137,4 +1190,9 @@ input.ok-num {
 
 .layer-row.drop-below {
   box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+
+/* dropping into a group highlights the whole header row */
+.layer-row.drop-into {
+  box-shadow: inset 0 0 0 2px var(--accent);
 }

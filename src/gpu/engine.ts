@@ -45,6 +45,8 @@ export interface EngineStrokeParams {
   noise: boolean;
   texture: EngineTextureParams | null;
   dual: DualBrush | null;
+  /** Lock Transparent Pixels: the stroke cannot change the layer's alpha */
+  lockTransparent: boolean;
 }
 
 export interface RenderState {
@@ -729,6 +731,7 @@ export class PaintEngine {
     const f = new Float32Array(u);
     const i = new Uint32Array(u);
     i[0] = stroke.mode === 'erase' ? 2 : 1;
+    f[1] = stroke.lockTransparent ? 1 : 0;
     f[2] = this.docWidth;
     f[3] = this.docHeight;
     PaintEngine.fillMergeFields(f, i, 4, stroke);
@@ -759,9 +762,15 @@ export class PaintEngine {
   /**
    * Fills the layer with an opaque color, or clears it to transparency when
    * `color` is null. Restricted to the current selection mask when one is
-   * set; covers the whole layer otherwise. Records an undo snapshot.
+   * set; covers the whole layer otherwise. `preserveTransparency` is Lock
+   * Transparent Pixels: recolor existing coverage without touching alpha.
+   * Records an undo snapshot.
    */
-  fillRegion(layerId: string, color: [number, number, number] | null): void {
+  fillRegion(
+    layerId: string,
+    color: [number, number, number] | null,
+    preserveTransparency = false,
+  ): void {
     const layer = this.layers.get(layerId);
     if (!layer) return;
     this.pushUndo(layerId);
@@ -778,6 +787,7 @@ export class PaintEngine {
     } else {
       i[4] = 2;
     }
+    f[5] = preserveTransparency ? 1 : 0;
     uploadBuffer(this.device, this.fillUniforms, 0, u);
 
     const bindGroup = this.device.createBindGroup({
@@ -1179,6 +1189,7 @@ export class PaintEngine {
       const strokeHere =
         stroke !== null && meta.id === state.activeLayerId && meta.visible;
       u[2] = strokeHere ? (stroke!.mode === 'erase' ? 2 : 1) : 0;
+      f[3] = strokeHere && stroke!.lockTransparent ? 1 : 0;
       f[4] = this.docWidth;
       f[5] = this.docHeight;
       if (strokeHere) PaintEngine.fillMergeFields(f, u, 8, stroke!);

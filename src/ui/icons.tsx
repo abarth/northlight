@@ -133,6 +133,35 @@ export const SwapColorsIcon = ({ size }: IconProps) => (
   </svg>
 );
 
+export const FolderIcon = ({ size }: IconProps) => (
+  <svg {...base(size)}>
+    <path d="M3 6a1.5 1.5 0 0 1 1.5-1.5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z" />
+  </svg>
+);
+
+export const FolderPlusIcon = ({ size }: IconProps) => (
+  <svg {...base(size)}>
+    <path d="M3 6a1.5 1.5 0 0 1 1.5-1.5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z" />
+    <path d="M12 10.5v5M9.5 13h5" />
+  </svg>
+);
+
+export const LockIcon = ({ size }: IconProps) => (
+  <svg {...base(size)}>
+    <rect x="5" y="11" width="14" height="9" rx="1.5" />
+    <path d="M8 11V7.5a4 4 0 0 1 8 0V11" />
+  </svg>
+);
+
+/** Checkerboard: Lock Transparent Pixels. */
+export const CheckerIcon = ({ size }: IconProps) => (
+  <svg {...base(size)}>
+    <rect x="4" y="4" width="16" height="16" rx="1.5" />
+    <path d="M12 4v16M4 12h16" />
+    <path d="M4.8 8h7.2M12 16h7.2" strokeWidth={3.2} opacity="0.55" />
+  </svg>
+);
+
 export const SettingsIcon = ({ size }: IconProps) => (
   <svg {...base(size)}>
     <path d="M4 8h10M18 8h2M4 16h2M10 16h10" />
