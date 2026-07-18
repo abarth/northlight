@@ -110,6 +110,12 @@ export function hasOwnLock(meta: LayerMeta): boolean {
   return k.all || k.transparency || k.pixels || k.position;
 }
 
+// resolveRenderLayers runs on every animation frame; the store's layer array
+// is immutable (every update replaces it), so one identity-keyed entry is a
+// complete cache.
+let resolveCacheIn: LayerMeta[] | null = null;
+let resolveCacheOut: LayerMeta[] | null = null;
+
 /**
  * Flattens the tree into the pixel-layer list the GPU compositor consumes:
  * groups disappear, their visibility and opacity folded into each child.
@@ -117,13 +123,17 @@ export function hasOwnLock(meta: LayerMeta): boolean {
  * bottom -> top sequential compositing stays correct.
  */
 export function resolveRenderLayers(layers: LayerMeta[]): LayerMeta[] {
-  return layers
+  if (layers === resolveCacheIn) return resolveCacheOut!;
+  const out = layers
     .filter((l) => l.kind === 'layer')
     .map((l) => ({
       ...l,
       visible: effectiveVisible(layers, l.id),
       opacity: effectiveOpacity(layers, l.id),
     }));
+  resolveCacheIn = layers;
+  resolveCacheOut = out;
+  return out;
 }
 
 /** Pixel layers only (groups have no content). */

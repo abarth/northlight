@@ -137,6 +137,25 @@ export class PaintEngine {
   private redoStack: HistoryEntry[] = [];
   onHistoryChange: (canUndo: boolean, canRedo: boolean) => void = () => {};
 
+  /**
+   * Set whenever GPU content changes (strokes, fills, layer edits, undo,
+   * selection, resize). The render loop consumes it to skip re-compositing
+   * frames where nothing moved — layer/view changes are tracked separately
+   * by the caller since they live in the store, not the engine.
+   */
+  private dirty = true;
+
+  markDirty(): void {
+    this.dirty = true;
+  }
+
+  /** Returns whether a re-render is due, and arms the next frame as clean. */
+  consumeDirty(): boolean {
+    const d = this.dirty;
+    this.dirty = false;
+    return d;
+  }
+
   private constructor(
     device: GPUDevice,
     canvas: HTMLCanvasElement,
@@ -386,24 +405,17 @@ export class PaintEngine {
 
   ensureLayer(id: string): void {
     if (this.layers.has(id)) return;
-    const tex = this.device.createTexture({
-      label: `layer:${id}`,
-      size: [this.docWidth, this.docHeight],
-      format: 'rgba8unorm',
-      usage:
-        GPUTextureUsage.TEXTURE_BINDING |
-        GPUTextureUsage.RENDER_ATTACHMENT |
-        GPUTextureUsage.COPY_SRC |
-        GPUTextureUsage.COPY_DST,
-    });
+    const tex = this.makeDocTexture('rgba8unorm', `layer:${id}`);
     this.layers.set(id, tex);
     this.clearTexture(tex);
+    this.markDirty();
   }
 
   fillLayer(id: string, rgba: [number, number, number, number]): void {
     const tex = this.layers.get(id);
     if (!tex) return;
     this.clearTexture(tex, rgba);
+    this.markDirty();
   }
 
   deleteLayer(id: string): void {
@@ -412,6 +424,7 @@ export class PaintEngine {
       tex.destroy();
       this.layers.delete(id);
     }
+    this.markDirty();
     this.undoStack = this.undoStack.filter((e) => e.layerId !== id);
     this.redoStack = this.redoStack.filter((e) => e.layerId !== id);
     this.notifyHistory();
@@ -427,7 +440,7 @@ export class PaintEngine {
       this.docWidth,
       this.docHeight,
     ]);
-    this.device.queue.submit([enc.finish()]);
+    this.device.queue.submit([enc.finish()]);    this.markDirty();
   }
 
   /** Clears the stroke and dual-mask textures with a single submit. */
@@ -470,6 +483,7 @@ export class PaintEngine {
   /** `mask` is a doc-sized, single-channel coverage bitmap, or null to clear. */
   setSelectionMask(mask: Uint8Array<ArrayBuffer> | null): void {
     this.stampBindGroups = null; // stamps sample the selection texture
+    this.markDirty();
     if (!mask) {
       this.selectionTex?.destroy();
       this.selectionTex = null;
@@ -516,6 +530,30 @@ export class PaintEngine {
     f[word + 11] = tex ? tex.depth : 1;
   }
 
+  /**
+   * Writes one LayerU slice (used by the compositor per layer, and by
+   * mergeDown for the single merge pass): layer blend/opacity, the live
+   * stroke's mode + Lock Transparent Pixels flag, doc size, and the stroke
+   * merge block when a stroke is active on this layer.
+   */
+  private writeLayerSlice(
+    buf: ArrayBuffer,
+    offset: number,
+    blendMode: BlendMode,
+    opacity: number,
+    stroke: EngineStrokeParams | null,
+  ): void {
+    const f = new Float32Array(buf, offset, LAYER_U_SIZE / 4);
+    const u = new Uint32Array(buf, offset, LAYER_U_SIZE / 4);
+    u[0] = BLEND_MODE_INDEX[blendMode] ?? 0;
+    f[1] = opacity;
+    u[2] = stroke ? (stroke.mode === 'erase' ? 2 : 1) : 0;
+    f[3] = stroke?.lockTransparent ? 1 : 0;
+    f[4] = this._docWidth;
+    f[5] = this._docHeight;
+    if (stroke) PaintEngine.fillMergeFields(f, u, 8, stroke);
+  }
+
   /** StampU layout shared by the primary and dual stamp passes. */
   private fillStampUniforms(
     target: GPUBuffer,
@@ -544,6 +582,7 @@ export class PaintEngine {
 
   beginStroke(params: EngineStrokeParams): void {
     this.stroke = params;
+    this.markDirty();
     this.stampBindGroups = null; // tip/pattern textures change per stroke
     this.clearStrokeTextures();
 
@@ -630,6 +669,7 @@ export class PaintEngine {
     const totalFloats = batches.reduce((n, b) => n + b.records.length, 0);
     const total = totalFloats / STAMP_FLOATS;
     if (total === 0) return;
+    this.markDirty();
 
     if (total > this.instanceCapacity) {
       while (this.instanceCapacity < total) this.instanceCapacity *= 2;
@@ -712,7 +752,7 @@ export class PaintEngine {
       { texture: dst },
       [this._docWidth, this._docHeight],
     );
-    this.device.queue.submit([enc.finish()]);
+    this.device.queue.submit([enc.finish()]);    this.markDirty();
   }
 
   /** Bakes the stroke into the layer and records an undo snapshot. */
@@ -757,6 +797,7 @@ export class PaintEngine {
   cancelStroke(): void {
     this.stroke = null;
     this.clearStrokeTextures();
+    this.markDirty();
   }
 
   /**
@@ -860,7 +901,7 @@ export class PaintEngine {
     pass.setBindGroup(0, bindGroup);
     pass.draw(3);
     pass.end();
-    this.device.queue.submit([enc.finish()]);
+    this.device.queue.submit([enc.finish()]);    this.markDirty();
   }
 
   /**
@@ -929,6 +970,7 @@ export class PaintEngine {
     this.transformSrc = null;
     this.transformLayerId = null;
     this.transformUndoData = null;
+    this.markDirty();
   }
 
   /**
@@ -990,6 +1032,7 @@ export class PaintEngine {
     this.undoStack = [];
     this.redoStack = [];
     this.notifyHistory();
+    this.markDirty();
   }
 
   /**
@@ -1004,13 +1047,7 @@ export class PaintEngine {
     this.pushUndo(bottomId);
 
     const buf = new ArrayBuffer(UNIFORM_SLICE);
-    const f = new Float32Array(buf, 0, LAYER_U_SIZE / 4);
-    const u = new Uint32Array(buf, 0, LAYER_U_SIZE / 4);
-    u[0] = BLEND_MODE_INDEX[blendMode] ?? 0;
-    f[1] = opacity;
-    u[2] = 0; // no live stroke
-    f[4] = this._docWidth;
-    f[5] = this._docHeight;
+    this.writeLayerSlice(buf, 0, blendMode, opacity, null);
     uploadBuffer(this.device, this.layerUniforms, 0, buf);
 
     const white = this.whiteTex.createView();
@@ -1034,7 +1071,7 @@ export class PaintEngine {
   putLayerImage(id: string, data: Uint8Array, width: number, height: number): void {
     if (width !== this._docWidth || height !== this._docHeight) return;
     this.ensureLayer(id);
-    uploadTexture(this.device, this.layers.get(id)!, data, width, height, 4);
+    uploadTexture(this.device, this.layers.get(id)!, data, width, height, 4);    this.markDirty();
   }
 
   /** Raw premultiplied RGBA pixels of one layer (for bounds / flatten). */
@@ -1155,7 +1192,7 @@ export class PaintEngine {
   private writeLayer(layerId: string, data: Uint8Array<ArrayBuffer>): void {
     const layer = this.layers.get(layerId);
     if (!layer || data.length === 0) return;
-    uploadTexture(this.device, layer, data, this.docWidth, this.docHeight, 4);
+    uploadTexture(this.device, layer, data, this.docWidth, this.docHeight, 4);    this.markDirty();
   }
 
   // -------------------------------------------------------------------------
@@ -1178,21 +1215,17 @@ export class PaintEngine {
     const visible = state.layers.filter((l) => this.layers.has(l.id));
 
     // Write all per-layer uniform slices in one go.
-    // LayerU: layer blend/opacity, strokeMode, docSize, merge block
     const buf = new ArrayBuffer(UNIFORM_SLICE * Math.max(1, visible.length));
     visible.forEach((meta, idx) => {
-      const f = new Float32Array(buf, idx * UNIFORM_SLICE, LAYER_U_SIZE / 4);
-      const u = new Uint32Array(buf, idx * UNIFORM_SLICE, LAYER_U_SIZE / 4);
-      u[0] = BLEND_MODE_INDEX[meta.blendMode] ?? 0;
-      f[1] = meta.opacity;
-      const stroke = this.stroke;
       const strokeHere =
-        stroke !== null && meta.id === state.activeLayerId && meta.visible;
-      u[2] = strokeHere ? (stroke!.mode === 'erase' ? 2 : 1) : 0;
-      f[3] = strokeHere && stroke!.lockTransparent ? 1 : 0;
-      f[4] = this.docWidth;
-      f[5] = this.docHeight;
-      if (strokeHere) PaintEngine.fillMergeFields(f, u, 8, stroke!);
+        this.stroke !== null && meta.id === state.activeLayerId && meta.visible;
+      this.writeLayerSlice(
+        buf,
+        idx * UNIFORM_SLICE,
+        meta.blendMode,
+        meta.opacity,
+        strokeHere ? this.stroke : null,
+      );
     });
     uploadBuffer(this.device, this.layerUniforms, 0, buf);
 

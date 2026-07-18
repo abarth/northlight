@@ -6,57 +6,35 @@ import {
   applySelectionShape,
   applyTransformPreview,
   applyZoom,
-  arrangeActiveLayer,
   autoSelectMoveTarget,
   buildRenderState,
   canEditActivePixels,
   cancelTransform,
   commitTransform,
-  copySelection,
-  cutSelection,
-  deleteSelectionContents,
-  fillActiveLayer,
   fitOnScreen,
   getEngine,
-  groupActiveLayer,
-  invertSelection,
-  layerViaCopy,
-  mergeDown,
-  mergeVisible,
   nextZoomStop,
-  nudgeMoveSession,
-  paste,
-  redo,
-  reselect,
   sampleCanvasColor,
-  selectNeighborLayer,
   setEngine,
   setSelection,
-  selectAll,
   startMoveSession,
-  startTransform,
-  toggleActiveLayerLock,
-  toggleActiveLayerVisibility,
   transformQuadBy,
-  ungroupActiveLayer,
-  zoomIn,
-  zoomOut,
-  addLayer,
-  undo,
 } from '../controller';
 import { PaintEngine } from '../gpu/engine';
 import { StrokeSession } from '../gpu/stroke';
 import { engineStrokeParams } from '../brush/engineParams';
-import { tipOutline } from '../brush/tipOutline';
 import type { PointerSample } from '../brush/dynamics';
 import { rgbToHsv } from '../color/convert';
+import { translation } from '../transform/matrix';
 import {
-  apply,
-  homographyFromQuads,
-  rotationAbout,
-  translation,
-  type Mat3,
-} from '../transform/matrix';
+  ROTATE_BAND,
+  computeTransformQuad,
+  makeTransformDrag,
+  resolveTransformIntent,
+  type ScreenSpace,
+  type TransformDragState,
+} from '../transform/interaction';
+import { pathsBounds, quadCenter, rectCorners } from '../transform/quad';
 import type { SelectionOp } from '../gpu/selection';
 import { DOC_SIZE, useStore, type TransformState } from '../store';
 import type { Point, ToolId } from '../types';
@@ -68,16 +46,8 @@ import {
   selectionToolCursor,
   zoomCursor,
 } from './cursors';
-
-type TransformOp =
-  | 'scale'
-  | 'scaleAxis'
-  | 'rotate'
-  | 'skew'
-  | 'distort'
-  | 'perspective'
-  | 'edgeMove'
-  | 'move';
+import { drawOverlay } from './overlay';
+import { useKeyboardShortcuts } from './useKeyboardShortcuts';
 
 type Drag =
   | { kind: 'stroke'; session: StrokeSession }
@@ -95,18 +65,7 @@ type Drag =
   | { kind: 'eyedrop' }
   /** move click waiting for async Auto-Select before the float opens */
   | { kind: 'movePending'; start: Point; last: Point; done: boolean }
-  | {
-      kind: 'transform';
-      op: TransformOp;
-      index: number; // corner/edge index
-      startDoc: Point;
-      startQuad: Point[];
-      /** R-space -> doc at drag start, and its inverse */
-      M: Mat3 | null;
-      Minv: Mat3 | null;
-      rStart: Point;
-      center: Point;
-    };
+  | ({ kind: 'transform' } & TransformDragState);
 
 /** Photoshop-style modifier resolution for the selection tools. */
 function selectionOpFromEvent(
@@ -119,39 +78,6 @@ function selectionOpFromEvent(
   return fallback;
 }
 
-const rectCorners = (r: { x: number; y: number; w: number; h: number }): Point[] => [
-  { x: r.x, y: r.y },
-  { x: r.x + r.w, y: r.y },
-  { x: r.x + r.w, y: r.y + r.h },
-  { x: r.x, y: r.y + r.h },
-];
-
-/** Shift-drag: snap movement to horizontal / vertical / 45° diagonals. */
-function constrain45(dx: number, dy: number): [number, number] {
-  if (Math.abs(dx) > 2 * Math.abs(dy)) return [dx, 0];
-  if (Math.abs(dy) > 2 * Math.abs(dx)) return [0, dy];
-  const d = (Math.abs(dx) + Math.abs(dy)) / 2;
-  return [Math.sign(dx) * d, Math.sign(dy) * d];
-}
-
-/** Minimum distance from `p` to the quad's outline (its four segments). */
-function distToQuadEdges(q: Point[], p: Point): number {
-  let best = Infinity;
-  for (let i = 0; i < 4; i++) {
-    const a = q[i];
-    const b = q[(i + 1) % 4];
-    const abx = b.x - a.x;
-    const aby = b.y - a.y;
-    const len2 = abx * abx + aby * aby;
-    const t = len2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2)) : 0;
-    best = Math.min(best, Math.hypot(p.x - (a.x + abx * t), p.y - (a.y + aby * t)));
-  }
-  return best;
-}
-
-/** How far outside the box the move tool's rotate zone extends (CSS px). */
-const ROTATE_BAND = 22;
-
 /** Tools where holding Ctrl temporarily switches to Move, like Photoshop. */
 const CTRL_MOVE_TOOLS: ReadonlySet<ToolId> = new Set([
   'brush',
@@ -161,21 +87,6 @@ const CTRL_MOVE_TOOLS: ReadonlySet<ToolId> = new Set([
   'lasso',
   'polyLasso',
 ]);
-
-function pointInQuad(p: Point, q: Point[]): boolean {
-  let inside = false;
-  for (let i = 0, j = 3; i < 4; j = i++) {
-    const a = q[i];
-    const b = q[j];
-    if (
-      a.y > p.y !== b.y > p.y &&
-      p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x
-    ) {
-      inside = !inside;
-    }
-  }
-  return inside;
-}
 
 export function CanvasView() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -231,15 +142,32 @@ export function CanvasView() {
         engine.resize();
         fitOnScreen();
         setReady(true);
+        // The GPU composite only reruns when something changed: engine
+        // content (dirty flag), the layer stack / active layer / viewport
+        // (store references — every update replaces them), or the canvas
+        // size. The cheap 2D overlay still draws every frame for the
+        // marching ants and the brush cursor.
+        let last: { layers?: unknown; activeLayerId?: string; view?: unknown } = {};
         const loop = () => {
           // Device loss surfaces via device.lost above; keep the loop alive
           // so the 2D overlay (ants, transform box, brush cursor) still draws.
           try {
-            engine.render(buildRenderState());
+            const rs = buildRenderState();
+            const resized = engine.resize();
+            if (
+              engine.consumeDirty() ||
+              resized ||
+              rs.layers !== last.layers ||
+              rs.activeLayerId !== last.activeLayerId ||
+              rs.view !== last.view
+            ) {
+              engine.render(rs);
+              last = rs;
+            }
           } catch {
-            /* rendering resumes if the device comes back */
+            engine.markDirty(); // retry if the device comes back
           }
-          drawOverlay();
+          paintOverlay();
           raf = requestAnimationFrame(loop);
         };
         raf = requestAnimationFrame(loop);
@@ -298,338 +226,36 @@ export function CanvasView() {
     s.setOverrideTool(ov);
   }
 
-  // --- keyboard shortcuts ---
-  useEffect(() => {
-    const isEditable = (t: EventTarget | null) =>
-      t instanceof HTMLElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName);
-
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (isEditable(e.target)) return;
-      const s = useStore.getState();
-      const mod = e.ctrlKey || e.metaKey;
-
-      if (e.code === 'Space') {
-        if (!spaceRef.current) {
-          spaceRef.current = true;
-          syncOverride();
-        }
-        e.preventDefault();
-        return;
-      }
-      // modifier transitions retarget the hover cursor immediately
-      // (selection-op badges, Ctrl distort/perspective handles)
-      if (['Shift', 'Alt', 'Control', 'Meta'].includes(e.key)) {
-        updateHoverCursor(e);
-      }
-      if (e.key === 'Alt') {
-        if (!altRef.current) {
-          altRef.current = true;
-          setAltDown(true);
-          syncOverride();
-        }
-        e.preventDefault(); // keep the browser from focusing its menu bar
-        return;
-      }
-      if (e.key === 'Control' || e.key === 'Meta') {
-        if (!ctrlRef.current) {
-          ctrlRef.current = true;
-          syncOverride();
-        }
-        return;
-      }
-      if (mod && e.key.toLowerCase() === 'z') {
-        e.preventDefault();
-        if (e.shiftKey) redo();
-        else undo();
-        return;
-      }
-      if (mod && e.key.toLowerCase() === 'y') {
-        e.preventDefault();
-        redo();
-        return;
-      }
-      // Ctrl+Shift+I inverse, Ctrl+Shift+D reselect, Ctrl+Shift+N new layer
-      if (mod && e.shiftKey && e.key.toLowerCase() === 'i') {
-        e.preventDefault();
-        invertSelection();
-        return;
-      }
-      if (mod && e.shiftKey && e.key.toLowerCase() === 'd') {
-        e.preventDefault();
-        reselect();
-        return;
-      }
-      if (mod && e.shiftKey && e.key.toLowerCase() === 'n') {
-        e.preventDefault();
-        addLayer();
-        return;
-      }
-      // Alt+Ctrl+I / Alt+Ctrl+C open the Image Size / Canvas Size dialogs
-      if (mod && e.altKey && e.key.toLowerCase() === 'i') {
-        e.preventDefault();
-        s.setDialog('imageSize');
-        return;
-      }
-      if (mod && e.altKey && e.key.toLowerCase() === 'c') {
-        e.preventDefault();
-        s.setDialog('canvasSize');
-        return;
-      }
-      // Clipboard: Ctrl+X cut, Ctrl+C copy, Shift+Ctrl+C copy merged,
-      // Ctrl+V paste, Shift+Ctrl+V paste in place.
-      if (mod && e.key.toLowerCase() === 'x') {
-        e.preventDefault();
-        void cutSelection();
-        return;
-      }
-      if (mod && e.key.toLowerCase() === 'c') {
-        e.preventDefault();
-        void copySelection(e.shiftKey);
-        return;
-      }
-      if (mod && e.key.toLowerCase() === 'v') {
-        e.preventDefault();
-        paste(e.shiftKey);
-        return;
-      }
-      // Ctrl+H toggles Extras (selection edges), like Photoshop
-      if (mod && e.key.toLowerCase() === 'h') {
-        e.preventDefault();
-        s.setShowExtras(!s.showExtras);
-        return;
-      }
-      // Ctrl+= / Ctrl+- step through the zoom stops
-      if (mod && (e.key === '=' || e.key === '+')) {
-        e.preventDefault();
-        zoomIn();
-        return;
-      }
-      if (mod && (e.key === '-' || e.key === '_')) {
-        e.preventDefault();
-        zoomOut();
-        return;
-      }
-      // Ctrl+Alt+0 = 100%, like Photoshop's Actual Pixels
-      if (mod && e.altKey && e.key === '0') {
-        e.preventDefault();
-        applyZoom(1);
-        return;
-      }
-      if (mod && e.key.toLowerCase() === 't') {
-        e.preventDefault();
-        void startTransform('layer', 'free');
-        return;
-      }
-      // Layer shortcuts: Ctrl+E merge down (or group), Shift+Ctrl+E merge
-      // visible, Ctrl+G / Shift+Ctrl+G group / ungroup, Ctrl+J / Shift+Ctrl+J
-      // layer via copy / cut, Ctrl+, hide layer — all like Photoshop.
-      if (mod && e.key.toLowerCase() === 'e') {
-        e.preventDefault();
-        if (e.shiftKey) void mergeVisible();
-        else mergeDown();
-        return;
-      }
-      if (mod && e.key.toLowerCase() === 'g') {
-        e.preventDefault();
-        if (e.shiftKey) ungroupActiveLayer();
-        else groupActiveLayer();
-        return;
-      }
-      if (mod && e.key.toLowerCase() === 'j') {
-        e.preventDefault();
-        void layerViaCopy(e.shiftKey);
-        return;
-      }
-      if (mod && e.key === ',') {
-        e.preventDefault();
-        toggleActiveLayerVisibility();
-        return;
-      }
-      // Ctrl+[ / Ctrl+] rearrange the layer stack (Shift jumps to the ends)
-      if (mod && (e.code === 'BracketRight' || e.code === 'BracketLeft')) {
-        e.preventDefault();
-        const up = e.code === 'BracketRight';
-        arrangeActiveLayer(
-          e.shiftKey ? (up ? 'front' : 'back') : up ? 'forward' : 'backward',
-        );
-        return;
-      }
-      if (mod && e.key.toLowerCase() === 'd') {
-        e.preventDefault();
+  // The Photoshop keyboard map lives in useKeyboardShortcuts; only the
+  // Enter/Escape resolutions need this component's drag/poly state.
+  useKeyboardShortcuts({
+    spaceRef,
+    altRef,
+    ctrlRef,
+    digitRef,
+    setAltDown,
+    syncOverride,
+    updateHoverCursor,
+    onEnter: () => {
+      if (useStore.getState().transform) commitTransform();
+      else closePoly();
+    },
+    onEscape: () => {
+      if (useStore.getState().transform) {
+        dragRef.current = null;
+        cancelTransform();
+      } else if (polyRef.current) {
+        polyRef.current = null;
+        polyPreviewRef.current = null;
+      } else if (dragRef.current?.kind === 'stroke') {
+        dragRef.current.session.cancel();
+        getEngine()?.cancelStroke();
+        dragRef.current = null;
+      } else {
         setSelection(null);
-        return;
       }
-      if (mod && e.key.toLowerCase() === 'a') {
-        e.preventDefault();
-        selectAll();
-        return;
-      }
-      if (mod && e.key === '0') {
-        e.preventDefault();
-        fitOnScreen();
-        return;
-      }
-      if (mod && e.key === '1') {
-        e.preventDefault();
-        applyZoom(1);
-        return;
-      }
-      // Photoshop fill/clear shortcuts: Alt+Backspace fills the foreground
-      // color, Ctrl+Backspace the background color (both clip to a selection
-      // when one exists); plain Backspace/Delete clears the selected pixels.
-      if (e.key === 'Backspace' || e.key === 'Delete') {
-        e.preventDefault();
-        if (e.altKey) fillActiveLayer('fg');
-        else if (mod) fillActiveLayer('bg');
-        else if (s.selectionPaths) deleteSelectionContents();
-        return;
-      }
-      // Arrows nudge the transform box, or the layer/selection with Move (V)
-      if (e.key.startsWith('Arrow')) {
-        const step = e.shiftKey ? 10 : 1;
-        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
-        const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
-        if (dx === 0 && dy === 0) return;
-        if (s.transform) {
-          e.preventDefault();
-          transformQuadBy(translation(dx, dy));
-        } else if (s.tool === 'move') {
-          e.preventDefault();
-          nudgeMoveSession(dx, dy);
-        }
-        return;
-      }
-      if (mod) return;
-
-      // Alt+[ / Alt+] step the active layer down/up the stack, like Photoshop
-      if (e.altKey && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
-        e.preventDefault();
-        selectNeighborLayer(e.code === 'BracketRight' ? 'up' : 'down');
-        return;
-      }
-
-      // Photoshop numeric shortcuts: digits set opacity, Shift+digits set
-      // flow — swapped while the airbrush toggle is on. Two digits typed
-      // quickly combine (4 then 5 -> 45%); 0 means 100%. Match on e.code so
-      // Shift+7 ('&' as a key) still counts as a digit.
-      const digitMatch = /^(?:Digit|Numpad)([0-9])$/.exec(e.code);
-      if (digitMatch && (s.tool === 'brush' || s.tool === 'eraser')) {
-        const digit = digitMatch[1];
-        const toolKey = s.tool;
-        const settings = s[toolKey];
-        const target: 'opacity' | 'flow' =
-          e.shiftKey === settings.airbrush ? 'opacity' : 'flow';
-        const now = performance.now();
-        const buf = digitRef.current;
-        let str =
-          now - buf.at < 700 && buf.target === target ? buf.str + digit : digit;
-        if (str.length > 2) str = str.slice(-2);
-        digitRef.current = { str, at: now, target };
-        let val = parseInt(str, 10);
-        if (str.length === 1) val *= 10; // single digit means N*10%
-        if (val === 0) val = 100;
-        s.updateBrush({ [target]: val / 100 } as never, toolKey);
-        return;
-      }
-
-      // Shift+[ / ] step hardness by 25%, like Photoshop.
-      if (e.shiftKey && (e.key === '{' || e.key === '}')) {
-        const toolKey = s.tool === 'eraser' ? 'eraser' : 'brush';
-        const tip = s[toolKey].tip;
-        const dir = e.key === '}' ? 0.25 : -0.25;
-        s.updateBrush(
-          { tip: { ...tip, hardness: Math.min(1, Math.max(0, tip.hardness + dir)) } },
-          toolKey,
-        );
-        return;
-      }
-
-      switch (e.key) {
-        case 'v': s.setTool('move'); break;
-        case 'b': s.setTool('brush'); break;
-        case 'e': s.setTool('eraser'); break;
-        case 'i': s.setTool('eyedropper'); break;
-        case 'h': s.setTool('pan'); break;
-        case 'z': s.setTool('zoom'); break;
-        case 'm': s.setTool('marquee'); break;
-        case 'l': s.setTool('lasso'); break;
-        case 'p': s.setTool('polyLasso'); break;
-        case 'x': s.swapColors(); break;
-        case 'd': s.resetColors(); break;
-        case '/': toggleActiveLayerLock('transparency'); break;
-        case '[': {
-          const t = s.tool === 'eraser' ? 'eraser' : 'brush';
-          const tip = s[t].tip;
-          const size = Math.max(1, tip.size - Math.max(1, Math.round(tip.size * 0.1)));
-          s.updateBrush({ tip: { ...tip, size } }, t);
-          break;
-        }
-        case ']': {
-          const t = s.tool === 'eraser' ? 'eraser' : 'brush';
-          const tip = s[t].tip;
-          const size = Math.min(1000, tip.size + Math.max(1, Math.round(tip.size * 0.1)));
-          s.updateBrush({ tip: { ...tip, size } }, t);
-          break;
-        }
-        case 'Enter':
-          if (s.transform) commitTransform();
-          else closePoly();
-          break;
-        case 'Escape':
-          if (s.transform) {
-            dragRef.current = null;
-            cancelTransform();
-          } else if (polyRef.current) {
-            polyRef.current = null;
-            polyPreviewRef.current = null;
-          } else if (dragRef.current?.kind === 'stroke') {
-            dragRef.current.session.cancel();
-            getEngine()?.cancelStroke();
-            dragRef.current = null;
-          } else {
-            setSelection(null);
-          }
-          break;
-      }
-    };
-
-    const onKeyUp = (e: KeyboardEvent) => {
-      if (['Shift', 'Alt', 'Control', 'Meta'].includes(e.key)) {
-        updateHoverCursor(e);
-      }
-      if (e.code === 'Space') {
-        spaceRef.current = false;
-        syncOverride();
-      } else if (e.key === 'Alt') {
-        altRef.current = false;
-        setAltDown(false);
-        syncOverride();
-        e.preventDefault();
-      } else if (e.key === 'Control' || e.key === 'Meta') {
-        ctrlRef.current = false;
-        syncOverride();
-      }
-    };
-
-    // Alt+Tab and friends: key-up events never arrive, so drop all overrides
-    const onBlur = () => {
-      spaceRef.current = false;
-      altRef.current = false;
-      ctrlRef.current = false;
-      setAltDown(false);
-      syncOverride();
-    };
-
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup', onKeyUp);
-    window.addEventListener('blur', onBlur);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup', onKeyUp);
-      window.removeEventListener('blur', onBlur);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    },
+  });
 
   // --- wheel zoom (non-passive) ---
   useEffect(() => {
@@ -691,49 +317,25 @@ export function CanvasView() {
     if (pts && pts.length >= 3) applySelectionShape([pts], polyOpRef.current);
   }
 
-  /**
-   * Maps a pointer position to a transform-box interaction: corner and edge
-   * handles first, then inside (move) / outside (rotate). Which operation a
-   * handle performs depends on the transform mode and Ctrl, like Photoshop.
-   */
-  function transformHandleAt(
-    t: TransformState,
-    screen: Point,
-    ctrl: boolean,
-  ): { op: TransformOp; index: number; zone: 'corner' | 'edge' | 'inside' | 'outside' } {
-    const qs = t.quad.map(docToScreen);
-    const tol = 8 * devicePixelRatio;
-    const near = (a: Point) => Math.hypot(a.x - screen.x, a.y - screen.y) <= tol;
-
-    const cornerOp: Record<string, TransformOp> = {
-      free: ctrl ? 'distort' : 'scale',
-      scale: 'scale',
-      rotate: 'rotate',
-      skew: 'distort',
-      distort: 'distort',
-      perspective: 'perspective',
+  /** View-dependent inputs for the shared transform-box hit testing. */
+  function screenSpace(): ScreenSpace {
+    return {
+      docToScreen,
+      tolerance: 8 * devicePixelRatio,
+      rotateBand: ROTATE_BAND * devicePixelRatio,
     };
-    const edgeOp: Record<string, TransformOp> = {
-      free: ctrl ? 'skew' : 'scaleAxis',
-      scale: 'scaleAxis',
-      rotate: 'rotate',
-      skew: 'skew',
-      distort: 'edgeMove',
-      perspective: 'scaleAxis',
-    };
+  }
 
-    for (let i = 0; i < 4; i++) {
-      if (near(qs[i])) return { op: cornerOp[t.mode], index: i, zone: 'corner' };
-    }
-    for (let i = 0; i < 4; i++) {
-      const mid = {
-        x: (qs[i].x + qs[(i + 1) % 4].x) / 2,
-        y: (qs[i].y + qs[(i + 1) % 4].y) / 2,
-      };
-      if (near(mid)) return { op: edgeOp[t.mode], index: i, zone: 'edge' };
-    }
-    if (pointInQuad(screen, qs)) return { op: 'move', index: 0, zone: 'inside' };
-    return { op: 'rotate', index: 0, zone: 'outside' };
+  /** resolveTransformIntent with this view's tool state and screen mapping. */
+  function resolveIntent(tr: TransformState, screen: Point, ctrl: boolean) {
+    const s = useStore.getState();
+    return resolveTransformIntent(
+      tr,
+      screen,
+      ctrl,
+      (s.overrideTool ?? s.tool) === 'move',
+      screenSpace(),
+    );
   }
 
   /**
@@ -747,25 +349,9 @@ export function CanvasView() {
     let tr = s.transform;
     const effTool = s.overrideTool ?? s.tool;
     if (!tr && effTool === 'move' && s.moveShowTransform && s.selectionPaths) {
-      let minX = Infinity;
-      let minY = Infinity;
-      let maxX = -Infinity;
-      let maxY = -Infinity;
-      for (const path of s.selectionPaths) {
-        for (const p of path) {
-          if (p.x < minX) minX = p.x;
-          if (p.x > maxX) maxX = p.x;
-          if (p.y < minY) minY = p.y;
-          if (p.y > maxY) maxY = p.y;
-        }
-      }
-      if (!Number.isFinite(minX)) return null;
-      const rect = {
-        x: minX,
-        y: minY,
-        w: Math.max(maxX - minX, 1),
-        h: Math.max(maxY - minY, 1),
-      };
+      const b = pathsBounds(s.selectionPaths);
+      if (!b) return null;
+      const rect = { x: b.x, y: b.y, w: Math.max(b.w, 1), h: Math.max(b.h, 1) };
       tr = {
         target: 'layer',
         mode: 'free',
@@ -778,12 +364,9 @@ export function CanvasView() {
       };
     }
     if (!tr) return null;
-    const h = resolveTransformIntent(tr, screen, ctrl);
+    const h = resolveIntent(tr, screen, ctrl);
     const qs = tr.quad.map(docToScreen);
-    const center = {
-      x: (qs[0].x + qs[1].x + qs[2].x + qs[3].x) / 4,
-      y: (qs[0].y + qs[1].y + qs[2].y + qs[3].y) / 4,
-    };
+    const center = quadCenter(qs);
     const mid = (i: number) => ({
       x: (qs[i].x + qs[(i + 1) % 4].x) / 2,
       y: (qs[i].y + qs[(i + 1) % 4].y) / 2,
@@ -856,175 +439,6 @@ export function CanvasView() {
   }
 
   /**
-   * Resolves what a pointer at `screen` does to the transform box. Shared by
-   * the pointer-down handler and the hover cursor so the interaction regions
-   * cannot diverge. With the move tool, the zones are the same whether or
-   * not the float is engaged: handles transform, a band just outside the
-   * outline rotates (both engage the transform), and everywhere else —
-   * inside or far outside — moves. Other tools (an explicit Free Transform)
-   * rotate anywhere outside, like Photoshop's Ctrl+T.
-   */
-  function resolveTransformIntent(
-    tr: TransformState,
-    screen: Point,
-    ctrl: boolean,
-  ): { op: TransformOp; index: number; engages: boolean } {
-    const h = transformHandleAt(tr, screen, ctrl);
-    const s = useStore.getState();
-    if ((s.overrideTool ?? s.tool) !== 'move') {
-      return { op: h.op, index: h.index, engages: false };
-    }
-    if (!tr.showHandles && !tr.engaged) return { op: 'move', index: 0, engages: false };
-    if (h.zone === 'inside') return { op: 'move', index: 0, engages: false };
-    if (h.zone === 'outside') {
-      const inBand =
-        distToQuadEdges(tr.quad.map(docToScreen), screen) <=
-        ROTATE_BAND * devicePixelRatio;
-      return inBand
-        ? { op: 'rotate', index: 0, engages: true }
-        : { op: 'move', index: 0, engages: false };
-    }
-    return { op: h.op, index: h.index, engages: true };
-  }
-
-  /** Builds the drag record for a transform-box interaction. */
-  function makeTransformDrag(
-    tr: TransformState,
-    op: TransformOp,
-    index: number,
-    doc: Point,
-  ): Extract<Drag, { kind: 'transform' }> {
-    const Rc = rectCorners(tr.rect);
-    const M = homographyFromQuads(Rc, tr.quad);
-    const Minv = homographyFromQuads(tr.quad, Rc);
-    const q = tr.quad;
-    return {
-      kind: 'transform',
-      op,
-      index,
-      startDoc: doc,
-      startQuad: q.map((pt) => ({ ...pt })),
-      M,
-      Minv,
-      rStart: Minv ? apply(Minv, doc) : doc,
-      center: {
-        x: (q[0].x + q[1].x + q[2].x + q[3].x) / 4,
-        y: (q[0].y + q[1].y + q[2].y + q[3].y) / 4,
-      },
-    };
-  }
-
-  /** Applies a transform-handle drag, returning the new quad (or null). */
-  function computeTransformQuad(
-    drag: Extract<Drag, { kind: 'transform' }>,
-    rect: TransformState['rect'],
-    p: Point,
-    shift: boolean,
-    alt: boolean,
-  ): Point[] | null {
-    const { op, index: k, startDoc, startQuad, M, Minv, rStart, center } = drag;
-    const Rc = rectCorners(rect);
-    const rCenter = { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
-    const mapR = (pts: Point[]) => (M ? pts.map((q) => apply(M, q)) : null);
-
-    switch (op) {
-      case 'move': {
-        let dx = p.x - startDoc.x;
-        let dy = p.y - startDoc.y;
-        if (shift) [dx, dy] = constrain45(dx, dy);
-        // whole-pixel steps keep translated content crisp
-        dx = Math.round(dx);
-        dy = Math.round(dy);
-        return startQuad.map((q) => ({ x: q.x + dx, y: q.y + dy }));
-      }
-      case 'rotate': {
-        let dth =
-          Math.atan2(p.y - center.y, p.x - center.x) -
-          Math.atan2(startDoc.y - center.y, startDoc.x - center.x);
-        if (shift) dth = Math.round(dth / (Math.PI / 12)) * (Math.PI / 12);
-        const m = rotationAbout(dth, center.x, center.y);
-        return startQuad.map((q) => apply(m, q));
-      }
-      case 'scale': {
-        if (!Minv) return null;
-        const r = apply(Minv, p);
-        const ck = Rc[k];
-        const a = alt ? rCenter : Rc[(k + 2) % 4];
-        let sx = Math.abs(ck.x - a.x) < 1e-6 ? 1 : (r.x - a.x) / (ck.x - a.x);
-        let sy = Math.abs(ck.y - a.y) < 1e-6 ? 1 : (r.y - a.y) / (ck.y - a.y);
-        if (shift) sx = sy = Math.abs(sx) > Math.abs(sy) ? sx : sy;
-        return mapR(
-          Rc.map((c) => ({ x: a.x + (c.x - a.x) * sx, y: a.y + (c.y - a.y) * sy })),
-        );
-      }
-      case 'scaleAxis': {
-        if (!Minv) return null;
-        const r = apply(Minv, p);
-        const mids = Rc.map((c, i) => ({
-          x: (c.x + Rc[(i + 1) % 4].x) / 2,
-          y: (c.y + Rc[(i + 1) % 4].y) / 2,
-        }));
-        const mk = mids[k];
-        const a = alt ? rCenter : mids[(k + 2) % 4];
-        let sx = 1;
-        let sy = 1;
-        if (k === 0 || k === 2) {
-          sy = Math.abs(mk.y - a.y) < 1e-6 ? 1 : (r.y - a.y) / (mk.y - a.y);
-          if (shift) sx = sy;
-        } else {
-          sx = Math.abs(mk.x - a.x) < 1e-6 ? 1 : (r.x - a.x) / (mk.x - a.x);
-          if (shift) sy = sx;
-        }
-        return mapR(
-          Rc.map((c) => ({ x: a.x + (c.x - a.x) * sx, y: a.y + (c.y - a.y) * sy })),
-        );
-      }
-      case 'skew': {
-        if (!Minv) return null;
-        const r = apply(Minv, p);
-        const d = { x: r.x - rStart.x, y: r.y - rStart.y };
-        const nr = Rc.map((c) => ({ ...c }));
-        if (k === 0 || k === 2) {
-          const [i, j] = k === 0 ? [0, 1] : [2, 3];
-          nr[i].x += d.x;
-          nr[j].x += d.x;
-        } else {
-          const [i, j] = k === 1 ? [1, 2] : [3, 0];
-          nr[i].y += d.y;
-          nr[j].y += d.y;
-        }
-        return mapR(nr);
-      }
-      case 'distort': {
-        const quad = startQuad.map((q) => ({ ...q }));
-        quad[k] = { ...p };
-        return quad;
-      }
-      case 'edgeMove': {
-        const dx = p.x - startDoc.x;
-        const dy = p.y - startDoc.y;
-        const quad = startQuad.map((q) => ({ ...q }));
-        quad[k] = { x: quad[k].x + dx, y: quad[k].y + dy };
-        const j = (k + 1) % 4;
-        quad[j] = { x: quad[j].x + dx, y: quad[j].y + dy };
-        return quad;
-      }
-      case 'perspective': {
-        if (!Minv) return null;
-        const r = apply(Minv, p);
-        const d = { x: r.x - rStart.x, y: r.y - rStart.y };
-        const px = [1, 0, 3, 2][k]; // partner across the vertical axis
-        const py = [3, 2, 1, 0][k]; // partner across the horizontal axis
-        const nr = Rc.map((c) => ({ ...c }));
-        nr[k] = { x: nr[k].x + d.x, y: nr[k].y + d.y };
-        nr[px] = { ...nr[px], x: nr[px].x - d.x };
-        nr[py] = { ...nr[py], y: nr[py].y - d.y };
-        return mapR(nr);
-      }
-    }
-  }
-
-  /**
    * Eyedropper sample: sets the foreground color, or the background color on
    * Alt+click. The temporary (Alt-held) eyedropper always samples the
    * foreground, since Alt is what invoked it — matching Photoshop.
@@ -1086,7 +500,10 @@ export function CanvasView() {
             if (dx !== 0 || dy !== 0) transformQuadBy(translation(dx, dy));
             const tr = useStore.getState().transform;
             if (!drag.done && dragRef.current === drag && tr) {
-              dragRef.current = makeTransformDrag(tr, 'move', 0, drag.last);
+              dragRef.current = {
+                kind: 'transform',
+                ...makeTransformDrag(tr, 'move', 0, drag.last),
+              };
             } else if (dragRef.current === drag) {
               dragRef.current = null;
             }
@@ -1097,10 +514,13 @@ export function CanvasView() {
       }
       const tr = useStore.getState().transform;
       if (!tr) return;
-      const intent = resolveTransformIntent(tr, screen, e.ctrlKey || e.metaKey);
+      const intent = resolveIntent(tr, screen, e.ctrlKey || e.metaKey);
       // handle grabs and band rotations escalate the float into a full transform
       if (intent.engages && !tr.engaged) s.patchTransform({ engaged: true });
-      dragRef.current = makeTransformDrag(tr, intent.op, intent.index, doc);
+      dragRef.current = {
+        kind: 'transform',
+        ...makeTransformDrag(tr, intent.op, intent.index, doc),
+      };
       return;
     }
 
@@ -1332,196 +752,18 @@ export function CanvasView() {
   // overlay: marching ants, previews, brush cursor
   // -------------------------------------------------------------------------
 
-  function drawOverlay() {
-    const overlay = overlayRef.current;
-    const wrap = wrapRef.current;
-    if (!overlay || !wrap) return;
-    const w = Math.max(1, Math.floor(wrap.clientWidth * devicePixelRatio));
-    const h = Math.max(1, Math.floor(wrap.clientHeight * devicePixelRatio));
-    if (overlay.width !== w) overlay.width = w;
-    if (overlay.height !== h) overlay.height = h;
-    const ctx = overlay.getContext('2d')!;
-    ctx.clearRect(0, 0, w, h);
-    const dpr = devicePixelRatio;
-    const s = useStore.getState();
-
-    const tracePath = (pts: Point[], close: boolean) => {
-      ctx.beginPath();
-      const p0 = docToScreen(pts[0]);
-      ctx.moveTo(p0.x, p0.y);
-      for (let i = 1; i < pts.length; i++) {
-        const p = docToScreen(pts[i]);
-        ctx.lineTo(p.x, p.y);
-      }
-      if (close) ctx.closePath();
-    };
-
-    const ants = (paths: Point[][], close: boolean, animate: boolean) => {
-      const dash = 5 * dpr;
-      const offset = animate ? -((performance.now() / 40) % (dash * 2)) : 0;
-      ctx.lineWidth = Math.max(1, dpr);
-      for (const pts of paths) {
-        if (pts.length < 2) continue;
-        tracePath(pts, close);
-        ctx.setLineDash([dash, dash]);
-        ctx.lineDashOffset = offset;
-        ctx.strokeStyle = '#000';
-        ctx.stroke();
-        ctx.lineDashOffset = offset + dash;
-        ctx.strokeStyle = '#fff';
-        ctx.stroke();
-      }
-      ctx.setLineDash([]);
-    };
-
-    // committed selection (mapped through an in-progress transform);
-    // hidden while Extras is off (View > Extras, Ctrl+H)
-    if (s.selectionPaths && s.showExtras) {
-      let paths = s.selectionPaths;
-      if (s.transform) {
-        const H = homographyFromQuads(
-          rectCorners(s.transform.rect),
-          s.transform.quad,
-        );
-        if (H) paths = paths.map((path) => path.map((pt) => apply(H, pt)));
-      }
-      ants(paths, true, true);
-    }
-
-    // in-progress previews
+  /** Feeds this view's interaction state to the shared overlay painter. */
+  function paintOverlay() {
     const drag = dragRef.current;
-    if (drag?.kind === 'marquee') {
-      const { start, end } = drag;
-      ants(
-        [
-          [
-            { x: start.x, y: start.y },
-            { x: end.x, y: start.y },
-            { x: end.x, y: end.y },
-            { x: start.x, y: end.y },
-          ],
-        ],
-        true,
-        false,
-      );
-    } else if (drag?.kind === 'lasso') {
-      ants([drag.points], false, false);
-    }
-    if (polyRef.current) {
-      const pts = polyPreviewRef.current
-        ? [...polyRef.current, polyPreviewRef.current]
-        : polyRef.current;
-      ants([pts], false, false);
-      // highlight the closing point
-      const p0 = docToScreen(polyRef.current[0]);
-      ctx.beginPath();
-      ctx.arc(p0.x, p0.y, 4 * dpr, 0, Math.PI * 2);
-      ctx.strokeStyle = '#fff';
-      ctx.stroke();
-    }
-
-    // transform box + handles
-    const drawBox = (qs: Point[]) => {
-      ctx.beginPath();
-      ctx.moveTo(qs[0].x, qs[0].y);
-      for (let i = 1; i < 4; i++) ctx.lineTo(qs[i].x, qs[i].y);
-      ctx.closePath();
-      ctx.lineWidth = Math.max(1, dpr);
-      ctx.strokeStyle = '#3d8bff';
-      ctx.stroke();
-      const handles = [...qs];
-      for (let i = 0; i < 4; i++) {
-        handles.push({
-          x: (qs[i].x + qs[(i + 1) % 4].x) / 2,
-          y: (qs[i].y + qs[(i + 1) % 4].y) / 2,
-        });
-      }
-      const hs = 3.5 * dpr;
-      for (const p of handles) {
-        ctx.fillStyle = '#fff';
-        ctx.strokeStyle = '#3d8bff';
-        ctx.fillRect(p.x - hs, p.y - hs, hs * 2, hs * 2);
-        ctx.strokeRect(p.x - hs, p.y - hs, hs * 2, hs * 2);
-      }
-    };
-    if (s.transform) {
-      if (s.transform.showHandles) drawBox(s.transform.quad.map(docToScreen));
-    } else if (s.tool === 'move' && s.moveShowTransform && s.selectionPaths) {
-      // idle transform controls around the selection, like Photoshop's
-      // "Show Transform Controls" (dragging a handle opens the float)
-      let minX = Infinity;
-      let minY = Infinity;
-      let maxX = -Infinity;
-      let maxY = -Infinity;
-      for (const path of s.selectionPaths) {
-        for (const p of path) {
-          if (p.x < minX) minX = p.x;
-          if (p.x > maxX) maxX = p.x;
-          if (p.y < minY) minY = p.y;
-          if (p.y > maxY) maxY = p.y;
-        }
-      }
-      if (Number.isFinite(minX)) {
-        drawBox(
-          rectCorners({ x: minX, y: minY, w: maxX - minX, h: maxY - minY }).map(
-            docToScreen,
-          ),
-        );
-      }
-    }
-
-    // brush cursor: an outline of the basic shape of the mark. Sampled and
-    // non-round tips use the traced tip contour; round tips an ellipse. The
-    // transform mirrors the stamp shader: scale y by roundness, mirror for
-    // flips (the shader flips uv, so the mark mirrors), rotate by the static
-    // tip angle (negated to Photoshop's CCW-positive convention).
-    const cur = cursorRef.current;
-    const t = s.overrideTool ?? s.tool;
-    if (cur.over && (t === 'brush' || t === 'eraser')) {
-      const tip = (t === 'eraser' ? s.eraser : s.brush).tip;
-      const r = Math.max((tip.size / 2) * s.view.zoom, 1);
-      const roundness = Math.max(tip.roundness, 0.01);
-      const angle = (-tip.angle / 180) * Math.PI;
-      const ca = Math.cos(angle);
-      const sa = Math.sin(angle);
-      const loops = tip.shape === 'round' ? [] : tipOutline(tip.shape);
-
-      ctx.beginPath();
-      if (loops.length > 0) {
-        const fx = tip.flipX ? -1 : 1;
-        const fy = tip.flipY ? -1 : 1;
-        for (const loop of loops) {
-          for (let i = 0; i < loop.length; i++) {
-            const lx = loop[i].x * fx * r;
-            const ly = loop[i].y * fy * r * roundness;
-            const x = cur.x + lx * ca - ly * sa;
-            const y = cur.y + lx * sa + ly * ca;
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-          }
-          ctx.closePath();
-        }
-      } else {
-        ctx.ellipse(cur.x, cur.y, r, Math.max(r * roundness, 1), angle, 0, Math.PI * 2);
-      }
-      ctx.lineJoin = 'round';
-      ctx.lineWidth = Math.max(1, dpr) * 2.4;
-      ctx.strokeStyle = 'rgba(0,0,0,0.65)';
-      ctx.stroke();
-      ctx.lineWidth = Math.max(1, dpr);
-      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-      ctx.stroke();
-      if (r < 4) {
-        // crosshair for tiny brushes
-        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-        ctx.beginPath();
-        ctx.moveTo(cur.x - 6 * dpr, cur.y);
-        ctx.lineTo(cur.x + 6 * dpr, cur.y);
-        ctx.moveTo(cur.x, cur.y - 6 * dpr);
-        ctx.lineTo(cur.x, cur.y + 6 * dpr);
-        ctx.stroke();
-      }
-    }
+    drawOverlay({
+      overlay: overlayRef.current,
+      wrap: wrapRef.current,
+      docToScreen,
+      shape: drag?.kind === 'marquee' || drag?.kind === 'lasso' ? drag : null,
+      poly: polyRef.current,
+      polyPreview: polyPreviewRef.current,
+      cursor: cursorRef.current,
+    });
   }
 
   /** Base cursor for the effective tool; Alt flips the zoom cursor to −. */

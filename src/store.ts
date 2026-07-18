@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { BlendMode, HSV, LayerMeta, Point, ToolId, Viewport } from './types';
+import type { HSV, LayerMeta, Point, ToolId, Viewport } from './types';
 import { makeLayerMeta } from './types';
 import type { BrushSettings } from './brush/types';
 import type { SelectionOp } from './gpu/selection';
@@ -154,12 +154,9 @@ export interface AppState {
   removeLayerMeta: (id: string) => void;
   patchLayer: (id: string, patch: Partial<LayerMeta>) => void;
   requestRename: () => void;
-  /** Reorders layers to match `ids` (bottom -> top). Must be a permutation. */
-  setLayerOrder: (ids: string[]) => void;
-  /** Replaces the whole layer stack (new document / flatten). */
+  /** Replaces the whole layer stack (new document / flatten / restructure). */
   setLayers: (layers: LayerMeta[], activeId: string) => void;
   setActiveLayer: (id: string) => void;
-  setLayerBlendMode: (id: string, mode: BlendMode) => void;
 
   setView: (v: Viewport) => void;
   setSelectionPaths: (paths: Point[][] | null) => void;
@@ -290,20 +287,9 @@ export const useStore = create<AppState>((set) => ({
       layers: s.layers.map((l) => (l.id === id ? { ...l, ...patch } : l)),
     })),
 
-  setLayerOrder: (ids) =>
-    set((s) => {
-      const byId = new Map(s.layers.map((l) => [l.id, l]));
-      if (ids.length !== s.layers.length || ids.some((id) => !byId.has(id))) return {};
-      return { layers: ids.map((id) => byId.get(id)!) };
-    }),
-
   setLayers: (layers, activeLayerId) => set({ layers, activeLayerId }),
 
   setActiveLayer: (activeLayerId) => set({ activeLayerId }),
-  setLayerBlendMode: (id, blendMode) =>
-    set((s) => ({
-      layers: s.layers.map((l) => (l.id === id ? { ...l, blendMode } : l)),
-    })),
 
   setView: (view) => set({ view }),
   setSelectionPaths: (selectionPaths) => set({ selectionPaths }),

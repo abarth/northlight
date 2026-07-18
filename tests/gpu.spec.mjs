@@ -548,6 +548,34 @@ const TEST = `
     eng.setSelectionMask(null);
   }
 
+  // ---- 15b. Lock Transparent Pixels confines strokes to existing alpha ----
+  {
+    eng.ensureLayer('lk');
+    // an opaque red disk on an otherwise transparent layer
+    eng.beginStroke(sp({ hardness: 1 }));
+    eng.drawStamps(stamps(rec(120, 150, 40, 1, { color: [1, 0, 0] })), 1);
+    eng.endStroke('lk');
+    // paint green across the disk boundary with the alpha lock on
+    eng.beginStroke(sp({ hardness: 1, lockTransparent: true }));
+    eng.drawStamps(stamps(rec(160, 150, 40, 1, { color: [0, 1, 0] })), 1);
+    eng.endStroke('lk');
+    const st = { layers: [meta('lk')], activeLayerId: 'lk', view };
+    let d = await eng.readComposite(st);
+    assert('alpha lock: overlap recolored, still opaque',
+      px(d, 140, 150)[1] >= 250 && px(d, 140, 150)[3] === 255,
+      px(d, 140, 150).join());
+    assert('alpha lock: no paint lands on transparent pixels',
+      px(d, 190, 150)[3] === 0, 'a=' + px(d, 190, 150)[3]);
+    // the eraser cannot remove locked alpha either
+    eng.beginStroke(sp({ mode: 'erase', lockTransparent: true }));
+    eng.drawStamps(stamps(rec(120, 150, 30, 1)), 1);
+    eng.endStroke('lk');
+    d = await eng.readComposite(st);
+    assert('alpha lock: eraser is a no-op', px(d, 120, 150)[3] === 255,
+      'a=' + px(d, 120, 150)[3]);
+    eng.deleteLayer('lk');
+  }
+
   // ---- 16. layer blend modes (gray 0.5 backdrop, red source) ----
   {
     eng.fillLayer('bg', [0.5, 0.5, 0.5, 1]);
@@ -1620,6 +1648,187 @@ const layerRes = await page.evaluate(async () => {
 });
 for (const [name, ok] of Object.entries(layerRes)) {
   kbAssert(`layer system: ${name}`, ok === true, JSON.stringify(layerRes));
+}
+
+// ---- layer tree structure: rows, drag-drop moves, arrange, groups ----
+const structRes = await page.evaluate(async () => {
+  const NL = window.__northlight;
+  const store = NL.store;
+  const ops = NL.layerOps;
+  const util = NL.layersUtil;
+  const eng = NL.engine();
+  const s = () => store.getState();
+  const out = {};
+  const order = () => s().layers.map((l) => l.id).join();
+
+  // clean slate: background only, then background, A, B, group G(C)
+  for (const l of s().layers.filter((x) => x.id !== 'background')) {
+    ops.deleteLayer(l.id);
+  }
+  s().setActiveLayer('background');
+  ops.addLayer(); const A = s().activeLayerId;
+  ops.addLayer(); const B = s().activeLayerId;
+  ops.addLayer(); const C = s().activeLayerId;
+  ops.groupActiveLayer(); const G = s().activeLayerId;
+  out.initialOrder = order() === ['background', A, B, C, G].join();
+
+  // panel rows are top-first, the group header before its children
+  let rows = util.displayRows(s().layers).map((r) => r.meta.id).join();
+  out.rowsTopFirst = rows === [G, C, B, A, 'background'].join();
+
+  // collapsing a group hides its children from the rows
+  s().patchLayer(G, { collapsed: true });
+  rows = util.displayRows(s().layers).map((r) => r.meta.id).join();
+  out.collapseHides = rows === [G, B, A, 'background'].join();
+  s().patchLayer(G, { collapsed: false });
+
+  // drag-drop: dropping A into G makes it the group's topmost child
+  let moved = util.moveSubtree(s().layers, A, G, 'into');
+  out.moveInto =
+    moved !== null &&
+    moved.find((l) => l.id === A).parentId === G &&
+    moved.map((l) => l.id).join() === ['background', B, C, A, G].join();
+
+  // dropping a group into its own descendant is rejected
+  out.moveIllegal = util.moveSubtree(s().layers, G, C, 'into') === null;
+
+  // dropping B below the background lands it at the bottom of the stack
+  moved = util.moveSubtree(s().layers, B, 'background', 'below');
+  out.moveBelow = moved !== null && moved[0].id === B;
+
+  // arrange walks the whole subtree among its siblings
+  s().setActiveLayer(G);
+  ops.arrangeActiveLayer('back');
+  out.arrangeBack = order() === [C, G, 'background', A, B].join();
+  ops.arrangeActiveLayer('forward');
+  out.arrangeForward = order() === ['background', C, G, A, B].join();
+  ops.arrangeActiveLayer('front');
+  out.arrangeFront = order() === ['background', A, B, C, G].join();
+
+  // nested group opacity multiplies down to the pixel layers
+  s().setActiveLayer(G);
+  ops.groupActiveLayer();
+  const G2 = s().activeLayerId;
+  s().patchLayer(G, { opacity: 0.5 });
+  s().patchLayer(G2, { opacity: 0.5 });
+  const resolved = util.resolveRenderLayers(s().layers);
+  out.nestedOpacity =
+    Math.abs(resolved.find((l) => l.id === C).opacity - 0.25) < 1e-6;
+  s().setActiveLayer(G2);
+  ops.ungroupActiveLayer();
+  s().patchLayer(G, { opacity: 1 });
+
+  // a new layer created with a group active goes inside the group
+  ops.addGroup();
+  const NG = s().activeLayerId;
+  ops.addLayer();
+  const inner = s().activeLayerId;
+  out.newLayerIntoGroup = s().layers.find((l) => l.id === inner).parentId === NG;
+  ops.deleteLayer(NG); // takes `inner` with it
+  out.groupDeleteTakesChildren = !s().layers.some((l) => l.id === inner);
+
+  // duplicating a group duplicates its children under fresh ids
+  s().setActiveLayer(G);
+  const before = s().layers.length;
+  ops.duplicateActiveLayer();
+  const dupG = s().activeLayerId;
+  const dupKids = s().layers.filter((l) => l.parentId === dupG);
+  out.duplicateGroup =
+    s().layers.length === before + 2 &&
+    dupG !== G &&
+    dupKids.length === 1 &&
+    dupKids[0].id !== C;
+  ops.deleteLayer(dupG);
+
+  // hidden layers delete in one sweep
+  ops.addLayer();
+  const H = s().activeLayerId;
+  s().patchLayer(H, { visible: false });
+  ops.deleteHiddenLayers();
+  out.deleteHidden = !s().layers.some((l) => l.id === H);
+
+  // merge group bakes to a single layer with the group's name and slot
+  const gName = s().layers.find((l) => l.id === G).name;
+  eng.fillRegion(C, [1, 0, 0]);
+  s().setActiveLayer(G);
+  await ops.mergeGroup();
+  const mergedId = s().activeLayerId;
+  const merged = s().layers.find((l) => l.id === mergedId);
+  const mergedColor = await eng.sampleColor(10, 10, 1, { layerId: mergedId });
+  out.mergeGroup =
+    !!merged &&
+    merged.kind === 'layer' &&
+    merged.name === gName &&
+    merged.parentId === null &&
+    !s().layers.some((l) => l.id === G || l.id === C) &&
+    !!mergedColor && mergedColor.r > 0.9 && mergedColor.g < 0.1;
+
+  // "Layer 7" numbering continues one past the highest
+  out.nextName = util.nextName([{ name: 'Layer 7' }], 'Layer') === 'Layer 8';
+
+  return out;
+});
+for (const [name, ok] of Object.entries(structRes)) {
+  kbAssert(`layer tree: ${name}`, ok === true, JSON.stringify(structRes));
+}
+
+// ---- transform interaction math (pure) ----
+const tmRes = await page.evaluate(() => {
+  const TM = window.__northlight.transformMath;
+  const out = {};
+  const rect = { x: 0, y: 0, w: 100, h: 50 };
+  const tr = {
+    target: 'layer', mode: 'free', layerId: 'x', rect,
+    quad: TM.rectCorners(rect), duplicate: false, showHandles: true, engaged: true,
+  };
+
+  // Shift-move constrains to the dominant axis and rounds to whole pixels
+  let drag = TM.makeTransformDrag(tr, 'move', 0, { x: 0, y: 0 });
+  let q = TM.computeTransformQuad(drag, rect, { x: 40, y: 3 }, true, false);
+  out.moveConstrained = q[0].x === 40 && q[0].y === 0;
+
+  // Shift corner-scale is uniform (dominant factor wins)
+  drag = TM.makeTransformDrag(tr, 'scale', 2, { x: 100, y: 50 }); // BR corner
+  q = TM.computeTransformQuad(drag, rect, { x: 200, y: 60 }, true, false);
+  out.scaleUniform =
+    Math.abs(q[2].x - 200) < 1e-6 && Math.abs(q[2].y - 100) < 1e-6;
+
+  // Alt scales about the rect center
+  drag = TM.makeTransformDrag(tr, 'scale', 2, { x: 100, y: 50 });
+  q = TM.computeTransformQuad(drag, rect, { x: 150, y: 75 }, false, true);
+  out.scaleAboutCenter =
+    Math.abs(q[0].x + 50) < 1e-6 && Math.abs(q[0].y + 25) < 1e-6;
+
+  // Shift-rotate snaps to 15-degree increments (50deg drag -> 45deg)
+  drag = TM.makeTransformDrag(tr, 'rotate', 0, { x: 100, y: 25 });
+  const c = { x: 50, y: 25 };
+  const ang = (50 * Math.PI) / 180;
+  q = TM.computeTransformQuad(
+    drag, rect,
+    { x: c.x + Math.cos(ang) * 60, y: c.y + Math.sin(ang) * 60 },
+    true, false,
+  );
+  const rot = (pt, th) => ({
+    x: c.x + (pt.x - c.x) * Math.cos(th) - (pt.y - c.y) * Math.sin(th),
+    y: c.y + (pt.x - c.x) * Math.sin(th) + (pt.y - c.y) * Math.cos(th),
+  });
+  const want = rot({ x: 100, y: 0 }, Math.PI / 4);
+  out.rotateSnaps = Math.hypot(q[1].x - want.x, q[1].y - want.y) < 1e-6;
+
+  // hit testing resolves corners vs inside through the screen mapping
+  const space = { docToScreen: (pt) => pt, tolerance: 8, rotateBand: 22 };
+  const h = TM.transformHandleAt(tr, { x: 99, y: 49 }, false, space);
+  out.handleCorner = h.zone === 'corner' && h.op === 'scale' && h.index === 2;
+  out.handleInside =
+    TM.transformHandleAt(tr, { x: 50, y: 25 }, false, space).zone === 'inside';
+  // Ctrl turns the corner into a distort handle in free mode
+  out.handleCtrlDistort =
+    TM.transformHandleAt(tr, { x: 99, y: 49 }, true, space).op === 'distort';
+
+  return out;
+});
+for (const [name, ok] of Object.entries(tmRes)) {
+  kbAssert(`transform math: ${name}`, ok === true, JSON.stringify(tmRes));
 }
 
 console.log(kb.join('\n'));

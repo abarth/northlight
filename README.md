@@ -292,10 +292,32 @@ src/
                   direction tracking, airbrush build-up
     selection.ts  polygon -> anti-aliased coverage mask
   color/convert.ts  HSV / RGB / hex / CIE Lab conversions
+  transform/
+    matrix.ts     Mat3 helpers + homography solve
+    quad.ts       shared quad/rect geometry (corners, hit tests, bounds)
+    interaction.ts pure transform-box math: handle hit testing and the
+                  drag -> quad update for every mode — unit-testable
   store.ts        zustand app state (tools, brushes, layers, view, selection)
-  controller.ts   actions that touch both the store and the GPU engine
-  ui/             React components (canvas + overlay, toolbar, options bar,
-                  Color/Brushes/Brush Settings tabs, layers panel)
+  layers.ts       layer-tree helpers: groups as parentId links over a flat
+                  bottom->top array, effective visibility/opacity/locks,
+                  panel rows, drag-drop restructuring (memoized resolve)
+  controller.ts   facade re-exporting src/controller/ (one module per
+                  concern so callers import from a single place)
+  controller/
+    engineHost.ts singleton PaintEngine + render-state resolution
+    selection.ts  coverage-mask selection state + boolean ops
+    transform.ts  free transform / move float / transform selection
+    layerOps.ts   Layer menu: groups, locks, merges, fills, arrange
+    clipboard.ts  internal Cut/Copy/Paste
+    sampling.ts   eyedropper readback
+    view.ts       zoom stops / fit
+    document.ts   New / Image Size / Canvas Size / Rotation / Crop
+    io.ts         Open / Place / Export PNG / ABR import
+    history.ts    undo / redo
+    debug.ts      window.__northlight surface for tests + console
+  ui/             React components (canvas view, overlay painter, keyboard
+                  map hook, toolbar, options bar, Color/Brushes/Brush
+                  Settings tabs, layers panel)
 ```
 
 Strokes render as instanced quads (position, radius, alpha, angle, roundness,
