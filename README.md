@@ -6,8 +6,9 @@
 A Photoshop-style digital painting app built with **TypeScript + React** on a
 **WebGPU** canvas. Every visible pixel is composited on the GPU.
 
-**Try it live: <https://abarth.github.io/northlight/>** (deployed from `main`
-via GitHub Pages).
+**Try it live: <https://abarth.github.io/northlight/>** (deployed from `prod`
+via GitHub Pages once CI passes; day-to-day development happens on `main`, and
+merging `main` into `prod` ships a release).
 
 ```bash
 npm install
