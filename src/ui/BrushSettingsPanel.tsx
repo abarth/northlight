@@ -208,6 +208,14 @@ export function BrushSettingsPanel() {
             onChange={(v) => updateBristle({ softness: v })}
           />
           <PctSlider
+            label="Tip Taper"
+            value={bristle.tipTaper}
+            min={0}
+            max={300}
+            title="Fade length at both ends of each bristle track, in track widths (0 = hard ends)"
+            onChange={(v) => updateBristle({ tipTaper: v })}
+          />
+          <PctSlider
             label="Flow"
             value={bristle.flow}
             min={1}

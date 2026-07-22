@@ -882,6 +882,35 @@ const TEST = `
         'a1=' + out[last + 10] + ' flags=' + out[last + 19]);
     }
 
+    // tip taper symmetry: a straight stroke's start ramp (fade-in by
+    // travel) and end ramp (tail fade-out at lift) are mirror images
+    {
+      const s2 = Object.assign({}, bs, {
+        bristleCount: 1, flex: 0, turnSoftness: 0, opacityJitter: 0,
+        load: 0, breakup: 0,
+        colorJitter: { hue: 0, sat: 0, bri: 0, fgBg: 0 },
+      });
+      const sim = new B.BristleSim(s2, 40,
+        { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 }, rng: B.mulberry32(91) });
+      const out = [];
+      for (let x = 100; x <= 300; x += 10) {
+        sim.update({ x, y: 150, pressure: 1, tiltX: 0, tiltY: 0, twist: 0 }, out);
+      }
+      sim.liftAll(out);
+      const n = out.length / 20;
+      let sym = n > 6;
+      let detail = '';
+      for (let k = 0; k < Math.min(6, n); k++) {
+        const aStart = out[k * 20 + 9]; // a0, ascending from 0
+        const aEnd = out[(n - 1 - k) * 20 + 10]; // a1, descending to 0
+        if (Math.abs(aStart - aEnd) > 1e-6) {
+          sym = false;
+          detail = 'k=' + k + ': ' + aStart + ' vs ' + aEnd;
+        }
+      }
+      assert('bristle: start and end tapers are mirror images', sym, detail);
+    }
+
     // stationary tap: the tuft prints dabs; the smooth contact band means
     // grazing bristles press (and print) partially
     {
@@ -994,9 +1023,9 @@ const TEST = `
       session.up();
       eng.endStroke('bg');
       d = await read();
-      // start sampling past the fade-in taper (~one track width of travel)
+      // sample between the two tip tapers (~one track width at each end)
       let lo = 255, hi = 0;
-      for (let i = 8; i <= 27; i++) {
+      for (let i = 8; i <= 23; i++) {
         const p = arc(i);
         const v = px(d, Math.round(p.x + off.x), Math.round(p.y + off.y))[0];
         lo = Math.min(lo, v); hi = Math.max(hi, v);
@@ -1005,6 +1034,33 @@ const TEST = `
         hi - lo <= 12 && lo > 100 && hi < 200,
         'lo=' + lo + ' hi=' + hi);
       await eng.undo();
+    }
+
+    // flow is the per-pass deposit: a single pass at low flow is much
+    // lighter than at high flow (scrubbing builds either up to the cap)
+    {
+      const flowPass = async (flow) => {
+        const fs = Object.assign({}, solidSettings, { flow });
+        eng.beginStroke(NL.brush.bristleEngineParams(fs, makeBrush({})));
+        const session = new NL.BristleStrokeSession(eng, fs,
+          Object.assign({ sizePx: 40, smoothing: 0, rng: B.mulberry32(81) }, colors));
+        session.down(samp(100, 150, 1));
+        for (let x = 110; x <= 300; x += 10) session.move([samp(x, 150, 1)]);
+        session.up();
+        eng.endStroke('bg');
+        const dd = await read();
+        let sum = 0, cnt = 0;
+        for (let x = 180; x <= 220; x += 5) {
+          for (let y = 146; y <= 154; y += 2) { sum += px(dd, x, y)[0]; cnt++; }
+        }
+        await eng.undo();
+        return sum / cnt;
+      };
+      const light = await flowPass(0.15);
+      const heavy = await flowPass(0.9);
+      assert('bristle GPU: flow sets the per-pass deposit',
+        light - heavy > 80 && light > 130,
+        'light=' + light.toFixed(0) + ' heavy=' + heavy.toFixed(0));
     }
 
     // pressure footprint: a light touch marks a much thinner band than full press

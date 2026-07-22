@@ -65,6 +65,14 @@ export interface BristleBrushSettings {
   coverage: number;
   /** 0..1 — softness of the track edges (0 = crisp) */
   softness: number;
+  /**
+   * 0..3 — fade length at BOTH ends of every track chain, in track widths.
+   * Symmetric by construction: chains fade in from transparent over this
+   * distance and fade back out over the same distance when they end (lift,
+   * bristle release, or a turn too sharp to miter — which is what makes a
+   * scrubbed-back-and-forth mark's edges soft). 0 = hard segment ends.
+   */
+  tipTaper: number;
   /** 0..1 per-segment deposit; tracks build up like flow */
   flow: number;
   /** 0..1 random per-bristle reduction of base opacity */
@@ -108,6 +116,7 @@ export function defaultBristleBrush(): BristleBrushSettings {
     followTwist: true,
     coverage: 0.7,
     softness: 0.25,
+    tipTaper: 1,
     flow: 0.75,
     opacityJitter: 0.35,
     load: 15,
@@ -340,6 +349,13 @@ interface BristleRun {
   chainStartTravel: number;
   /** pen travel at the last touch-down, to tell a tap from a grazing touch */
   touchPenTravel: number;
+  /**
+   * Emitted-but-held-back chain records totalling ~tipTaper of track length.
+   * When the chain ends they are ramped to transparent from the end
+   * backwards, giving the end the same taper the start gets.
+   */
+  tail: { rec: number[]; len: number }[];
+  tailLen: number;
 }
 
 export interface BristleSimOptions {
@@ -369,6 +385,10 @@ export class BristleSim {
   private loadPx: number;
   /** px — breakup wavelength, derived from breakupScale × size */
   private breakupPx: number;
+  /** px — end-fade length (both ends), derived from tipTaper × track width */
+  private taperPx: number;
+  /** per-track alpha that makes the TUFT's single-pass deposit ≈ flow */
+  private flowAlpha: number;
 
   constructor(s: BristleBrushSettings, sizePx: number, opts: BristleSimOptions) {
     this.s = s;
@@ -383,6 +403,17 @@ export class BristleSim {
     );
     this.loadPx = s.load > 0 ? s.load * sizePx : 0;
     this.breakupPx = Math.max(s.breakupScale * sizePx, 1);
+    this.taperPx = Math.max(s.tipTaper * this.trackWidth, 0);
+    // For a moving stroke the 2D bundle collapses to 1D: many bristles share
+    // nearly the same lateral offset, so ~(count × width / band) tracks pile
+    // onto each pixel row. Normalize per-track alpha for that overdraw so a
+    // single pass deposits ≈ flow and low flow genuinely builds up over
+    // repeated passes (Photoshop flow semantics). Scale-invariant: count is
+    // fixed and width/band both scale with size.
+    const band = Math.max((sizePx * (1 + s.thickness)) / 2, 1);
+    const overdraw = Math.max((s.bristleCount * this.trackWidth) / band, 1);
+    const flow = clamp(s.flow, 0.005, 1);
+    this.flowAlpha = 1 - Math.pow(1 - flow, 1 / overdraw);
     const rng = opts.rng ?? Math.random;
     this.bundle = makeBundle(s, rng);
     this.runs = this.bundle.map((b) => ({
@@ -401,6 +432,8 @@ export class BristleSim {
       prevMult: 1,
       chainStartTravel: 0,
       touchPenTravel: 0,
+      tail: [],
+      tailLen: 0,
     }));
   }
 
@@ -545,7 +578,7 @@ export class BristleSim {
       gate = clamp((n - s.breakup) / 0.1, 0, 1);
     }
     const load = this.loadPx > 0 ? Math.max(0, 1 - travel / this.loadPx) : 1;
-    const alpha = s.flow * run.baseAlpha * gate * (0.15 + 0.85 * load) * mult;
+    const alpha = this.flowAlpha * run.baseAlpha * gate * (0.15 + 0.85 * load) * mult;
     // a loaded bristle floods the tooth; a dry one only kisses the peaks
     const depth = this.s.toothDepth * (0.25 + 0.75 * (1 - load));
     return { alpha: clamp(alpha, 0, 1), depth };
@@ -619,9 +652,13 @@ export class BristleSim {
       a0 = 0;
       run.chainStartTravel = travelEnd - len;
     }
-    // fade in from transparent over ~one track width of travel
-    const taper = Math.max(this.trackWidth, 1);
-    const fadeIn = clamp((travelEnd - run.chainStartTravel) / taper, 0, 1);
+    // fade in from transparent over the tip taper (the chain's end gets the
+    // mirror-image ramp from rampTailOut, so both ends taper identically)
+    const fadeIn = clamp(
+      (travelEnd - run.chainStartTravel) / Math.max(this.taperPx, 1e-4),
+      0,
+      1,
+    );
     const end = this.pointParams(run, travelEnd, mult);
     const a1 = end.alpha * fadeIn;
     run.lastA = a1;
@@ -637,10 +674,12 @@ export class BristleSim {
   }
 
   /**
-   * Emits the pending segment. `fadeEnd` ends the chain by ramping its
-   * final segment to transparent; `endLateral` is the miter-scaled bisector
-   * when the chain continues. A zero-length pending (touch that never
-   * moved) prints a dab only for a genuinely stationary tap.
+   * Emits the pending segment into the bristle's tail buffer. `fadeEnd`
+   * ends the chain: the buffered tail is ramped to transparent from the end
+   * backwards over the tip taper — the mirror image of the chain's fade-in.
+   * `endLateral` is the miter-scaled bisector when the chain continues.
+   * A zero-length pending (touch that never moved) prints a dab only for a
+   * genuinely stationary tap.
    */
   private flushPending(
     run: BristleRun,
@@ -649,7 +688,10 @@ export class BristleSim {
     endLateral?: { x: number; y: number },
   ): void {
     const pend = run.pend;
-    if (!pend) return;
+    if (!pend) {
+      if (fadeEnd) this.drainTail(run, out);
+      return;
+    }
     run.pend = null;
 
     const hw = Math.max(this.trackWidth / 2, 0.2);
@@ -667,22 +709,58 @@ export class BristleSim {
           pend.d0, pend.d0, 3,
         );
       }
+      if (fadeEnd) this.drainTail(run, out);
       return;
     }
 
-    const a1 = fadeEnd ? 0 : pend.a1;
-    if (Math.max(pend.a0, a1) <= 0.003) return;
-    const dx = (pend.x1 - pend.x0) / len;
-    const dy = (pend.y1 - pend.y0) / len;
-    const l1x = endLateral ? endLateral.x : -dy;
-    const l1y = endLateral ? endLateral.y : dx;
-    out.push(
-      pend.x0, pend.y0, pend.x1, pend.y1,
-      pend.l0x, pend.l0y, l1x, l1y,
-      hw, pend.a0, a1,
-      c.r, c.g, c.b, c.r, c.g, c.b,
-      pend.d0, pend.d1, 0,
-    );
+    if (Math.max(pend.a0, pend.a1) > 0.003) {
+      const dx = (pend.x1 - pend.x0) / len;
+      const dy = (pend.y1 - pend.y0) / len;
+      const l1x = endLateral ? endLateral.x : -dy;
+      const l1y = endLateral ? endLateral.y : dx;
+      run.tail.push({
+        rec: [
+          pend.x0, pend.y0, pend.x1, pend.y1,
+          pend.l0x, pend.l0y, l1x, l1y,
+          hw, pend.a0, pend.a1,
+          c.r, c.g, c.b, c.r, c.g, c.b,
+          pend.d0, pend.d1, 0,
+        ],
+        len,
+      });
+      run.tailLen += len;
+    }
+
+    if (fadeEnd) {
+      this.rampTailOut(run, out);
+      return;
+    }
+    // keep ~a taper's worth of chain buffered; emit the rest
+    while (run.tail.length > 1 && run.tailLen - run.tail[0].len >= this.taperPx) {
+      const head = run.tail.shift()!;
+      run.tailLen -= head.len;
+      out.push(...head.rec);
+    }
+  }
+
+  /** Ends the chain: ramps the buffered tail to transparent and emits it. */
+  private rampTailOut(run: BristleRun, out: number[]): void {
+    const taper = Math.max(this.taperPx, 1e-4);
+    let cum = 0;
+    for (let i = run.tail.length - 1; i >= 0; i--) {
+      const t = run.tail[i];
+      t.rec[10] *= Math.min(cum / taper, 1); // alpha1 (nearer the end)
+      cum += t.len;
+      t.rec[9] *= Math.min(cum / taper, 1); // alpha0
+    }
+    this.drainTail(run, out);
+  }
+
+  /** Emits the buffered tail unmodified (gap breaks keep their own ramps). */
+  private drainTail(run: BristleRun, out: number[]): void {
+    for (const t of run.tail) out.push(...t.rec);
+    run.tail = [];
+    run.tailLen = 0;
   }
 }
 

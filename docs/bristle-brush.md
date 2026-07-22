@@ -109,6 +109,14 @@ Per-bristle pigment state (the per-stamp jitter idea, moved to bristles):
   plus an optional blend toward the background color, so the tuft carries
   imperfectly mixed paint. The streaks this makes run along the stroke.
 - **Base opacity**: per-bristle jitter; some bristles print harder.
+- **Flow** is the tuft's per-pass deposit, Photoshop-style. For a moving
+  stroke the 2D bundle collapses to 1D — many bristles share nearly the
+  same lateral offset, so several tracks pile onto every pixel row — and
+  naive per-track alpha saturates a single pass even at low flow. The
+  per-track alpha is therefore normalized by the expected overdraw
+  (`1 − (1−flow)^(1/overdraw)`, overdraw ≈ count × width / band), so one
+  pass lays ≈ flow coverage and scrubbing genuinely builds up toward the
+  stroke's opacity cap.
 - **Load**: depletes with track distance. `load` is measured in **brush
   diameters** of travel, so "one brush-load of paint" is the same gesture at
   any size. Segment alpha fades with load, and — see below — dryness also
@@ -170,17 +178,20 @@ as a chain decomposition with **zero double-coverage anywhere**:
   stamps, then perpendicular butt ends — both had per-joint artifacts:
   lens-shaped double deposits, then wedge overlap/gap striation as the
   track curved.)
-- Chain ends **fade, they are not capped**: a chain fades in from
-  transparent over ~one track width of travel, and its final segment ramps
-  to transparent at lift or at a turn too sharp to miter (≳120°, or when
-  the miter would outrun a short segment). Caps were tried first and read
-  as dark full circles: every bristle's protruding half-disc overlapped its
-  neighbors' tracks (cross-bristle double deposit), and bristles grazing
-  in and out of contact at the footprint boundary printed lone dabs
-  mid-stroke. Fading removes the whole artifact class and matches the
-  tapered look the breakup gaps already have. The one remaining disc is
-  deliberate: a genuinely stationary tap (the pen never moved) prints the
-  tuft's footprint as one dab per bristle.
+- Chain ends **fade, they are not capped** — and the fade is symmetric.
+  `tipTaper` (in track widths) sets one length used identically at both
+  ends: chains fade in from transparent over it, and when a chain ends
+  (lift, bristle release, or a turn too sharp to miter, ≳120°) the last
+  taper's worth of segments — held back in a small per-bristle buffer for
+  exactly this purpose — is ramped back to transparent. Scrubbing back and
+  forth therefore leaves soft terminals at the turnarounds instead of a
+  hard edge of full-alpha track ends. `tipTaper: 0` gives hard
+  segment-quantized ends. Caps were tried first and read as dark full
+  circles: every bristle's protruding half-disc overlapped its neighbors'
+  tracks, and bristles grazing in and out of contact printed lone dabs
+  mid-stroke. The one remaining disc is deliberate: a genuinely stationary
+  tap (the pen never moved) prints the tuft's footprint as one dab per
+  bristle.
 - Contact is a **smooth band**, not a hard threshold: a bristle's deposit
   is scaled by how firmly it presses (smoothstep over a small pressure
   margin), so pressure/splay fluctuation recruits and releases boundary

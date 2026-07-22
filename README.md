@@ -127,11 +127,14 @@ design). The brush is a 3D filbert-shaped tuft of up to 256 bristles:
 
 Tracks render through a dedicated instanced pass as exact, overlap-free
 chains: miter-jointed segments share their slanted end edges precisely,
-chain ends fade to transparent (in over ~a track width, out over the
-final segment) rather than getting caps, and alpha/color/tooth depth
-interpolate per-endpoint so nothing steps at the seams — each track is a
-single analytic shape with tapered ends. Contact is a smooth pressure
-band, so boundary bristles fade in and out instead of popping. They land in the same stroke texture and commit
+chain ends fade to transparent symmetrically over the **Tip Taper**
+(both the fade-in and a buffered fade-out use the same length, so scrub
+turnarounds get soft terminals), and alpha/color/tooth depth interpolate
+per-endpoint so nothing steps at the seams — each track is a single
+analytic shape with tapered ends. Contact is a smooth pressure band, so
+boundary bristles fade in and out instead of popping, and per-track
+alpha is overdraw-normalized so **Flow** is the tuft's true per-pass
+deposit. They land in the same stroke texture and commit
 path, so options-bar opacity/blend mode, selections, locks, undo and
 layer compositing all work unchanged. **Flex** makes
 bristle tips trail the pen (rounded turnaround loops, tuft fans through
