@@ -89,6 +89,20 @@ canvas position to its new one and deposits a **track segment** (subdivided
 to ≤ ~6 px so curves stay smooth). A bristle that loses contact simply stops
 mid-canvas — no cap, no stamp; that is where its streak ends.
 
+Two dynamics shape how tracks move through direction changes:
+
+- **Flex** (drag lag): a bristle's tip relaxes toward its geometric target
+  by the distance the pen travelled over the bristle's lag length
+  (`flex × size`, outer bristles trail more). Tips trail the pen slightly
+  during steady motion, and at a reversal they carve rounded turnaround
+  loops and fan through the turn instead of pivoting on a sharp point —
+  the way a real tuft flops over rather than folding instantly.
+- **Turn softening**: deposition is faded by the per-track direction-change
+  rate (quadratic in the turn angle, so gentle curves are untouched). At a
+  reversal the bristles are flipping over and drag with less of their load,
+  which both looks right and hides the double deposit where a retraced
+  path overlaps itself.
+
 Per-bristle pigment state (the per-stamp jitter idea, moved to bristles):
 
 - **Color**: assigned per bristle at load time — hue/sat/brightness jitter
@@ -142,17 +156,21 @@ Aperiodic granular noise keeps both without the grid. The woven `canvas`
 pattern is still selectable, and `toothDepth: 0` removes the surface
 entirely — then all breakup is per-bristle and travels with the stroke.
 
-### Rendering: capsule segments through the stamp pipeline
+### Rendering: a dedicated capsule track pass
 
-Track segments are drawn as stretched analytic round stamps: for a segment
-of length `L` and bristle width `w`, emit one instance with
-`radius = L/2 + w/2`, `roundness = w / (L + w)`, `angle = atan2(dy, dx)`,
-using the existing 11-float instance layout, the existing OVER accumulation
-into the stroke texture, and the existing commit/opacity-cap path. Zero new
-shaders, wet edges and blend modes keep working, and the eraser/stamp brush
-are untouched. A dedicated capsule SDF shader (flat falloff along the
-length, round caps) is an obvious later refinement; at bristle widths of
-1–3 px the ellipse approximation is visually indistinguishable.
+Track segments render through their own instanced pipeline (`TRACK_SHADER`):
+each instance carries the segment endpoints, half-width, alpha, color, tooth
+depth and a cap flag. The fragment shader applies the falloff profile
+**across** the track only — flat along the length, with ~1px anti-aliased
+**butt ends**, so consecutive segments of one bristle tile seamlessly with
+no double deposit at the joints. (The first version approximated segments as
+stretched elliptical stamps; the lengthwise falloff made every segment read
+as a lens and the overlapping soft ends beaded at the joints — visible
+stamping, worse at large sizes where tracks are wide. The capsule pass
+removes that class of artifact structurally.) Touch dabs set the cap flag
+and render as round-capped capsules. Segments still accumulate OVER into the
+same stroke texture with the same commit/opacity-cap path, so selections,
+locks, blend modes and undo are unchanged.
 
 ### Cursor
 
@@ -167,10 +185,10 @@ the mark will be before the pen lands.
 
 - No fluid/impasto simulation, no canvas wetness, no paint mixing on the
   surface. Digital-first: we keep the qualities, not the physics.
-- No bristle spring dynamics (bend/drag inertia). Bristle positions are
-  kinematic from pen state. If marks feel too rigid, a one-pole lag per
-  bristle (bristles trail the pen slightly, more at the edges of the tuft)
-  is the first geometry-pass candidate.
+- Bristle dynamics stop at first-order drag lag (`flex`). There is no
+  spring-back, no inertia, and no interaction between bristles; the lag is
+  distance-based rather than time-based (deliberate: marks depend on the
+  path, not on how fast you drew it).
 - No pigment pickup from the canvas (dragging through wet paint). Would be
   a beautiful phase 3.
 

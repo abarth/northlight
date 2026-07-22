@@ -1,7 +1,6 @@
 import { clamp, hsvToRgb, rgbToHsv, type RGB } from '../color/convert';
 import type { HSV, Point } from '../types';
 import type { PointerSample } from './dynamics';
-import { STAMP_FLOATS } from './dynamics';
 import type { PatternId } from './types';
 
 /**
@@ -40,6 +39,18 @@ export interface BristleBrushSettings {
   splay: number;
   /** 0..1 — how strongly pen tilt shifts/elongates the contact patch */
   tiltResponse: number;
+  /**
+   * 0..1 — bristle flexibility: tips trail the pen (drag lag ∝ flex × size,
+   * outer bristles trail more), so direction changes carve rounded
+   * turnaround loops and the tuft fans through turns instead of pivoting on
+   * a point.
+   */
+  flex: number;
+  /**
+   * 0..1 — lighten deposition where a track changes direction sharply
+   * (bristles flipping over at a reversal drag with less of their load).
+   */
+  turnSoftness: number;
   /** degrees — orientation of the filbert's flat when the pen has no twist */
   baseAngle: number;
   /** rotate the flat with the stylus barrel rotation when available */
@@ -91,6 +102,8 @@ export function defaultBristleBrush(): BristleBrushSettings {
     belly: 0.6,
     splay: 0.35,
     tiltResponse: 0.6,
+    flex: 0.2,
+    turnSoftness: 0.5,
     baseAngle: 0,
     followTwist: true,
     coverage: 0.7,
@@ -281,6 +294,10 @@ interface BristleRun {
   baseAlpha: number;
   /** per-bristle noise seed for the breakup gate */
   seed: number;
+  /** drag-lag length in px (flex × size, outer bristles trail more) */
+  lagPx: number;
+  /** direction of the last emitted move, radians; null after a touch-down */
+  dir: number | null;
 }
 
 export interface BristleSimOptions {
@@ -326,7 +343,7 @@ export class BristleSim {
     this.breakupPx = Math.max(s.breakupScale * sizePx, 1);
     const rng = opts.rng ?? Math.random;
     this.bundle = makeBundle(s, rng);
-    this.runs = this.bundle.map(() => ({
+    this.runs = this.bundle.map((b) => ({
       x: 0,
       y: 0,
       down: false,
@@ -334,6 +351,8 @@ export class BristleSim {
       color: bristleColor(s.colorJitter, opts.fg, opts.bg, rng),
       baseAlpha: 1 - s.opacityJitter * rng(),
       seed: rng() * 1000,
+      lagPx: s.flex * sizePx * (0.25 + 0.75 * b.r),
+      dir: null,
     }));
   }
 
@@ -344,8 +363,15 @@ export class BristleSim {
 
   /** All bristles leave the canvas (pen lift). */
   liftAll(): void {
-    for (const run of this.runs) run.down = false;
+    for (const run of this.runs) {
+      run.down = false;
+      run.dir = null;
+    }
+    this.lastPen = null;
   }
+
+  /** previous raw pen position, for the drag-lag step size */
+  private lastPen: { x: number; y: number } | null = null;
 
   /**
    * Advances the tuft to a new pen sample, appending track-segment records
@@ -356,34 +382,64 @@ export class BristleSim {
     const s = this.s;
     const pose = penPose(s, sample);
     const w = this.trackWidth;
+    const penStep = this.lastPen
+      ? Math.hypot(sample.x - this.lastPen.x, sample.y - this.lastPen.y)
+      : 0;
+    this.lastPen = { x: sample.x, y: sample.y };
 
     for (let i = 0; i < this.bundle.length; i++) {
       const b = this.bundle[i];
       const run = this.runs[i];
       if (!bristleTouches(s, b, pose)) {
         run.down = false;
+        run.dir = null;
         continue;
       }
       const off = bristleOffset(s, b, pose, this.sizePx);
-      const nx = sample.x + off.x;
-      const ny = sample.y + off.y;
+      const tx = sample.x + off.x;
+      const ty = sample.y + off.y;
 
       if (!run.down) {
         run.down = true;
-        run.x = nx;
-        run.y = ny;
-        this.emitSegment(run, nx, ny, nx, ny, pose, w, out);
+        run.x = tx;
+        run.y = ty;
+        this.emitSegment(run, tx, ty, tx, ty, pose, w, 1, 1, out);
         continue;
       }
 
+      // Drag lag: the tip relaxes toward its target by the distance the pen
+      // travelled, over the bristle's lag length — so tips trail the pen and
+      // a reversal carves a rounded turnaround loop instead of a sharp point.
+      let nx = tx;
+      let ny = ty;
+      if (run.lagPx > 0.01) {
+        const k = 1 - Math.exp(-penStep / run.lagPx);
+        nx = run.x + (tx - run.x) * k;
+        ny = run.y + (ty - run.y) * k;
+      }
+
       const dist = Math.hypot(nx - run.x, ny - run.y);
+      if (dist < 1e-6) continue;
+
+      // Turn softening: bristles flipping through a sharp direction change
+      // deposit less of their load.
+      const newDir = Math.atan2(ny - run.y, nx - run.x);
+      let fade = 1;
+      if (s.turnSoftness > 0 && run.dir !== null) {
+        let dTheta = Math.abs(newDir - run.dir);
+        if (dTheta > Math.PI) dTheta = Math.PI * 2 - dTheta;
+        const t = clamp(dTheta / (Math.PI * 0.75), 0, 1);
+        fade = 1 - s.turnSoftness * t * t;
+      }
+      run.dir = newDir;
+
       const steps = Math.max(1, Math.ceil(dist / MAX_SEGMENT_PX));
       let px = run.x;
       let py = run.y;
       for (let k = 1; k <= steps; k++) {
         const qx = run.x + ((nx - run.x) * k) / steps;
         const qy = run.y + ((ny - run.y) * k) / steps;
-        this.emitSegment(run, px, py, qx, qy, pose, w, out);
+        this.emitSegment(run, px, py, qx, qy, pose, w, fade, 0, out);
         run.travel += dist / steps;
         px = qx;
         py = qy;
@@ -394,8 +450,10 @@ export class BristleSim {
   }
 
   /**
-   * One capsule-ish segment as a stretched stamp record, gated by the
+   * One track-segment record (see TRACK_FLOATS for the layout), gated by the
    * per-bristle breakup noise and faded/tooth-gated by the remaining load.
+   * `cap` = 1 renders a round-capped capsule (touch dabs); moving segments
+   * are butt-ended so consecutive segments tile without double-depositing.
    */
   private emitSegment(
     run: BristleRun,
@@ -405,6 +463,8 @@ export class BristleSim {
     y1: number,
     pose: PenPose,
     w: number,
+    fade: number,
+    cap: number,
     out: number[],
   ): void {
     const s = this.s;
@@ -421,27 +481,24 @@ export class BristleSim {
 
     const load = this.loadPx > 0 ? Math.max(0, 1 - run.travel / this.loadPx) : 1;
     const alpha =
-      s.flow * run.baseAlpha * gate * (0.15 + 0.85 * load) * (0.35 + 0.65 * pose.press);
+      s.flow * run.baseAlpha * gate * fade * (0.15 + 0.85 * load) * (0.35 + 0.65 * pose.press);
     if (alpha <= 0.003) return;
 
     // a loaded bristle floods the tooth; a dry one only kisses the peaks
     const depthScale = s.toothDepth * (0.25 + 0.75 * (1 - load));
 
-    const radius = len / 2 + w / 2;
-    const roundness = clamp(w / (len + w), 0.01, 1);
-    const angle = len > 1e-6 ? Math.atan2(y1 - y0, x1 - x0) : 0;
     out.push(
-      (x0 + x1) / 2,
-      (y0 + y1) / 2,
-      radius,
+      x0,
+      y0,
+      x1,
+      y1,
+      w / 2,
       clamp(alpha, 0, 1),
-      angle,
-      roundness,
       run.color.r,
       run.color.g,
       run.color.b,
-      0, // flags
       depthScale,
+      cap,
     );
   }
 }
@@ -468,5 +525,8 @@ export function bristleColor(
   return hsvToRgb(hsv);
 }
 
-/** Sanity guard: record layout must match the stamp shader's. */
-export const BRISTLE_RECORD_FLOATS: typeof STAMP_FLOATS = STAMP_FLOATS;
+/**
+ * Floats per track-segment instance, matching the track shader's vertex
+ * layout: x0, y0, x1, y1, halfWidth, alpha, r, g, b, depthScale, capFlag.
+ */
+export const TRACK_FLOATS = 11;

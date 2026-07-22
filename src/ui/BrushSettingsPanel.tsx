@@ -167,6 +167,18 @@ export function BrushSettingsPanel() {
             title="Pen tilt slides and elongates the contact patch"
             onChange={(v) => updateBristle({ tiltResponse: v })}
           />
+          <PctSlider
+            label="Flex"
+            value={bristle.flex}
+            title="Bristle tips trail the pen and swing wide through turns"
+            onChange={(v) => updateBristle({ flex: v })}
+          />
+          <PctSlider
+            label="Turn Softening"
+            value={bristle.turnSoftness}
+            title="Lighten deposition where a track changes direction sharply"
+            onChange={(v) => updateBristle({ turnSoftness: v })}
+          />
           <ValSlider
             label="Angle"
             value={bristle.baseAngle}

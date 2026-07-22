@@ -731,8 +731,8 @@ const TEST = `
       return out;
     };
     const solid = simRecords({});
-    assert('bristle: sim emits STAMP_FLOATS-sized records',
-      solid.length > 0 && solid.length % 11 === 0, 'len=' + solid.length);
+    assert('bristle: sim emits TRACK_FLOATS-sized records',
+      solid.length > 0 && solid.length % B.TRACK_FLOATS === 0, 'len=' + solid.length);
     const broken = simRecords({ breakup: 0.85 });
     assert('bristle: breakup skips deposition along tracks',
       broken.length < solid.length * 0.6,
@@ -741,8 +741,8 @@ const TEST = `
     // depletion: alpha fades and the tooth gate deepens as bristles dry
     // (load is in brush diameters: 3 x 40px size = 120px of travel)
     const dry = simRecords({ load: 3 });
-    const alphaAt = (rs, i) => rs[i * 11 + 3];
-    const depthAt = (rs, i) => rs[i * 11 + 10];
+    const alphaAt = (rs, i) => rs[i * 11 + 5];
+    const depthAt = (rs, i) => rs[i * 11 + 9];
     const nRec = dry.length / 11;
     assert('bristle: load depletion fades the track tail',
       alphaAt(dry, nRec - 1) < alphaAt(dry, 0) * 0.5,
@@ -769,11 +769,11 @@ const TEST = `
         }
         const widths = [];
         for (let i = 0; i < out.length; i += 11) {
-          widths.push(out[i + 5] * 2 * out[i + 2]); // roundness x 2 x radius
+          widths.push(out[i + 4] * 2); // 2 x halfWidth
         }
         return {
           meanWidth: widths.reduce((a, b2) => a + b2, 0) / widths.length,
-          lastAlpha: out[out.length - 11 + 3],
+          lastAlpha: out[out.length - 11 + 5],
         };
       };
       const at1 = runAt(1);
@@ -784,6 +784,58 @@ const TEST = `
       assert('bristle: load depletes at the same relative travel at any size',
         near(at3.lastAlpha, at1.lastAlpha, 0.05),
         at1.lastAlpha.toFixed(3) + ' vs ' + at3.lastAlpha.toFixed(3));
+    }
+
+    // flex: bristle tips trail the pen (drag lag)
+    {
+      const trailRun = (flex) => {
+        const s2 = Object.assign({}, bs, {
+          flex, turnSoftness: 0, opacityJitter: 0, load: 0, breakup: 0,
+          colorJitter: { hue: 0, sat: 0, bri: 0, fgBg: 0 },
+        });
+        const sim = new B.BristleSim(s2, 40,
+          { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 }, rng: B.mulberry32(31) });
+        const out = [];
+        for (let i = 0; i <= 20; i++) {
+          sim.update({ x: 100 + i * 10, y: 150, pressure: 1,
+            tiltX: 0, tiltY: 0, twist: 0 }, out);
+        }
+        let maxX = -1e9;
+        for (let i = 0; i < out.length; i += 11) maxX = Math.max(maxX, out[i + 2]);
+        return maxX;
+      };
+      const rigid = trailRun(0);
+      const flexed = trailRun(0.6);
+      assert('bristle: flex makes tips trail the pen', flexed < rigid - 1,
+        'rigid=' + rigid.toFixed(1) + ' flexed=' + flexed.toFixed(1));
+    }
+
+    // turn softening: a reversal deposits less than a straight pass
+    {
+      const zigzag = (turnSoftness) => {
+        const s2 = Object.assign({}, bs, {
+          flex: 0, turnSoftness, opacityJitter: 0, load: 0, breakup: 0,
+          colorJitter: { hue: 0, sat: 0, bri: 0, fgBg: 0 },
+        });
+        const sim = new B.BristleSim(s2, 40,
+          { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 }, rng: B.mulberry32(41) });
+        const out = [];
+        // back and forth: four reversals
+        const xs = [100, 200, 120, 220, 140, 240];
+        for (let leg = 0; leg + 1 < xs.length; leg++) {
+          for (let i = leg === 0 ? 0 : 1; i <= 10; i++) {
+            const x = xs[leg] + ((xs[leg + 1] - xs[leg]) * i) / 10;
+            sim.update({ x, y: 150, pressure: 1, tiltX: 0, tiltY: 0, twist: 0 }, out);
+          }
+        }
+        let sum = 0;
+        for (let i = 0; i < out.length; i += 11) sum += out[i + 5];
+        return sum;
+      };
+      const hard = zigzag(0);
+      const soft = zigzag(1);
+      assert('bristle: turn softening lightens reversals', soft < hard * 0.97,
+        'soft=' + soft.toFixed(1) + ' hard=' + hard.toFixed(1));
     }
 
     // engine params: tooth rides the texture-each-tip subtract path

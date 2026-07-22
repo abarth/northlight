@@ -1,4 +1,4 @@
-import { BristleSim, mulberry32 } from '../brush/bristle';
+import { BristleSim, mulberry32, TRACK_FLOATS } from '../brush/bristle';
 import type { BristlePreset } from '../brush/bristlePresets';
 import { emitStamps, STAMP_FLOATS, type StampContext } from '../brush/dynamics';
 import { getTip, seededRng } from '../brush/patterns';
@@ -143,27 +143,31 @@ export function drawBristlePreview(canvas: HTMLCanvasElement, preset: BristlePre
   }
 
   const scale = w / VW;
-  ctx.lineCap = 'round';
-  for (let i = 0; i < records.length; i += STAMP_FLOATS) {
-    const cx = records[i] * scale;
-    const cy = records[i + 1] * scale;
-    const radius = records[i + 2];
-    const alpha = records[i + 3];
-    const angle = records[i + 4];
-    const roundness = records[i + 5];
+  for (let i = 0; i < records.length; i += TRACK_FLOATS) {
+    const x0 = records[i] * scale;
+    const y0 = records[i + 1] * scale;
+    const x1 = records[i + 2] * scale;
+    const y1 = records[i + 3] * scale;
+    const width = Math.max(records[i + 4] * 2 * scale, 0.3);
+    const alpha = records[i + 5];
     const [r, g, b] = [records[i + 6], records[i + 7], records[i + 8]];
-    // invert the segment packing: width = roundness·2·radius, len = rest
-    const width = Math.max(roundness * 2 * radius, 0.3) * scale;
-    const half = Math.max(radius * scale - width / 2, 0.01);
-    const dx = Math.cos(angle) * half;
-    const dy = Math.sin(angle) * half;
-    ctx.strokeStyle = `rgba(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(
+    const cap = records[i + 10];
+    const style = `rgba(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(
       b * 255,
     )},${alpha * preset.opacity})`;
-    ctx.lineWidth = width;
-    ctx.beginPath();
-    ctx.moveTo(cx - dx, cy - dy);
-    ctx.lineTo(cx + dx, cy + dy);
-    ctx.stroke();
+    if (cap > 0.5 || Math.hypot(x1 - x0, y1 - y0) < 0.05) {
+      ctx.fillStyle = style;
+      ctx.beginPath();
+      ctx.arc((x0 + x1) / 2, (y0 + y1) / 2, width / 2, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = style;
+      ctx.lineWidth = width;
+      ctx.lineCap = 'butt';
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+    }
   }
 }

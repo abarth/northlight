@@ -4,6 +4,7 @@ import {
   FILL_SHADER,
   PRESENT_SHADER,
   STAMP_SHADER,
+  TRACK_SHADER,
   TRANSFORM_SHADER,
 } from './shaders';
 import type { Mat3 } from '../transform/matrix';
@@ -18,6 +19,7 @@ import {
 import { getPattern, getTip } from '../brush/patterns';
 import { readTextureRegion, uploadBuffer, uploadTexture } from './transfer';
 import { STAMP_FLOATS } from '../brush/dynamics';
+import { TRACK_FLOATS } from '../brush/bristle';
 
 export interface EngineTextureParams {
   pattern: PatternId;
@@ -104,6 +106,7 @@ export class PaintEngine {
   private compositePipeline: GPURenderPipeline;
   private stampPipeline: GPURenderPipeline;
   private stampPipelineDual: GPURenderPipeline;
+  private trackPipeline: GPURenderPipeline;
   private commitPipeline: GPURenderPipeline;
   private fillPipeline: GPURenderPipeline;
   private transformPipeline: GPURenderPipeline;
@@ -305,6 +308,35 @@ export class PaintEngine {
     this.stampPipeline = makeStampPipeline('stamp', 'rgba8unorm');
     this.stampPipelineDual = makeStampPipeline('stamp-dual', 'r8unorm');
 
+    // bristle track segments: capsule quads into the color stroke texture
+    const trackModule = device.createShaderModule({ code: TRACK_SHADER });
+    this.trackPipeline = device.createRenderPipeline({
+      label: 'track',
+      layout: 'auto',
+      vertex: {
+        module: trackModule,
+        entryPoint: 'vs',
+        buffers: [
+          {
+            arrayStride: TRACK_FLOATS * 4,
+            stepMode: 'instance',
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x4' }, // p0, p1
+              { shaderLocation: 1, offset: 16, format: 'float32x2' }, // halfW, alpha
+              { shaderLocation: 2, offset: 24, format: 'float32x3' }, // color
+              { shaderLocation: 3, offset: 36, format: 'float32x2' }, // depth, cap
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: trackModule,
+        entryPoint: 'fs',
+        targets: [{ format: 'rgba8unorm', blend: overBlend }],
+      },
+      primitive: { topology: 'triangle-strip' },
+    });
+
     this.commitPipeline = this.makeFullscreenPipeline('commit', COMMIT_SHADER, 'rgba8unorm');
     this.fillPipeline = this.makeFullscreenPipeline('fill', FILL_SHADER, 'rgba8unorm');
     this.transformPipeline = this.makeFullscreenPipeline(
@@ -483,6 +515,7 @@ export class PaintEngine {
   /** `mask` is a doc-sized, single-channel coverage bitmap, or null to clear. */
   setSelectionMask(mask: Uint8Array<ArrayBuffer> | null): void {
     this.stampBindGroups = null; // stamps sample the selection texture
+    this.trackBindGroup = null;
     this.markDirty();
     if (!mask) {
       this.selectionTex?.destroy();
@@ -584,6 +617,7 @@ export class PaintEngine {
     this.stroke = params;
     this.markDirty();
     this.stampBindGroups = null; // tip/pattern textures change per stroke
+    this.trackBindGroup = null;
     this.clearStrokeTextures();
 
     this.strokeTipTex =
@@ -630,6 +664,7 @@ export class PaintEngine {
    * resized, so they are cached and rebuilt lazily instead of per draw.
    */
   private stampBindGroups: { primary: GPUBindGroup; dual: GPUBindGroup } | null = null;
+  private trackBindGroup: GPUBindGroup | null = null;
 
   private ensureStampBindGroups(): { primary: GPUBindGroup; dual: GPUBindGroup } {
     if (this.stampBindGroups) return this.stampBindGroups;
@@ -710,6 +745,59 @@ export class PaintEngine {
       pass.end();
       byteOffset += b.records.length * 4;
     }
+    this.device.queue.submit([enc.finish()]);
+  }
+
+  private ensureTrackBindGroup(): GPUBindGroup {
+    if (this.trackBindGroup) return this.trackBindGroup;
+    this.trackBindGroup = this.device.createBindGroup({
+      layout: this.trackPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.stampUniforms } },
+        { binding: 1, resource: (this.selectionTex ?? this.whiteTex).createView() },
+        { binding: 2, resource: this.sampLinear },
+        { binding: 3, resource: (this.strokePatternTex ?? this.whiteTex).createView() },
+        { binding: 4, resource: this.sampRepeat },
+      ],
+    });
+    return this.trackBindGroup;
+  }
+
+  /**
+   * Draws bristle track segments (TRACK_FLOATS-sized instances) into the
+   * color stroke texture. Shares the stroke's StampU uniforms (hardness +
+   * texture gate), so beginStroke must have run first.
+   */
+  drawTracks(records: Float32Array): void {
+    if (!this.stroke) return;
+    const count = records.length / TRACK_FLOATS;
+    if (count === 0) return;
+    this.markDirty();
+
+    const neededFloats = records.length;
+    if (neededFloats * 4 > this.instanceCapacity * STAMP_STRIDE) {
+      while (this.instanceCapacity * STAMP_STRIDE < neededFloats * 4) {
+        this.instanceCapacity *= 2;
+      }
+      this.instanceBuf.destroy();
+      this.instanceBuf = this.device.createBuffer({
+        size: this.instanceCapacity * STAMP_STRIDE,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      });
+    }
+    uploadBuffer(this.device, this.instanceBuf, 0, records);
+
+    const enc = this.device.createCommandEncoder();
+    const pass = enc.beginRenderPass({
+      colorAttachments: [
+        { view: this.strokeTex.createView(), loadOp: 'load', storeOp: 'store' },
+      ],
+    });
+    pass.setPipeline(this.trackPipeline);
+    pass.setVertexBuffer(0, this.instanceBuf);
+    pass.setBindGroup(0, this.ensureTrackBindGroup());
+    pass.draw(4, count);
+    pass.end();
     this.device.queue.submit([enc.finish()]);
   }
 
@@ -1027,6 +1115,7 @@ export class PaintEngine {
     this.strokeTex = this.makeDocTexture('rgba8unorm', 'stroke');
     this.dualStrokeTex = this.makeDocTexture('r8unorm', 'dualStroke');
     this.stampBindGroups = null; // stamps render into the recreated textures
+    this.trackBindGroup = null;
     this.clearStrokeTextures();
 
     this.undoStack = [];

@@ -377,8 +377,25 @@ fn fs(in: VSOut) -> @location(0) vec4f {
  * selection clipping. Dual Brush stamps render through this same shader
  * into the coverage mask; the gate itself applies at merge time.
  */
+/** Cross-section falloff shared by the stamp and track passes. */
+const PROFILE_LIB = /* wgsl */ `
+fn roundProfile(r: f32, hardness: f32, radiusPx: f32) -> f32 {
+  if (r >= 1.0) { return 0.0; }
+  // Keep at least ~1.6 physical pixels of falloff so hard brushes stay
+  // anti-aliased (Photoshop's 100%-hardness tip has the same soft rim).
+  let h = min(hardness, max(0.0, 1.0 - 1.6 / max(radiusPx, 1.6)));
+  if (r <= h) { return 1.0; }
+  let t = (r - h) / (1.0 - h);
+  // Gaussian falloff rescaled to hit zero at the radius. k = ln(50) puts the
+  // unscaled tail at 2% — the closest published fit to Photoshop's soft round.
+  let k = 3.912;
+  return (exp(-k * t * t) - exp(-k)) / (1.0 - exp(-k));
+}
+`;
+
 export const STAMP_SHADER = /* wgsl */ `
 ${TEX_LIB}
+${PROFILE_LIB}
 
 struct StampU {
   docSize: vec2f,
@@ -446,19 +463,6 @@ fn vs(
   return out;
 }
 
-fn roundProfile(r: f32, hardness: f32, radiusPx: f32) -> f32 {
-  if (r >= 1.0) { return 0.0; }
-  // Keep at least ~1.6 physical pixels of falloff so hard brushes stay
-  // anti-aliased (Photoshop's 100%-hardness tip has the same soft rim).
-  let h = min(hardness, max(0.0, 1.0 - 1.6 / max(radiusPx, 1.6)));
-  if (r <= h) { return 1.0; }
-  let t = (r - h) / (1.0 - h);
-  // Gaussian falloff rescaled to hit zero at the radius. k = ln(50) puts the
-  // unscaled tail at 2% — the closest published fit to Photoshop's soft round.
-  let k = 3.912;
-  return (exp(-k * t * t) - exp(-k)) / (1.0 - exp(-k));
-}
-
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
   var a: f32;
@@ -485,6 +489,121 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   if (SU.noise > 0.5) {
     let n = hash21(floor(in.docPos * 2.0));
     a = a * mix(1.0, n, clamp(1.0 - a, 0.0, 1.0));
+  }
+  a = a * textureSampleLevel(selTex, clampSamp, in.docPos / SU.docSize, 0.0).r;
+  return vec4f(in.color * a, a);
+}
+`;
+
+/**
+ * Bristle track segments: instanced capsule-ish quads with the falloff
+ * profile applied ACROSS the track only — flat along the length, with
+ * ~1px anti-aliased butt ends. Consecutive butt-ended segments of one
+ * bristle tile seamlessly (no lens-shaped double deposit at the joints,
+ * which is what made the stretched-stamp approximation read as stamping).
+ * A cap flag turns the segment into a round-capped capsule for touch dabs.
+ * Reuses the stamp pass's StampU uniforms (hardness + texture gate).
+ */
+export const TRACK_SHADER = /* wgsl */ `
+${TEX_LIB}
+${PROFILE_LIB}
+
+struct StampU {
+  docSize: vec2f,
+  hardness: f32,
+  tipTextured: f32,
+  texEach: f32,
+  texScalePx: f32,
+  noise: f32,
+  texMode: u32,
+  texBCI: vec4f,       // brightness, contrast, invert, depth
+  _p0: vec2f,
+  _p1: vec2f,
+}
+
+@group(0) @binding(0) var<uniform> SU: StampU;
+@group(0) @binding(1) var selTex: texture_2d<f32>;
+@group(0) @binding(2) var clampSamp: sampler;
+@group(0) @binding(3) var patternTex: texture_2d<f32>;
+@group(0) @binding(4) var repeatSamp: sampler;
+
+struct VSOut {
+  @builtin(position) pos: vec4f,
+  @location(0) docPos: vec2f,
+  @location(1) p0: vec2f,
+  @location(2) p1: vec2f,
+  @location(3) hw: f32,
+  @location(4) alpha: f32,
+  @location(5) color: vec3f,
+  @location(6) depthScale: f32,
+  @location(7) cap: f32,
+}
+
+@vertex
+fn vs(
+  @builtin(vertex_index) vi: u32,
+  @location(0) seg: vec4f,      // x0, y0, x1, y1
+  @location(1) wa: vec2f,       // halfWidth, alpha
+  @location(2) color: vec3f,
+  @location(3) df: vec2f,       // depthScale, capFlag
+) -> VSOut {
+  let p0 = seg.xy;
+  let p1 = seg.zw;
+  let d = p1 - p0;
+  let len = length(d);
+  var dir = vec2f(1.0, 0.0);
+  if (len > 1e-5) { dir = d / len; }
+  let n = vec2f(-dir.y, dir.x);
+  let hw = wa.x;
+  // round caps extend a half-width past the endpoints; butt ends only the
+  // 1px anti-aliasing apron
+  let endPad = select(1.0, hw + 1.0, df.y > 0.5);
+  let along = select(-endPad, len + endPad, (vi & 1u) == 1u);
+  let side = select(-(hw + 1.0), hw + 1.0, (vi & 2u) == 2u);
+  let doc = p0 + dir * along + n * side;
+
+  var out: VSOut;
+  out.docPos = doc;
+  var ndc = doc / SU.docSize * 2.0 - 1.0;
+  ndc.y = -ndc.y;
+  out.pos = vec4f(ndc, 0.0, 1.0);
+  out.p0 = p0;
+  out.p1 = p1;
+  out.hw = hw;
+  out.alpha = wa.y;
+  out.color = color;
+  out.depthScale = df.x;
+  out.cap = df.y;
+  return out;
+}
+
+@fragment
+fn fs(in: VSOut) -> @location(0) vec4f {
+  let d = in.p1 - in.p0;
+  let len = length(d);
+  let rel = in.docPos - in.p0;
+  var across: f32;
+  var lengthCov = 1.0;
+  if (in.cap > 0.5 || len < 1e-5) {
+    // capsule: distance to the core segment (round caps / touch dab)
+    let t = clamp(dot(rel, d) / max(len * len, 1e-9), 0.0, 1.0);
+    across = length(rel - d * t);
+  } else {
+    let dir = d / len;
+    let t = dot(rel, dir);
+    across = abs(dot(rel, vec2f(-dir.y, dir.x)));
+    // flat profile along the length, ~1px anti-aliased butt ends
+    lengthCov = clamp(t + 0.5, 0.0, 1.0) * clamp(len - t + 0.5, 0.0, 1.0);
+  }
+  var a = roundProfile(across / max(in.hw, 1e-4), SU.hardness, in.hw)
+    * lengthCov * in.alpha;
+
+  if (SU.texEach > 0.5) {
+    let v = texValue(
+      textureSampleLevel(patternTex, repeatSamp, in.docPos / max(SU.texScalePx, 1.0), 0.0).r,
+      SU.texBCI,
+    );
+    a = applyTexToAlpha(a, v, SU.texMode, SU.texBCI.w * in.depthScale);
   }
   a = a * textureSampleLevel(selTex, clampSamp, in.docPos / SU.docSize, 0.0).r;
   return vec4f(in.color * a, a);

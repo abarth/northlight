@@ -93,6 +93,6 @@ export class BristleStrokeSession {
     if (this.records.length === 0) return;
     const records = new Float32Array(this.records);
     this.records = [];
-    this.engine.drawStampBatches([{ target: 'primary', records }]);
+    this.engine.drawTracks(records);
   }
 }

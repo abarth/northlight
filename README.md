@@ -125,9 +125,14 @@ design). The brush is a 3D filbert-shaped tuft of up to 256 bristles:
   switches the brush to the bristle engine (and a stamp preset switches
   back).
 
-Tracks render as stretched analytic stamps through the same GPU stroke
-pipeline (options-bar opacity/blend mode apply), so selections, locks, undo
-and layer compositing all work unchanged.
+Tracks render through a dedicated instanced capsule pass — the falloff
+profile runs across the track only, with butt-ended segments that tile
+seamlessly (no per-segment stamping artifacts) — into the same stroke
+texture and commit path, so options-bar opacity/blend mode, selections,
+locks, undo and layer compositing all work unchanged. **Flex** makes
+bristle tips trail the pen (rounded turnaround loops, tuft fans through
+turns) and **Turn Softening** fades deposition through sharp direction
+changes, like a tuft flipping over at a reversal.
 
 ### Photoshop ABR import
 The Brushes panel's **Import ABR…** button loads Photoshop brush files:
