@@ -115,6 +115,11 @@ design). The brush is a 3D filbert-shaped tuft of up to 256 bristles:
 - The brush cursor shows the analytic footprint before the pen lands: the
   full-pressure outline (dashed), the light-touch outline (solid), and the
   flat's orientation, all following live pen tilt/twist.
+- The Brushes panel has a **Bristle Brushes (Experimental)** preset group —
+  Dry Filbert, Loaded Filbert, Scumble Veil, Rake, Round Sable, Ragged
+  Flat, Two-Tone Filbert — with live track-rendered previews; picking one
+  switches the brush to the bristle engine (and a stamp preset switches
+  back).
 
 Tracks render as stretched analytic stamps through the same GPU stroke
 pipeline (options-bar opacity/blend mode apply), so selections, locks, undo

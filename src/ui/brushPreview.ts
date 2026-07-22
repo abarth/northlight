@@ -1,3 +1,5 @@
+import { BristleSim, mulberry32 } from '../brush/bristle';
+import type { BristlePreset } from '../brush/bristlePresets';
 import { emitStamps, STAMP_FLOATS, type StampContext } from '../brush/dynamics';
 import { getTip, seededRng } from '../brush/patterns';
 import type { BrushSettings, TipShape } from '../brush/types';
@@ -96,5 +98,72 @@ export function drawBrushPreview(canvas: HTMLCanvasElement, settings: BrushSetti
       ctx.fill();
     }
     ctx.restore();
+  }
+}
+
+/**
+ * Stroke preview for a bristle preset: runs the real BristleSim along the
+ * same sine path (with a pressure ramp) and draws the emitted track segments
+ * as round-capped lines. The sim runs in a fixed virtual space (~300 px of
+ * travel) so px-denominated settings — load capacity, breakup scale — read
+ * at a realistic short-stroke scale, then the drawing scales to the canvas.
+ * Canvas tooth is not simulated here; breakup, depletion and per-bristle
+ * jitter all show.
+ */
+export function drawBristlePreview(canvas: HTMLCanvasElement, preset: BristlePreset): void {
+  const w = (canvas.width = canvas.clientWidth * (devicePixelRatio || 1) || 96);
+  const h = (canvas.height = canvas.clientHeight * (devicePixelRatio || 1) || 30);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.clearRect(0, 0, w, h);
+
+  const VW = 300;
+  const vh = (VW * h) / Math.max(w, 1);
+  const sim = new BristleSim(preset.settings, vh * 0.62, {
+    fg: { h: 0, s: 0, v: 0 },
+    bg: { h: 0, s: 0, v: 1 },
+    rng: mulberry32(0xbee5),
+  });
+
+  const records: number[] = [];
+  const steps = 72;
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    sim.update(
+      {
+        x: 8 + t * (VW - 16),
+        y: vh / 2 - Math.sin(t * Math.PI * 2) * vh * 0.2,
+        pressure: Math.sin(t * Math.PI),
+        tiltX: 0,
+        tiltY: 0,
+        twist: 0,
+      },
+      records,
+    );
+  }
+
+  const scale = w / VW;
+  ctx.lineCap = 'round';
+  for (let i = 0; i < records.length; i += STAMP_FLOATS) {
+    const cx = records[i] * scale;
+    const cy = records[i + 1] * scale;
+    const radius = records[i + 2];
+    const alpha = records[i + 3];
+    const angle = records[i + 4];
+    const roundness = records[i + 5];
+    const [r, g, b] = [records[i + 6], records[i + 7], records[i + 8]];
+    // invert the segment packing: width = roundness·2·radius, len = rest
+    const width = Math.max(roundness * 2 * radius, 0.3) * scale;
+    const half = Math.max(radius * scale - width / 2, 0.01);
+    const dx = Math.cos(angle) * half;
+    const dy = Math.sin(angle) * half;
+    ctx.strokeStyle = `rgba(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(
+      b * 255,
+    )},${alpha * preset.opacity})`;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    ctx.moveTo(cx - dx, cy - dy);
+    ctx.lineTo(cx + dx, cy + dy);
+    ctx.stroke();
   }
 }

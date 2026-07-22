@@ -3,6 +3,7 @@ import type { HSV, LayerMeta, Point, ToolId, Viewport } from './types';
 import { makeLayerMeta } from './types';
 import type { BrushSettings } from './brush/types';
 import { defaultBristleBrush, type BristleBrushSettings } from './brush/bristle';
+import { findBristlePreset } from './brush/bristlePresets';
 import type { SelectionOp } from './gpu/selection';
 import { defaultBrush, makeBrush } from './brush/defaults';
 import { findPreset } from './brush/presets';
@@ -144,6 +145,8 @@ export interface AppState {
   setBrushEngine: (engine: 'stamp' | 'bristle') => void;
   /** shallow merge; pass the whole colorJitter object when patching it */
   updateBristle: (patch: Partial<BristleBrushSettings>) => void;
+  /** applies a bristle preset and switches the brush to the bristle engine */
+  applyBristlePreset: (presetId: string) => void;
   applyPreset: (presetId: string, tool: PaintToolId) => void;
   bumpPresetRevision: () => void;
   setSideTab: (tab: SideTab) => void;
@@ -242,6 +245,23 @@ export const useStore = create<AppState>((set) => ({
 
   updateBristle: (patch) => set((s) => ({ bristle: { ...s.bristle, ...patch } })),
 
+  applyBristlePreset: (presetId) =>
+    set((s) => {
+      const preset = findBristlePreset(presetId);
+      if (!preset) return {};
+      return {
+        bristle: structuredClone(preset.settings),
+        brushEngine: 'bristle',
+        // size and opacity live in the shared options-bar brush settings
+        brush: {
+          ...s.brush,
+          tip: { ...s.brush.tip, size: preset.size },
+          opacity: preset.opacity,
+        },
+        activePreset: { ...s.activePreset, brush: presetId },
+      };
+    }),
+
   applyPreset: (presetId, tool) =>
     set((s) => {
       const preset = findPreset(presetId);
@@ -249,6 +269,8 @@ export const useStore = create<AppState>((set) => ({
       return {
         [tool]: structuredClone(preset.settings),
         activePreset: { ...s.activePreset, [tool]: presetId },
+        // picking a stamp preset returns the brush to the stamp engine
+        ...(tool === 'brush' ? { brushEngine: 'stamp' as const } : {}),
       } as Partial<AppState>;
     }),
 

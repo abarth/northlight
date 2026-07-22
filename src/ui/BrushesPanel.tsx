@@ -1,9 +1,32 @@
 import { useEffect, useRef, useState } from 'react';
+import { BRISTLE_PRESETS, type BristlePreset } from '../brush/bristlePresets';
 import { allGroups, type BrushPreset } from '../brush/presets';
 import { importAbr } from '../controller';
 import { useStore, type PaintToolId } from '../store';
-import { drawBrushPreview } from './brushPreview';
+import { drawBristlePreview, drawBrushPreview } from './brushPreview';
 import { ValSlider } from './controls';
+
+function BristlePresetRow({
+  preset,
+  active,
+  onSelect,
+}: {
+  preset: BristlePreset;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    if (ref.current) drawBristlePreview(ref.current, preset);
+  }, [preset]);
+  return (
+    <div className={`preset-row ${active ? 'active' : ''}`} onClick={onSelect} title={preset.name}>
+      <canvas ref={ref} className="preset-thumb" />
+      <span className="preset-name">{preset.name}</span>
+      <span className="preset-size">{Math.round(preset.size)}</span>
+    </div>
+  );
+}
 
 function PresetRow({
   preset,
@@ -34,6 +57,7 @@ export function BrushesPanel() {
   const activePreset = useStore((s) => s.activePreset[toolKey]);
   useStore((s) => s.presetRevision); // re-render when the library changes
   const applyPreset = useStore((s) => s.applyPreset);
+  const applyBristlePreset = useStore((s) => s.applyBristlePreset);
   const updateBrush = useStore((s) => s.updateBrush);
   const [closed, setClosed] = useState<Record<string, boolean>>({});
   const fileRef = useRef<HTMLInputElement>(null);
@@ -80,6 +104,26 @@ export function BrushesPanel() {
         onChange={(v) => updateBrush({ tip: { ...settings.tip, size: v } }, toolKey)}
       />
       <div className="preset-groups">
+        {toolKey === 'brush' && (
+          <div className="preset-group">
+            <div
+              className="preset-group-header"
+              onClick={() => setClosed((c) => ({ ...c, bristle: !c.bristle }))}
+            >
+              <span className="bs-arrow">{closed.bristle ? '▸' : '▾'}</span>
+              Bristle Brushes (Experimental)
+            </div>
+            {!closed.bristle &&
+              BRISTLE_PRESETS.map((preset) => (
+                <BristlePresetRow
+                  key={preset.id}
+                  preset={preset}
+                  active={preset.id === activePreset}
+                  onSelect={() => applyBristlePreset(preset.id)}
+                />
+              ))}
+          </div>
+        )}
         {allGroups().map((group) => {
           const open = !closed[group.id];
           return (

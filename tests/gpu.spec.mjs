@@ -837,6 +837,46 @@ const TEST = `
     await eng.undo();
   }
 
+  // ---- 19d. bristle presets ----
+  {
+    const B = NL.brush.bristle;
+    const BP = NL.brush.bristlePresets;
+    const presets = BP.BRISTLE_PRESETS;
+    assert('bristle presets: library is non-empty', presets.length >= 5,
+      'n=' + presets.length);
+
+    const ids = new Set(presets.map((x) => x.id));
+    assert('bristle presets: ids unique', ids.size === presets.length);
+    assert('bristle presets: findBristlePreset resolves',
+      BP.findBristlePreset('br-dry-filbert')?.name === 'Dry Filbert');
+    assert('bristle presets: unknown id returns undefined',
+      BP.findBristlePreset('nope') === undefined);
+
+    let valid = true;
+    let paints = true;
+    for (const pr of presets) {
+      const s2 = pr.settings;
+      if (!(s2.bristleCount >= 8 && s2.bristleCount <= 256) ||
+          !(s2.thickness > 0 && s2.thickness <= 1) ||
+          !(s2.belly > 0 && s2.belly <= 1) ||
+          !(s2.flow > 0 && s2.flow <= 1) ||
+          !(pr.size >= 1 && pr.size <= 1000) ||
+          !(pr.opacity > 0 && pr.opacity <= 1)) valid = false;
+      // every preset must actually deposit on a plain pressure-ramp stroke
+      const sim = new B.BristleSim(s2, pr.size,
+        { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 }, rng: B.mulberry32(9) });
+      const out = [];
+      for (let i = 0; i <= 40; i++) {
+        const t = i / 40;
+        sim.update({ x: 50 + t * 250, y: 150, pressure: Math.sin(t * Math.PI),
+          tiltX: 0, tiltY: 0, twist: 0 }, out);
+      }
+      if (out.length === 0 || out.length % 11 !== 0) paints = false;
+    }
+    assert('bristle presets: all values in range', valid);
+    assert('bristle presets: every preset deposits on a test stroke', paints);
+  }
+
   // ---- 20. dynamics unit tests (pure) ----
   {
     const ctx = (pressure, stepIndex = 0) => ({
@@ -1625,6 +1665,44 @@ kbAssert('tip outline: unknown tip traces the round fallback mark', outline.unkn
   JSON.stringify(outline));
 kbAssert('tip outline: spatter keeps only meaningful islands', outline.spatter >= 1,
   JSON.stringify(outline));
+
+// ---- bristle presets drive the store (engine toggle + shared size) ----
+const bristleStore = await page.evaluate(() => {
+  const s = window.__northlight.store;
+  s.getState().applyBristlePreset('br-scumble');
+  const afterBristle = {
+    engine: s.getState().brushEngine,
+    size: s.getState().brush.tip.size,
+    opacity: s.getState().brush.opacity,
+    active: s.getState().activePreset.brush,
+    count: s.getState().bristle.bristleCount,
+  };
+  s.getState().applyPreset('hard-round', 'brush');
+  const afterStamp = {
+    engine: s.getState().brushEngine,
+    active: s.getState().activePreset.brush,
+  };
+  s.getState().applyBristlePreset('missing-id');
+  const afterMissing = { engine: s.getState().brushEngine };
+  // restore defaults for later tests
+  s.getState().applyPreset('soft-round', 'brush');
+  s.getState().updateBrush({ opacity: 1, flow: 1 }, 'brush');
+  return { afterBristle, afterStamp, afterMissing };
+});
+kbAssert('bristle preset: switches to the bristle engine and applies size/opacity',
+  bristleStore.afterBristle.engine === 'bristle' &&
+  bristleStore.afterBristle.size === 110 &&
+  bristleStore.afterBristle.opacity === 0.5 &&
+  bristleStore.afterBristle.active === 'br-scumble' &&
+  bristleStore.afterBristle.count === 160,
+  JSON.stringify(bristleStore.afterBristle));
+kbAssert('bristle preset: picking a stamp preset returns to the stamp engine',
+  bristleStore.afterStamp.engine === 'stamp' &&
+  bristleStore.afterStamp.active === 'hard-round',
+  JSON.stringify(bristleStore.afterStamp));
+kbAssert('bristle preset: unknown id is a no-op',
+  bristleStore.afterMissing.engine === 'stamp',
+  JSON.stringify(bristleStore.afterMissing));
 
 // ---- temporary tool overrides (Space / Alt / Ctrl), like Photoshop ----
 await page.evaluate(() => {

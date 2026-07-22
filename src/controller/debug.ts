@@ -1,5 +1,6 @@
 import * as brushAbr from '../brush/abr';
 import * as brushBristle from '../brush/bristle';
+import * as brushBristlePresets from '../brush/bristlePresets';
 import * as brushDefaults from '../brush/defaults';
 import * as brushDynamics from '../brush/dynamics';
 import { bristleEngineParams, engineStrokeParams } from '../brush/engineParams';
@@ -44,6 +45,7 @@ const api = {
     presets: brushPresets,
     abr: brushAbr,
     bristle: brushBristle,
+    bristlePresets: brushBristlePresets,
     engineStrokeParams,
     bristleEngineParams,
     importAbr,
