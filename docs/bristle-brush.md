@@ -156,21 +156,37 @@ Aperiodic granular noise keeps both without the grid. The woven `canvas`
 pattern is still selectable, and `toothDepth: 0` removes the surface
 entirely — then all breakup is per-bristle and travels with the stroke.
 
-### Rendering: a dedicated capsule track pass
+### Rendering: an exact, overlap-free chain decomposition
 
-Track segments render through their own instanced pipeline (`TRACK_SHADER`):
-each instance carries the segment endpoints, half-width, alpha, color, tooth
-depth and a cap flag. The fragment shader applies the falloff profile
-**across** the track only — flat along the length, with ~1px anti-aliased
-**butt ends**, so consecutive segments of one bristle tile seamlessly with
-no double deposit at the joints. (The first version approximated segments as
-stretched elliptical stamps; the lengthwise falloff made every segment read
-as a lens and the overlapping soft ends beaded at the joints — visible
-stamping, worse at large sizes where tracks are wide. The capsule pass
-removes that class of artifact structurally.) Touch dabs set the cap flag
-and render as round-capped capsules. Segments still accumulate OVER into the
-same stroke texture with the same commit/opacity-cap path, so selections,
-locks, blend modes and undo are unchanged.
+Track segments render through their own instanced pipeline (`TRACK_SHADER`)
+as a chain decomposition with **zero double-coverage anywhere**:
+
+- Interior joints are **mitered**: the emitter runs one segment behind the
+  pen so it knows each joint's next direction, and both segments' shared
+  end edge is cut along the bisector of the joint angle. The two trapezoids
+  tile exactly — no overlap, no gap — and because the across-track distance
+  field is mirror-symmetric about the bisector, the falloff profile is
+  continuous through the seam. (Earlier versions — stretched elliptical
+  stamps, then perpendicular butt ends — both had per-joint artifacts:
+  lens-shaped double deposits, then wedge overlap/gap striation as the
+  track curved.)
+- Chain ends (touch, lift, too-sharp turns) render **SDF half-circle
+  caps** past the endpoint; the cap and its adjoining segment split the
+  plane, so there is no cap-over-body double deposit. A lone touch is a
+  zero-length segment with both caps (a disc). Turns too sharp to miter
+  (≳120°, or when the miter would outrun a short segment) break the chain
+  with caps — and turn softening fades those to near-invisibility anyway.
+- Alpha, color and tooth depth are stored **per endpoint** and interpolate
+  along each segment. The emitter evaluates them at the shared joint
+  positions (never per segment), so a bristle running dry or fading
+  through a turn ramps smoothly with no per-segment stepping, and breakup
+  gaps open and close with soft ends.
+
+The result is what a bristle's mark should be: a single analytic shape on
+the canvas. Segments still accumulate OVER into the same stroke texture
+with the same commit/opacity-cap path, so selections, locks, blend modes
+and undo are unchanged. (Genuine self-overlap — a retraced path — still
+deposits twice, which is correct: the brush really did pass twice.)
 
 ### Cursor
 

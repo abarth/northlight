@@ -496,12 +496,26 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 `;
 
 /**
- * Bristle track segments: instanced capsule-ish quads with the falloff
- * profile applied ACROSS the track only — flat along the length, with
- * ~1px anti-aliased butt ends. Consecutive butt-ended segments of one
- * bristle tile seamlessly (no lens-shaped double deposit at the joints,
- * which is what made the stretched-stamp approximation read as stamping).
- * A cap flag turns the segment into a round-capped capsule for touch dabs.
+ * Bristle track segments as an exact, overlap-free chain decomposition.
+ *
+ * Each instance is one segment of a bristle's track polyline. Interior
+ * joints are MITERED: the CPU emitter passes each end's lateral vector as
+ * the bisector of the joint angle (scaled 1/cos(half-angle)), so the two
+ * quads meeting at a joint share their slanted end edge EXACTLY — zero
+ * overlap, zero gap — and because the across-track distance field is
+ * mirror-symmetric about the bisector, the falloff profile is continuous
+ * through the seam. No lengthwise falloff, no double deposit, no wedge
+ * striation as the track curves.
+ *
+ * Chain ends (touch, lift, too-sharp turns) set cap flags and render as
+ * anti-aliased SDF half-discs beyond the endpoint. A zero-length segment
+ * with both caps is a lone touch dab.
+ *
+ * Alpha, color and tooth depth are per-ENDPOINT and interpolate along the
+ * segment; the CPU evaluates them at the shared joint positions, so values
+ * are continuous through every seam (no per-segment stepping as a bristle
+ * runs dry or fades through a turn).
+ *
  * Reuses the stamp pass's StampU uniforms (hardness + texture gate).
  */
 export const TRACK_SHADER = /* wgsl */ `
@@ -532,20 +546,22 @@ struct VSOut {
   @location(0) docPos: vec2f,
   @location(1) p0: vec2f,
   @location(2) p1: vec2f,
-  @location(3) hw: f32,
-  @location(4) alpha: f32,
-  @location(5) color: vec3f,
-  @location(6) depthScale: f32,
-  @location(7) cap: f32,
+  @location(3) hwAlpha: vec3f,     // hw, alpha0, alpha1
+  @location(4) color0: vec3f,
+  @location(5) color1: vec3f,
+  @location(6) depths: vec2f,      // depthScale0, depthScale1
+  @location(7) @interpolate(flat) flags: u32,
 }
 
 @vertex
 fn vs(
   @builtin(vertex_index) vi: u32,
   @location(0) seg: vec4f,      // x0, y0, x1, y1
-  @location(1) wa: vec2f,       // halfWidth, alpha
-  @location(2) color: vec3f,
-  @location(3) df: vec2f,       // depthScale, capFlag
+  @location(1) lat: vec4f,      // start lateral, end lateral (miter-scaled)
+  @location(2) hwa: vec3f,      // halfWidth, alpha0, alpha1
+  @location(3) color0: vec3f,
+  @location(4) color1: vec3f,
+  @location(5) df: vec3f,       // depth0, depth1, flags (1=startCap, 2=endCap)
 ) -> VSOut {
   let p0 = seg.xy;
   let p1 = seg.zw;
@@ -553,14 +569,21 @@ fn vs(
   let len = length(d);
   var dir = vec2f(1.0, 0.0);
   if (len > 1e-5) { dir = d / len; }
-  let n = vec2f(-dir.y, dir.x);
-  let hw = wa.x;
-  // round caps extend a half-width past the endpoints; butt ends only the
-  // 1px anti-aliasing apron
-  let endPad = select(1.0, hw + 1.0, df.y > 0.5);
-  let along = select(-endPad, len + endPad, (vi & 1u) == 1u);
-  let side = select(-(hw + 1.0), hw + 1.0, (vi & 2u) == 2u);
-  let doc = p0 + dir * along + n * side;
+  let hw = hwa.x;
+  let ext = hw + 1.0; // half-width + 1px anti-aliasing apron
+  let flags = u32(df.z + 0.5);
+
+  // triangle strip: vi 0/2 sit on the start edge, 1/3 on the end edge;
+  // vi 0/1 on side -1, vi 2/3 on side +1
+  let atEnd = (vi & 1u) == 1u;
+  let side = select(-1.0, 1.0, (vi & 2u) == 2u);
+  let base = select(p0, p1, atEnd);
+  let lateral = select(lat.xy, lat.zw, atEnd);
+  // round-capped ends extend along the axis to cover the half-disc;
+  // mitered ends are cut exactly at the (slanted) shared edge
+  let capBit = select(flags & 1u, flags & 2u, atEnd);
+  let axisExt = select(vec2f(0.0), dir * select(-ext, ext, atEnd), capBit != 0u);
+  let doc = base + axisExt + lateral * ext * side;
 
   var out: VSOut;
   out.docPos = doc;
@@ -569,11 +592,11 @@ fn vs(
   out.pos = vec4f(ndc, 0.0, 1.0);
   out.p0 = p0;
   out.p1 = p1;
-  out.hw = hw;
-  out.alpha = wa.y;
-  out.color = color;
-  out.depthScale = df.x;
-  out.cap = df.y;
+  out.hwAlpha = hwa;
+  out.color0 = color0;
+  out.color1 = color1;
+  out.depths = df.xy;
+  out.flags = flags;
   return out;
 }
 
@@ -582,31 +605,41 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   let d = in.p1 - in.p0;
   let len = length(d);
   let rel = in.docPos - in.p0;
-  var across: f32;
-  var lengthCov = 1.0;
-  if (in.cap > 0.5 || len < 1e-5) {
-    // capsule: distance to the core segment (round caps / touch dab)
-    let t = clamp(dot(rel, d) / max(len * len, 1e-9), 0.0, 1.0);
-    across = length(rel - d * t);
+  let hw = in.hwAlpha.x;
+  var dist: f32;
+  var t01 = 0.0;
+  if (len < 1e-5) {
+    dist = length(rel); // lone touch dab
   } else {
     let dir = d / len;
     let t = dot(rel, dir);
-    across = abs(dot(rel, vec2f(-dir.y, dir.x)));
-    // flat profile along the length, ~1px anti-aliased butt ends
-    lengthCov = clamp(t + 0.5, 0.0, 1.0) * clamp(len - t + 0.5, 0.0, 1.0);
+    t01 = clamp(t / len, 0.0, 1.0);
+    if (t < 0.0 && (in.flags & 1u) != 0u) {
+      dist = length(rel);                 // round start cap
+    } else if (t > len && (in.flags & 2u) != 0u) {
+      dist = length(in.docPos - in.p1);   // round end cap
+    } else {
+      // interior (including the mitered wedge past the perpendicular end,
+      // which the slanted geometry confines to this segment's half)
+      dist = abs(dot(rel, vec2f(-dir.y, dir.x)));
+    }
   }
-  var a = roundProfile(across / max(in.hw, 1e-4), SU.hardness, in.hw)
-    * lengthCov * in.alpha;
+  // endpoint values interpolate along the segment; the CPU evaluates them
+  // at shared joint positions, so seams are continuous
+  let alpha = mix(in.hwAlpha.y, in.hwAlpha.z, t01);
+  let color = mix(in.color0, in.color1, t01);
+  let depthScale = mix(in.depths.x, in.depths.y, t01);
+  var a = roundProfile(dist / max(hw, 1e-4), SU.hardness, hw) * alpha;
 
   if (SU.texEach > 0.5) {
     let v = texValue(
       textureSampleLevel(patternTex, repeatSamp, in.docPos / max(SU.texScalePx, 1.0), 0.0).r,
       SU.texBCI,
     );
-    a = applyTexToAlpha(a, v, SU.texMode, SU.texBCI.w * in.depthScale);
+    a = applyTexToAlpha(a, v, SU.texMode, SU.texBCI.w * depthScale);
   }
   a = a * textureSampleLevel(selTex, clampSamp, in.docPos / SU.docSize, 0.0).r;
-  return vec4f(in.color * a, a);
+  return vec4f(color * a, a);
 }
 `;
 

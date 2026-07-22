@@ -741,9 +741,9 @@ const TEST = `
     // depletion: alpha fades and the tooth gate deepens as bristles dry
     // (load is in brush diameters: 3 x 40px size = 120px of travel)
     const dry = simRecords({ load: 3 });
-    const alphaAt = (rs, i) => rs[i * 11 + 5];
-    const depthAt = (rs, i) => rs[i * 11 + 9];
-    const nRec = dry.length / 11;
+    const alphaAt = (rs, i) => rs[i * 20 + 9];
+    const depthAt = (rs, i) => rs[i * 20 + 17];
+    const nRec = dry.length / 20;
     assert('bristle: load depletion fades the track tail',
       alphaAt(dry, nRec - 1) < alphaAt(dry, 0) * 0.5,
       alphaAt(dry, 0).toFixed(3) + ' -> ' + alphaAt(dry, nRec - 1).toFixed(3));
@@ -768,12 +768,12 @@ const TEST = `
             tiltX: 0, tiltY: 0, twist: 0 }, out);
         }
         const widths = [];
-        for (let i = 0; i < out.length; i += 11) {
-          widths.push(out[i + 4] * 2); // 2 x halfWidth
+        for (let i = 0; i < out.length; i += 20) {
+          widths.push(out[i + 8] * 2); // 2 x halfWidth
         }
         return {
           meanWidth: widths.reduce((a, b2) => a + b2, 0) / widths.length,
-          lastAlpha: out[out.length - 11 + 5],
+          lastAlpha: out[out.length - 20 + 10],
         };
       };
       const at1 = runAt(1);
@@ -801,7 +801,7 @@ const TEST = `
             tiltX: 0, tiltY: 0, twist: 0 }, out);
         }
         let maxX = -1e9;
-        for (let i = 0; i < out.length; i += 11) maxX = Math.max(maxX, out[i + 2]);
+        for (let i = 0; i < out.length; i += 20) maxX = Math.max(maxX, out[i + 2]);
         return maxX;
       };
       const rigid = trailRun(0);
@@ -829,13 +829,56 @@ const TEST = `
           }
         }
         let sum = 0;
-        for (let i = 0; i < out.length; i += 11) sum += out[i + 5];
+        for (let i = 0; i < out.length; i += 20) {
+          sum += (out[i + 9] + out[i + 10]) / 2;
+        }
         return sum;
       };
       const hard = zigzag(0);
       const soft = zigzag(1);
       assert('bristle: turn softening lightens reversals', soft < hard * 0.97,
         'soft=' + soft.toFixed(1) + ' hard=' + hard.toFixed(1));
+    }
+
+    // chain geometry: consecutive segments of one bristle share their joint
+    // exactly — same point, same (miter) lateral, same alpha — so the track
+    // is a single analytic shape with zero overlap and zero gaps.
+    {
+      const s2 = Object.assign({}, bs, {
+        bristleCount: 1, flex: 0, turnSoftness: 0, opacityJitter: 0,
+        load: 0, breakup: 0,
+        colorJitter: { hue: 0, sat: 0, bri: 0, fgBg: 0 },
+      });
+      const sim = new B.BristleSim(s2, 40,
+        { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 }, rng: B.mulberry32(51) });
+      const out = [];
+      // a sweeping arc so every joint has a real turn to miter
+      for (let i = 0; i <= 30; i++) {
+        const a = (i / 30) * Math.PI * 0.8;
+        sim.update({ x: 200 + Math.cos(a) * 90, y: 200 + Math.sin(a) * 90,
+          pressure: 1, tiltX: 0, tiltY: 0, twist: 0 }, out);
+      }
+      sim.liftAll(out);
+      const n = out.length / 20;
+      let joined = n > 5;
+      let mitered = false;
+      for (let i = 0; i + 1 < n; i++) {
+        const a = i * 20;
+        const b2 = (i + 1) * 20;
+        if (out[a + 19] >= 2) continue; // chain ended here (round end cap)
+        if (out[a + 2] !== out[b2] || out[a + 3] !== out[b2 + 1]) joined = false;
+        if (out[a + 6] !== out[b2 + 4] || out[a + 7] !== out[b2 + 5]) joined = false;
+        if (out[a + 10] !== out[b2 + 9]) joined = false; // alpha continuous
+        // a real miter is longer than a unit perpendicular
+        if (Math.hypot(out[a + 6], out[a + 7]) > 1.0001) mitered = true;
+      }
+      assert('bristle: chain joints share point, lateral and alpha exactly', joined);
+      assert('bristle: curved joints are mitered (scaled bisector laterals)', mitered);
+      const last = (n - 1) * 20;
+      assert('bristle: lift caps the chain end', (out[last + 19] & 2) === 2,
+        'flags=' + out[last + 19]);
+      assert('bristle: chain start is capped', (out[19] & 1) === 1,
+        'flags=' + out[19]);
     }
 
     // engine params: tooth rides the texture-each-tip subtract path
@@ -898,6 +941,41 @@ const TEST = `
     assert('bristle GPU: paint runs out along the stroke', tail - head > 40,
       'head=' + head.toFixed(0) + ' tail=' + tail.toFixed(0));
     await eng.undo();
+
+    // curved-track uniformity: at partial alpha, joint overlap would darken
+    // and joint gaps would lighten — the mitered chain must deposit evenly
+    // along an arc (this is the anti-striation regression)
+    {
+      const one = Object.assign({}, solidSettings, {
+        bristleCount: 1, coverage: 1, flow: 0.4, flex: 0, turnSoftness: 0,
+      });
+      // the lone bristle sits off-center in the tuft: the track is the pen
+      // path translated by its (constant, full-pressure) offset
+      const off = B.bristleOffset(one, B.makeBundle(one, B.mulberry32(61))[0],
+        B.penPose(one, samp(0, 0, 1)), 40);
+      eng.beginStroke(NL.brush.bristleEngineParams(one, makeBrush({})));
+      const session = new NL.BristleStrokeSession(eng, one,
+        Object.assign({ sizePx: 40, smoothing: 0, rng: B.mulberry32(61) }, colors));
+      const arc = (i) => {
+        const a = 0.2 * Math.PI + (i / 30) * 0.5 * Math.PI;
+        return { x: 200 + Math.cos(a) * 90, y: 60 + Math.sin(a) * 90 };
+      };
+      session.down(samp(arc(0).x, arc(0).y, 1));
+      for (let i = 1; i <= 30; i++) session.move([samp(arc(i).x, arc(i).y, 1)]);
+      session.up();
+      eng.endStroke('bg');
+      d = await read();
+      let lo = 255, hi = 0;
+      for (let i = 3; i <= 27; i++) {
+        const p = arc(i);
+        const v = px(d, Math.round(p.x + off.x), Math.round(p.y + off.y))[0];
+        lo = Math.min(lo, v); hi = Math.max(hi, v);
+      }
+      assert('bristle GPU: curved track deposits evenly (no joint striation)',
+        hi - lo <= 12 && lo > 100 && hi < 200,
+        'lo=' + lo + ' hi=' + hi);
+      await eng.undo();
+    }
 
     // pressure footprint: a light touch marks a much thinner band than full press
     const bandHeight = (data) => {
@@ -963,7 +1041,7 @@ const TEST = `
         sim.update({ x: 50 + t * 250, y: 150, pressure: Math.sin(t * Math.PI),
           tiltX: 0, tiltY: 0, twist: 0 }, out);
       }
-      if (out.length === 0 || out.length % 11 !== 0) paints = false;
+      if (out.length === 0 || out.length % 20 !== 0) paints = false;
     }
     assert('bristle presets: all values in range', valid);
     assert('bristle presets: every preset deposits on a test stroke', paints);

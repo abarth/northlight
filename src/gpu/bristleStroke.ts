@@ -81,7 +81,7 @@ export class BristleStrokeSession {
   }
 
   up(): void {
-    this.sim.liftAll();
+    this.sim.liftAll(this.records);
     this.flush();
   }
 

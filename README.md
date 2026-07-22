@@ -125,11 +125,13 @@ design). The brush is a 3D filbert-shaped tuft of up to 256 bristles:
   switches the brush to the bristle engine (and a stamp preset switches
   back).
 
-Tracks render through a dedicated instanced capsule pass — the falloff
-profile runs across the track only, with butt-ended segments that tile
-seamlessly (no per-segment stamping artifacts) — into the same stroke
-texture and commit path, so options-bar opacity/blend mode, selections,
-locks, undo and layer compositing all work unchanged. **Flex** makes
+Tracks render through a dedicated instanced pass as exact, overlap-free
+chains: miter-jointed segments share their slanted end edges precisely,
+chain ends get SDF half-circle caps, and alpha/color/tooth depth
+interpolate per-endpoint so nothing steps at the seams — each track is a
+single analytic shape. They land in the same stroke texture and commit
+path, so options-bar opacity/blend mode, selections, locks, undo and
+layer compositing all work unchanged. **Flex** makes
 bristle tips trail the pen (rounded turnaround loops, tuft fans through
 turns) and **Turn Softening** fades deposition through sharp direction
 changes, like a tuft flipping over at a reversal.

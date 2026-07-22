@@ -322,9 +322,11 @@ export class PaintEngine {
             stepMode: 'instance',
             attributes: [
               { shaderLocation: 0, offset: 0, format: 'float32x4' }, // p0, p1
-              { shaderLocation: 1, offset: 16, format: 'float32x2' }, // halfW, alpha
-              { shaderLocation: 2, offset: 24, format: 'float32x3' }, // color
-              { shaderLocation: 3, offset: 36, format: 'float32x2' }, // depth, cap
+              { shaderLocation: 1, offset: 16, format: 'float32x4' }, // laterals
+              { shaderLocation: 2, offset: 32, format: 'float32x3' }, // hw, a0, a1
+              { shaderLocation: 3, offset: 44, format: 'float32x3' }, // color0
+              { shaderLocation: 4, offset: 56, format: 'float32x3' }, // color1
+              { shaderLocation: 5, offset: 68, format: 'float32x3' }, // d0, d1, flags
             ],
           },
         ],

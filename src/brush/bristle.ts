@@ -282,6 +282,26 @@ export function valueNoise1(seed: number, x: number): number {
   return h(cell) * (1 - u) + h(cell + 1) * u;
 }
 
+/**
+ * A track segment waiting for its successor: the miter at a joint needs the
+ * NEXT segment's direction, so segments are emitted one behind the pen.
+ */
+interface PendingSeg {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  /** start-edge lateral (unit perpendicular, or miter-scaled bisector) */
+  l0x: number;
+  l0y: number;
+  /** render a round cap at the start (chain begins here) */
+  startCap: boolean;
+  a0: number;
+  a1: number;
+  d0: number;
+  d1: number;
+}
+
 interface BristleRun {
   /** last canvas position, valid while `down` */
   x: number;
@@ -298,6 +318,15 @@ interface BristleRun {
   lagPx: number;
   /** direction of the last emitted move, radians; null after a touch-down */
   dir: number | null;
+  /** segment awaiting its successor (for the joint miter) */
+  pend: PendingSeg | null;
+  /** deposit params at the current position (shared joint values) */
+  lastA: number;
+  lastD: number;
+  /** pressure/turn multiplier at the current position (ramped per move) */
+  prevMult: number;
+  /** the next chain start renders a round cap (touch / lift / sharp turn) */
+  capNext: boolean;
 }
 
 export interface BristleSimOptions {
@@ -353,6 +382,11 @@ export class BristleSim {
       seed: rng() * 1000,
       lagPx: s.flex * sizePx * (0.25 + 0.75 * b.r),
       dir: null,
+      pend: null,
+      lastA: 0,
+      lastD: 0,
+      prevMult: 1,
+      capNext: true,
     }));
   }
 
@@ -361,11 +395,13 @@ export class BristleSim {
     for (const run of this.runs) run.travel = 0;
   }
 
-  /** All bristles leave the canvas (pen lift). */
-  liftAll(): void {
+  /** All bristles leave the canvas (pen lift), capping their tracks. */
+  liftAll(out: number[]): void {
     for (const run of this.runs) {
+      this.flushPending(run, out, true);
       run.down = false;
       run.dir = null;
+      run.capNext = true;
     }
     this.lastPen = null;
   }
@@ -391,19 +427,32 @@ export class BristleSim {
       const b = this.bundle[i];
       const run = this.runs[i];
       if (!bristleTouches(s, b, pose)) {
+        this.flushPending(run, out, true);
         run.down = false;
         run.dir = null;
+        run.capNext = true;
         continue;
       }
       const off = bristleOffset(s, b, pose, this.sizePx);
       const tx = sample.x + off.x;
       const ty = sample.y + off.y;
+      const pressMult = 0.35 + 0.65 * pose.press;
 
       if (!run.down) {
         run.down = true;
         run.x = tx;
         run.y = ty;
-        this.emitSegment(run, tx, ty, tx, ty, pose, w, 1, 1, out);
+        run.prevMult = pressMult;
+        run.capNext = true;
+        const p = this.pointParams(run, run.travel, pressMult);
+        run.lastA = p.alpha;
+        run.lastD = p.depth;
+        // a lone touch renders as a dab if the pen lifts without moving
+        run.pend = {
+          x0: tx, y0: ty, x1: tx, y1: ty,
+          l0x: 0, l0y: 1, startCap: true,
+          a0: p.alpha, a1: p.alpha, d0: p.depth, d1: p.depth,
+        };
         continue;
       }
 
@@ -419,7 +468,10 @@ export class BristleSim {
       }
 
       const dist = Math.hypot(nx - run.x, ny - run.y);
-      if (dist < 1e-6) continue;
+      if (dist < 1e-6) {
+        run.prevMult = pressMult;
+        continue;
+      }
 
       // Turn softening: bristles flipping through a sharp direction change
       // deposit less of their load.
@@ -433,72 +485,176 @@ export class BristleSim {
       }
       run.dir = newDir;
 
+      // The pressure/turn multiplier ramps across this move from its value
+      // at the previous joint, so alpha stays continuous through the seams.
+      const multTarget = pressMult * fade;
+      const travelBase = run.travel;
       const steps = Math.max(1, Math.ceil(dist / MAX_SEGMENT_PX));
       let px = run.x;
       let py = run.y;
       for (let k = 1; k <= steps; k++) {
-        const qx = run.x + ((nx - run.x) * k) / steps;
-        const qy = run.y + ((ny - run.y) * k) / steps;
-        this.emitSegment(run, px, py, qx, qy, pose, w, fade, 0, out);
-        run.travel += dist / steps;
+        const f = k / steps;
+        const qx = run.x + (nx - run.x) * f;
+        const qy = run.y + (ny - run.y) * f;
+        const mult = run.prevMult + (multTarget - run.prevMult) * f;
+        this.pushSegment(run, px, py, qx, qy, travelBase + dist * f, mult, w, out);
         px = qx;
         py = qy;
       }
+      run.travel = travelBase + dist;
+      run.prevMult = multTarget;
       run.x = nx;
       run.y = ny;
     }
   }
 
   /**
-   * One track-segment record (see TRACK_FLOATS for the layout), gated by the
-   * per-bristle breakup noise and faded/tooth-gated by the remaining load.
-   * `cap` = 1 renders a round-capped capsule (touch dabs); moving segments
-   * are butt-ended so consecutive segments tile without double-depositing.
+   * Deposit strength at a single point along a bristle's track. Evaluated at
+   * the shared joint positions (never per segment), so interpolating the
+   * results along each segment is continuous through every seam.
    */
-  private emitSegment(
+  private pointParams(
+    run: BristleRun,
+    travel: number,
+    mult: number,
+  ): { alpha: number; depth: number } {
+    const s = this.s;
+    // dry-brush breakup: coherent skips along the track
+    let gate = 1;
+    if (s.breakup > 0) {
+      const n = valueNoise1(run.seed, travel / this.breakupPx);
+      gate = clamp((n - s.breakup) / 0.1, 0, 1);
+    }
+    const load = this.loadPx > 0 ? Math.max(0, 1 - travel / this.loadPx) : 1;
+    const alpha = s.flow * run.baseAlpha * gate * (0.15 + 0.85 * load) * mult;
+    // a loaded bristle floods the tooth; a dry one only kisses the peaks
+    const depth = this.s.toothDepth * (0.25 + 0.75 * (1 - load));
+    return { alpha: clamp(alpha, 0, 1), depth };
+  }
+
+  /**
+   * Advances a bristle by one sub-segment: mitering the joint with the
+   * pending segment when the turn allows (the shared slanted edge makes the
+   * chain exactly overlap-free), or capping and restarting the chain when it
+   * does not. The new segment becomes pending; its predecessor is emitted.
+   */
+  private pushSegment(
     run: BristleRun,
     x0: number,
     y0: number,
     x1: number,
     y1: number,
-    pose: PenPose,
+    travelEnd: number,
+    mult: number,
     w: number,
-    fade: number,
-    cap: number,
     out: number[],
   ): void {
-    const s = this.s;
-    const len = Math.hypot(x1 - x0, y1 - y0);
+    const end = this.pointParams(run, travelEnd, mult);
+    const a0 = run.lastA;
+    const d0 = run.lastD;
+    run.lastA = end.alpha;
+    run.lastD = end.depth;
 
-    // dry-brush breakup: coherent skips along the track
-    let gate = 1;
-    if (s.breakup > 0) {
-      const mid = run.travel + len / 2;
-      const n = valueNoise1(run.seed, mid / this.breakupPx);
-      gate = clamp((n - s.breakup) / 0.1, 0, 1);
-      if (gate <= 0) return;
+    // fully dry stretch: break the chain (ends ramp to ~0, so no caps needed)
+    if (a0 <= 0.003 && end.alpha <= 0.003) {
+      this.flushPending(run, out, false);
+      return;
     }
 
-    const load = this.loadPx > 0 ? Math.max(0, 1 - run.travel / this.loadPx) : 1;
-    const alpha =
-      s.flow * run.baseAlpha * gate * fade * (0.15 + 0.85 * load) * (0.35 + 0.65 * pose.press);
-    if (alpha <= 0.003) return;
+    const len = Math.hypot(x1 - x0, y1 - y0);
+    if (len < 1e-6) return;
+    const dx = (x1 - x0) / len;
+    const dy = (y1 - y0) / len;
+    // unit perpendicular of this segment (start lateral when no miter)
+    let l0x = -dy;
+    let l0y = dx;
+    let startCap = run.capNext;
 
-    // a loaded bristle floods the tooth; a dry one only kisses the peaks
-    const depthScale = s.toothDepth * (0.25 + 0.75 * (1 - load));
+    const pend = run.pend;
+    if (pend) {
+      const plen = Math.hypot(pend.x1 - pend.x0, pend.y1 - pend.y0);
+      if (plen < 1e-6) {
+        // lone-touch pending: this move absorbs it into a capped chain start
+        run.pend = null;
+        startCap = true;
+      } else {
+        const pdx = (pend.x1 - pend.x0) / plen;
+        const pdy = (pend.y1 - pend.y0) / plen;
+        // miter: shared end edge along the bisector of the joint normals
+        const msx = -pdy - dy;
+        const msy = pdx + dx;
+        const mlen = Math.hypot(msx, msy);
+        const c = mlen > 1e-6 ? (msx * -dy + msy * dx) / mlen : 0; // cos(θ/2)
+        const cosTurn = pdx * dx + pdy * dy;
+        const tanHalf = Math.abs(pdx * dy - pdy * dx) / Math.max(1 + cosTurn, 1e-4);
+        const hw = w / 2 + 1;
+        // too sharp (or miter longer than the segments can host): cap + restart
+        if (c < 0.5 || hw * tanHalf > 0.45 * Math.min(plen, len)) {
+          this.flushPending(run, out, true);
+          startCap = true;
+        } else {
+          const scale = 1 / c;
+          const mx = (msx / mlen) * scale;
+          const my = (msy / mlen) * scale;
+          this.flushPending(run, out, false, { x: mx, y: my });
+          l0x = mx;
+          l0y = my;
+          startCap = false;
+        }
+      }
+    }
+    run.capNext = false;
 
+    run.pend = {
+      x0, y0, x1, y1,
+      l0x, l0y, startCap,
+      a0, a1: end.alpha, d0, d1: end.depth,
+    };
+  }
+
+  /**
+   * Emits the pending segment. `roundEnd` caps it (chain ends here);
+   * `endLateral` is the miter-scaled bisector when the chain continues.
+   */
+  private flushPending(
+    run: BristleRun,
+    out: number[],
+    roundEnd: boolean,
+    endLateral?: { x: number; y: number },
+  ): void {
+    const pend = run.pend;
+    if (!pend) return;
+    run.pend = null;
+    if (Math.max(pend.a0, pend.a1) <= 0.003) return;
+
+    const hw = Math.max(this.trackWidth / 2, 0.2);
+    const len = Math.hypot(pend.x1 - pend.x0, pend.y1 - pend.y0);
+    let l0x = pend.l0x;
+    let l0y = pend.l0y;
+    let l1x: number;
+    let l1y: number;
+    let flags: number;
+    if (len < 1e-6) {
+      // lone touch dab: both ends capped, lateral spans the disc
+      l0x = 0;
+      l0y = 1;
+      l1x = 0;
+      l1y = 1;
+      flags = 3;
+    } else {
+      const dx = (pend.x1 - pend.x0) / len;
+      const dy = (pend.y1 - pend.y0) / len;
+      l1x = endLateral ? endLateral.x : -dy;
+      l1y = endLateral ? endLateral.y : dx;
+      flags = (pend.startCap ? 1 : 0) + (roundEnd ? 2 : 0);
+    }
+    const c = run.color;
     out.push(
-      x0,
-      y0,
-      x1,
-      y1,
-      w / 2,
-      clamp(alpha, 0, 1),
-      run.color.r,
-      run.color.g,
-      run.color.b,
-      depthScale,
-      cap,
+      pend.x0, pend.y0, pend.x1, pend.y1,
+      l0x, l0y, l1x, l1y,
+      hw, pend.a0, pend.a1,
+      c.r, c.g, c.b, c.r, c.g, c.b,
+      pend.d0, pend.d1, flags,
     );
   }
 }
@@ -527,6 +683,8 @@ export function bristleColor(
 
 /**
  * Floats per track-segment instance, matching the track shader's vertex
- * layout: x0, y0, x1, y1, halfWidth, alpha, r, g, b, depthScale, capFlag.
+ * layout: x0, y0, x1, y1, l0x, l0y, l1x, l1y (end laterals: unit
+ * perpendicular or miter-scaled bisector), halfWidth, alpha0, alpha1,
+ * r0, g0, b0, r1, g1, b1, depth0, depth1, flags (1=startCap, 2=endCap).
  */
-export const TRACK_FLOATS = 11;
+export const TRACK_FLOATS = 20;
