@@ -1,3 +1,4 @@
+import { footprintOutline, penPose } from '../brush/bristle';
 import { tipOutline } from '../brush/tipOutline';
 import { apply, homographyFromQuads } from '../transform/matrix';
 import { pathsBounds, rectCorners } from '../transform/quad';
@@ -22,7 +23,15 @@ export interface OverlayScene {
   /** committed points of an in-progress polygonal lasso */
   poly: Point[] | null;
   polyPreview: Point | null;
-  cursor: { x: number; y: number; over: boolean };
+  cursor: {
+    x: number;
+    y: number;
+    over: boolean;
+    /** live pen orientation for the bristle footprint preview */
+    tiltX: number;
+    tiltY: number;
+    twist: number;
+  };
 }
 
 export function drawOverlay(scene: OverlayScene): void {
@@ -146,7 +155,48 @@ export function drawOverlay(scene: OverlayScene): void {
   // tip angle (negated to Photoshop's CCW-positive convention).
   const cur = scene.cursor;
   const t = s.overrideTool ?? s.tool;
-  if (cur.over && (t === 'brush' || t === 'eraser')) {
+
+  // Bristle-engine cursor: the analytic filbert footprint, oriented by the
+  // live pen tilt/twist — the full-pressure outline (dashed), the light-touch
+  // outline (solid), and a tick along the flat of the filbert. You can see
+  // what the mark will be before the pen lands.
+  if (cur.over && t === 'brush' && s.brushEngine === 'bristle') {
+    const pen = { x: 0, y: 0, tiltX: cur.tiltX, tiltY: cur.tiltY, twist: cur.twist };
+    const sizePx = s.brush.tip.size * s.view.zoom;
+    const stroked = (pts: Point[], dash: number[]) => {
+      ctx.beginPath();
+      pts.forEach((p, i) =>
+        i === 0 ? ctx.moveTo(cur.x + p.x, cur.y + p.y) : ctx.lineTo(cur.x + p.x, cur.y + p.y),
+      );
+      ctx.closePath();
+      ctx.setLineDash(dash);
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = Math.max(1, dpr) * 2.4;
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+      ctx.stroke();
+      ctx.lineWidth = Math.max(1, dpr);
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.stroke();
+      ctx.setLineDash([]);
+    };
+    const full = footprintOutline(s.bristle, penPose(s.bristle, { ...pen, pressure: 1 }), sizePx);
+    const touch = footprintOutline(
+      s.bristle,
+      penPose(s.bristle, { ...pen, pressure: 0.35 }),
+      sizePx,
+    );
+    stroked(full, [4 * dpr, 3 * dpr]);
+    stroked(touch, []);
+    // flat-axis tick: opposite points of the touch outline lie on the long axis
+    const a = touch[0];
+    const b = touch[touch.length / 2];
+    ctx.beginPath();
+    ctx.moveTo(cur.x + a.x, cur.y + a.y);
+    ctx.lineTo(cur.x + b.x, cur.y + b.y);
+    ctx.lineWidth = Math.max(1, dpr);
+    ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+    ctx.stroke();
+  } else if (cur.over && (t === 'brush' || t === 'eraser')) {
     const tip = (t === 'eraser' ? s.eraser : s.brush).tip;
     const r = Math.max((tip.size / 2) * s.view.zoom, 1);
     const roundness = Math.max(tip.roundness, 0.01);

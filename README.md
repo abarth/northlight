@@ -93,6 +93,33 @@ pointer-up. Spacing is distance-based and re-evaluated per stamp, so
 pressure-driven size changes stamp density correctly. The **eraser** shares
 the whole engine and erases layer alpha.
 
+### Bristle brush (experimental track engine)
+A second, digital-first mark engine that lives alongside the stamp model
+(enable it at the top of Brush Settings; see `docs/bristle-brush.md` for the
+design). The brush is a 3D filbert-shaped tuft of up to 256 bristles:
+
+- **Pressure** sets how deep the tuft presses into the canvas — the contact
+  footprint grows from the center of the filbert outward, with **splay**
+  spreading the contacted bristles. **Tilt** paints with the side of the
+  tuft (the footprint slides and elongates toward the lean), and **barrel
+  rotation** (or a fixed base angle) turns the filbert's flat.
+- Each contacted bristle drags its own **pigment track** (no stamps): a
+  per-bristle color (hue/sat/brightness jitter, optional fg→bg mix), a
+  per-bristle opacity, and a paint **load** that depletes with travel so
+  strokes run dry along the gesture ("reload on lift" off keeps the tuft
+  drying across strokes until it's re-dipped).
+- **Breakup** gates deposition with coherent per-bristle noise along each
+  track — streaks die and catch again, the dry-brush signature — and canvas
+  **tooth** (any texture pattern) carves dry bristles harder than loaded
+  ones via the per-segment texture depth.
+- The brush cursor shows the analytic footprint before the pen lands: the
+  full-pressure outline (dashed), the light-touch outline (solid), and the
+  flat's orientation, all following live pen tilt/twist.
+
+Tracks render as stretched analytic stamps through the same GPU stroke
+pipeline (options-bar opacity/blend mode apply), so selections, locks, undo
+and layer compositing all work unchanged.
+
 ### Photoshop ABR import
 The Brushes panel's **Import ABR…** button loads Photoshop brush files:
 legacy v1/v2 and modern v6–v10 (8BIM `samp` tips, Actions-descriptor `desc`,
@@ -282,7 +309,10 @@ src/
     abr.ts         Photoshop .abr parser (v1/v2 + v6-v10, PackBits,
                    Actions-descriptor reader, patt pattern decoder,
                    validated settings mapping)
-    engineParams.ts settings -> per-stroke GPU parameters
+    bristle.ts     experimental bristle engine: filbert tuft geometry,
+                   pressure/tilt/twist contact model, per-bristle pigment
+                   state and track-segment emission — pure, unit-testable
+    engineParams.ts settings -> per-stroke GPU parameters (both engines)
   gpu/
     shaders.ts    WGSL: compositor (all blend modes), brush stamp (rotated
                   elliptical/sampled tips, texture, dual brush, noise),
@@ -291,6 +321,8 @@ src/
                   stroke accumulation, undo history (CPU snapshots), export
     stroke.ts     StrokeSession: spacing, pen-state interpolation, smoothing,
                   direction tracking, airbrush build-up
+    bristleStroke.ts BristleStrokeSession: pointer samples -> bristle track
+                  segments (cached tuft state for reload-on-lift off)
     selection.ts  polygon -> anti-aliased coverage mask
   color/convert.ts  HSV / RGB / hex / CIE Lab conversions
   transform/

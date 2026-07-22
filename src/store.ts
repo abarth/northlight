@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { HSV, LayerMeta, Point, ToolId, Viewport } from './types';
 import { makeLayerMeta } from './types';
 import type { BrushSettings } from './brush/types';
+import { defaultBristleBrush, type BristleBrushSettings } from './brush/bristle';
 import type { SelectionOp } from './gpu/selection';
 import { defaultBrush, makeBrush } from './brush/defaults';
 import { findPreset } from './brush/presets';
@@ -83,6 +84,10 @@ export interface AppState {
 
   brush: BrushSettings;
   eraser: BrushSettings;
+  /** which mark engine the brush tool uses (the eraser is always stamp) */
+  brushEngine: 'stamp' | 'bristle';
+  /** experimental track-based bristle brush (docs/bristle-brush.md) */
+  bristle: BristleBrushSettings;
   /** currently selected preset id per paint tool, for UI highlighting */
   activePreset: Record<PaintToolId, string | null>;
   /** bumped whenever the preset library changes (e.g. after an ABR import) */
@@ -136,6 +141,9 @@ export interface AppState {
 
   /** shallow top-level merge; pass whole nested sections when patching them */
   updateBrush: (patch: Partial<BrushSettings>, tool: PaintToolId) => void;
+  setBrushEngine: (engine: 'stamp' | 'bristle') => void;
+  /** shallow merge; pass the whole colorJitter object when patching it */
+  updateBristle: (patch: Partial<BristleBrushSettings>) => void;
   applyPreset: (presetId: string, tool: PaintToolId) => void;
   bumpPresetRevision: () => void;
   setSideTab: (tab: SideTab) => void;
@@ -175,6 +183,8 @@ export const useStore = create<AppState>((set) => ({
 
   brush: defaultBrush(),
   eraser: initialEraser,
+  brushEngine: 'stamp',
+  bristle: defaultBristleBrush(),
   activePreset: { brush: 'soft-round', eraser: null },
   presetRevision: 0,
 
@@ -227,6 +237,10 @@ export const useStore = create<AppState>((set) => ({
       }
       return { [tool]: next } as Partial<AppState>;
     }),
+
+  setBrushEngine: (brushEngine) => set({ brushEngine }),
+
+  updateBristle: (patch) => set((s) => ({ bristle: { ...s.bristle, ...patch } })),
 
   applyPreset: (presetId, tool) =>
     set((s) => {

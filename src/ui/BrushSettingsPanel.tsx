@@ -81,6 +81,10 @@ export function BrushSettingsPanel() {
   const toolKey: PaintToolId = tool === 'eraser' ? 'eraser' : 'brush';
   const s = useStore((st) => st[toolKey]);
   const updateBrush = useStore((st) => st.updateBrush);
+  const brushEngine = useStore((st) => st.brushEngine);
+  const setBrushEngine = useStore((st) => st.setBrushEngine);
+  const bristle = useStore((st) => st.bristle);
+  const updateBristle = useStore((st) => st.updateBristle);
   const [open, setOpen] = useState<string>('tip');
 
   const upd = (patch: Partial<BrushSettings>) => updateBrush(patch, toolKey);
@@ -115,6 +119,168 @@ export function BrushSettingsPanel() {
         <div className="hint" style={{ marginBottom: 6 }}>
           Editing the eraser
         </div>
+      )}
+
+      {toolKey === 'brush' && (
+        <PanelSection
+          title="Bristle Brush (Experimental)"
+          enabled={brushEngine === 'bristle'}
+          onToggle={(v) => setBrushEngine(v ? 'bristle' : 'stamp')}
+          open={open === 'bristle'}
+          onOpen={() => openIt('bristle')}
+        >
+          <div className="hint">
+            Track-based filbert: bristles drag pigment instead of stamping.
+            Size comes from Brush Tip Shape; pressure sets how much of the
+            tuft touches, tilt paints with its side, rotation turns the flat.
+          </div>
+          <ValSlider
+            label="Bristles"
+            value={bristle.bristleCount}
+            min={8}
+            max={256}
+            onChange={(v) => updateBristle({ bristleCount: v })}
+          />
+          <PctSlider
+            label="Thickness"
+            value={bristle.thickness}
+            min={5}
+            title="Cross-section aspect: a filbert is a flattened tuft"
+            onChange={(v) => updateBristle({ thickness: Math.max(v, 0.05) })}
+          />
+          <PctSlider
+            label="Belly"
+            value={bristle.belly}
+            min={5}
+            title="Dome of the tip: how much pressure the edge bristles need"
+            onChange={(v) => updateBristle({ belly: Math.max(v, 0.05) })}
+          />
+          <PctSlider
+            label="Splay"
+            value={bristle.splay}
+            title="Pressure spreads the contacted bristles outward"
+            onChange={(v) => updateBristle({ splay: v })}
+          />
+          <PctSlider
+            label="Tilt Response"
+            value={bristle.tiltResponse}
+            title="Pen tilt slides and elongates the contact patch"
+            onChange={(v) => updateBristle({ tiltResponse: v })}
+          />
+          <ValSlider
+            label="Angle"
+            value={bristle.baseAngle}
+            min={-180}
+            max={180}
+            unit="°"
+            title="Orientation of the flat when the pen reports no rotation"
+            onChange={(v) => updateBristle({ baseAngle: v })}
+          />
+          <CheckRow
+            label="Follow pen rotation"
+            checked={bristle.followTwist}
+            onChange={(v) => updateBristle({ followTwist: v })}
+          />
+          <ValSlider
+            label="Bristle Width"
+            value={bristle.bristleWidth}
+            min={0.4}
+            max={6}
+            step={0.1}
+            unit="px"
+            onChange={(v) => updateBristle({ bristleWidth: v })}
+          />
+          <PctSlider
+            label="Softness"
+            value={bristle.softness}
+            title="Edge softness of each track"
+            onChange={(v) => updateBristle({ softness: v })}
+          />
+          <PctSlider
+            label="Flow"
+            value={bristle.flow}
+            min={1}
+            onChange={(v) => updateBristle({ flow: Math.max(v, 0.01) })}
+          />
+          <PctSlider
+            label="Opacity Jitter"
+            value={bristle.opacityJitter}
+            title="Per-bristle opacity variation"
+            onChange={(v) => updateBristle({ opacityJitter: v })}
+          />
+          <ValSlider
+            label="Paint Load"
+            value={bristle.loadCapacity}
+            min={0}
+            max={3000}
+            step={10}
+            unit="px"
+            title="Travel until a bristle runs dry (0 = never)"
+            onChange={(v) => updateBristle({ loadCapacity: v })}
+          />
+          <CheckRow
+            label="Reload on lift"
+            checked={bristle.reloadOnLift}
+            title="Off: the tuft keeps drying across strokes until re-dipped"
+            onChange={(v) => updateBristle({ reloadOnLift: v })}
+          />
+          <PctSlider
+            label="Breakup"
+            value={bristle.breakup}
+            title="Fraction of each track that skips (dry-brush gaps)"
+            onChange={(v) => updateBristle({ breakup: v })}
+          />
+          <ValSlider
+            label="Breakup Scale"
+            value={bristle.breakupScale}
+            min={4}
+            max={200}
+            unit="px"
+            title="Wavelength of the deposit/skip alternation"
+            onChange={(v) => updateBristle({ breakupScale: v })}
+          />
+          <PctSlider
+            label="Hue Jitter"
+            value={bristle.colorJitter.hue}
+            onChange={(v) => updateBristle({ colorJitter: { ...bristle.colorJitter, hue: v } })}
+          />
+          <PctSlider
+            label="Sat Jitter"
+            value={bristle.colorJitter.sat}
+            onChange={(v) => updateBristle({ colorJitter: { ...bristle.colorJitter, sat: v } })}
+          />
+          <PctSlider
+            label="Bright Jitter"
+            value={bristle.colorJitter.bri}
+            onChange={(v) => updateBristle({ colorJitter: { ...bristle.colorJitter, bri: v } })}
+          />
+          <PctSlider
+            label="FG/BG Mix"
+            value={bristle.colorJitter.fgBg}
+            title="Per-bristle blend toward the background color"
+            onChange={(v) => updateBristle({ colorJitter: { ...bristle.colorJitter, fgBg: v } })}
+          />
+          <PctSlider
+            label="Tooth Depth"
+            value={bristle.toothDepth}
+            title="How strongly canvas texture gates a dry bristle"
+            onChange={(v) => updateBristle({ toothDepth: v })}
+          />
+          <SelectRow
+            label="Tooth Pattern"
+            value={bristle.pattern}
+            options={patternOptions(bristle.pattern)}
+            onChange={(v) => updateBristle({ pattern: v })}
+          />
+          <ValSlider
+            label="Tooth Scale"
+            value={bristle.patternScale}
+            min={0.1}
+            max={4}
+            step={0.1}
+            onChange={(v) => updateBristle({ patternScale: v })}
+          />
+        </PanelSection>
       )}
 
       <PanelSection title="Brush Tip Shape" open={open === 'tip'} onOpen={() => openIt('tip')}>

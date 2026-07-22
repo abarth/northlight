@@ -1,7 +1,8 @@
 import * as brushAbr from '../brush/abr';
+import * as brushBristle from '../brush/bristle';
 import * as brushDefaults from '../brush/defaults';
 import * as brushDynamics from '../brush/dynamics';
-import { engineStrokeParams } from '../brush/engineParams';
+import { bristleEngineParams, engineStrokeParams } from '../brush/engineParams';
 import * as brushPatterns from '../brush/patterns';
 import * as brushPresets from '../brush/presets';
 import { tipOutline } from '../brush/tipOutline';
@@ -9,6 +10,7 @@ import * as color from '../color/convert';
 import { PaintEngine } from '../gpu/engine';
 import { rasterizeSelection } from '../gpu/selection';
 import * as shaders from '../gpu/shaders';
+import { BristleStrokeSession } from '../gpu/bristleStroke';
 import { StrokeSession } from '../gpu/stroke';
 import * as layersUtil from '../layers';
 import * as transformInteraction from '../transform/interaction';
@@ -33,6 +35,7 @@ const api = {
   color,
   PaintEngine,
   StrokeSession,
+  BristleStrokeSession,
   rasterizeSelection,
   brush: {
     defaults: brushDefaults,
@@ -40,7 +43,9 @@ const api = {
     patterns: brushPatterns,
     presets: brushPresets,
     abr: brushAbr,
+    bristle: brushBristle,
     engineStrokeParams,
+    bristleEngineParams,
     importAbr,
     tipOutline,
   },

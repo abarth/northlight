@@ -22,7 +22,8 @@ import {
 } from '../controller';
 import { PaintEngine } from '../gpu/engine';
 import { StrokeSession } from '../gpu/stroke';
-import { engineStrokeParams } from '../brush/engineParams';
+import { BristleStrokeSession } from '../gpu/bristleStroke';
+import { bristleEngineParams, engineStrokeParams } from '../brush/engineParams';
 import type { PointerSample } from '../brush/dynamics';
 import { rgbToHsv } from '../color/convert';
 import { translation } from '../transform/matrix';
@@ -50,7 +51,7 @@ import { drawOverlay } from './overlay';
 import { useKeyboardShortcuts } from './useKeyboardShortcuts';
 
 type Drag =
-  | { kind: 'stroke'; session: StrokeSession }
+  | { kind: 'stroke'; session: StrokeSession | BristleStrokeSession }
   | { kind: 'pan'; startX: number; startY: number; panX: number; panY: number }
   | {
       kind: 'zoom';
@@ -95,11 +96,15 @@ export function CanvasView() {
   const dragRef = useRef<Drag | null>(null);
   const polyRef = useRef<Point[] | null>(null);
   const polyPreviewRef = useRef<Point | null>(null);
-  const cursorRef = useRef<{ x: number; y: number; over: boolean }>({
-    x: 0,
-    y: 0,
-    over: false,
-  });
+  const cursorRef = useRef<{
+    x: number;
+    y: number;
+    over: boolean;
+    /** live pen orientation, for the bristle footprint preview */
+    tiltX: number;
+    tiltY: number;
+    twist: number;
+  }>({ x: 0, y: 0, over: false, tiltX: 0, tiltY: 0, twist: 0 });
   /** currently held modifier keys, for the temporary-tool overrides */
   const spaceRef = useRef(false);
   const altRef = useRef(false);
@@ -529,6 +534,21 @@ export function CanvasView() {
       case 'eraser': {
         // locked / hidden layers and groups reject the stroke, like Photoshop
         if (!canEditActivePixels()) break;
+        // the experimental bristle engine paints tracks, not stamps
+        if (t === 'brush' && s.brushEngine === 'bristle') {
+          const params = bristleEngineParams(s.bristle, s.brush);
+          params.lockTransparent = activeLocks().transparency;
+          engine.beginStroke(params);
+          const session = new BristleStrokeSession(engine, s.bristle, {
+            fg: s.fg,
+            bg: s.bg,
+            sizePx: s.brush.tip.size,
+            smoothing: s.brush.smoothing,
+          });
+          session.down(sampleOf(e.nativeEvent, doc));
+          dragRef.current = { kind: 'stroke', session };
+          break;
+        }
         const settings = t === 'eraser' ? s.eraser : s.brush;
         const locks = activeLocks();
         // On the Background layer — and on transparency-locked layers, where
@@ -612,7 +632,13 @@ export function CanvasView() {
 
   function onPointerMove(e: React.PointerEvent) {
     const screen = eventToScreen(e.nativeEvent);
-    cursorRef.current = { ...screen, over: true };
+    cursorRef.current = {
+      ...screen,
+      over: true,
+      tiltX: e.nativeEvent.tiltX ?? 0,
+      tiltY: e.nativeEvent.tiltY ?? 0,
+      twist: e.nativeEvent.twist ?? 0,
+    };
     updateHoverCursor(e);
     const drag = dragRef.current;
     if (polyRef.current) polyPreviewRef.current = screenToDoc(screen);

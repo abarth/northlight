@@ -665,6 +665,178 @@ const TEST = `
     await eng.undo();
   }
 
+  // ---- 19b. bristle engine: geometry + deposition (pure) ----
+  {
+    const B = NL.brush.bristle;
+    const bs = B.defaultBristleBrush();
+    const rng = B.mulberry32(7);
+    const bundle = B.makeBundle(bs, rng);
+    assert('bristle: bundle has bristleCount bristles', bundle.length === bs.bristleCount,
+      'n=' + bundle.length);
+    const bundle2 = B.makeBundle(bs, B.mulberry32(7));
+    assert('bristle: bundle deterministic under a seeded rng',
+      JSON.stringify(bundle) === JSON.stringify(bundle2));
+
+    const pen = (pressure, tiltX = 0, tiltY = 0, twist = 0) =>
+      ({ x: 0, y: 0, pressure, tiltX, tiltY, twist });
+    const touching = (pose) => bundle.filter((b) => B.bristleTouches(bs, b, pose));
+    const nLow = touching(B.penPose(bs, pen(0.15))).length;
+    const nMid = touching(B.penPose(bs, pen(0.5))).length;
+    const nFull = touching(B.penPose(bs, pen(1))).length;
+    assert('bristle: footprint grows with pressure', nLow < nMid && nMid < nFull,
+      nLow + ' < ' + nMid + ' < ' + nFull);
+    assert('bristle: full pressure engages the whole tuft', nFull === bundle.length,
+      nFull + '/' + bundle.length);
+    assert('bristle: zero pressure touches nothing',
+      touching(B.penPose(bs, pen(0))).length === 0);
+
+    // tilt slides the contact patch toward the lean
+    const poseTilt = B.penPose(bs, pen(0.3, 50, 0));
+    const hit = touching(poseTilt);
+    const cx = hit.reduce((s2, b) => s2 + B.bristleOffset(bs, b, poseTilt, 100).x, 0) /
+      Math.max(hit.length, 1);
+    assert('bristle: tilt shifts the footprint toward the lean', hit.length > 0 && cx > 0,
+      'cx=' + cx.toFixed(2) + ' n=' + hit.length);
+
+    // analytic cursor outline: grows with pressure, respects thickness
+    const out1 = B.footprintOutline(bs, B.penPose(bs, pen(1)), 100);
+    const outLo = B.footprintOutline(bs, B.penPose(bs, pen(0.2)), 100);
+    const extent = (pts, f) => Math.max(...pts.map(f)) - Math.min(...pts.map(f));
+    assert('bristle: outline wider at full pressure',
+      extent(out1, (p) => p.x) > extent(outLo, (p) => p.x));
+    assert('bristle: outline flattened by thickness',
+      extent(out1, (p) => p.y) < extent(out1, (p) => p.x) * (bs.thickness + 0.1));
+
+    // value noise: deterministic, bounded
+    let nOk = true;
+    for (let i = 0; i < 50; i++) {
+      const v = B.valueNoise1(3.7, i * 0.31);
+      if (!(v >= 0 && v <= 1) || v !== B.valueNoise1(3.7, i * 0.31)) nOk = false;
+    }
+    assert('bristle: value noise deterministic and in 0..1', nOk);
+
+    // deposition: tracks emit 11-float records; breakup thins them
+    const simRecords = (over) => {
+      const s2 = Object.assign({}, bs, {
+        opacityJitter: 0, loadCapacity: 0, breakup: 0,
+        colorJitter: { hue: 0, sat: 0, bri: 0, fgBg: 0 },
+      }, over);
+      const sim = new B.BristleSim(s2, 40,
+        { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 }, rng: B.mulberry32(11) });
+      const out = [];
+      sim.update(pen(1), out);
+      for (let x = 110; x <= 300; x += 10) {
+        sim.update({ x, y: 150, pressure: 1, tiltX: 0, tiltY: 0, twist: 0 }, out);
+      }
+      return out;
+    };
+    const solid = simRecords({});
+    assert('bristle: sim emits STAMP_FLOATS-sized records',
+      solid.length > 0 && solid.length % 11 === 0, 'len=' + solid.length);
+    const broken = simRecords({ breakup: 0.85 });
+    assert('bristle: breakup skips deposition along tracks',
+      broken.length < solid.length * 0.6,
+      broken.length + ' vs ' + solid.length);
+
+    // depletion: alpha fades and the tooth gate deepens as bristles dry
+    const dry = simRecords({ loadCapacity: 120 });
+    const alphaAt = (rs, i) => rs[i * 11 + 3];
+    const depthAt = (rs, i) => rs[i * 11 + 10];
+    const nRec = dry.length / 11;
+    assert('bristle: load depletion fades the track tail',
+      alphaAt(dry, nRec - 1) < alphaAt(dry, 0) * 0.5,
+      alphaAt(dry, 0).toFixed(3) + ' -> ' + alphaAt(dry, nRec - 1).toFixed(3));
+    assert('bristle: dryness raises the tooth gate',
+      depthAt(dry, nRec - 1) > depthAt(dry, 0),
+      depthAt(dry, 0).toFixed(3) + ' -> ' + depthAt(dry, nRec - 1).toFixed(3));
+
+    // engine params: tooth rides the texture-each-tip subtract path
+    const ep = NL.brush.bristleEngineParams(bs, makeBrush({}));
+    assert('bristle: engine params gate tooth via subtract/each-tip',
+      ep.texture && ep.texture.mode === 'subtract' && ep.texture.eachTip === true &&
+      ep.texture.depth === 1 && ep.dual === null);
+    const epFlat = NL.brush.bristleEngineParams(
+      Object.assign({}, bs, { toothDepth: 0 }), makeBrush({}));
+    assert('bristle: zero tooth depth disables the texture pass', epFlat.texture === null);
+  }
+
+  // ---- 19c. bristle engine: GPU tracks ----
+  {
+    const B = NL.brush.bristle;
+    const solidSettings = Object.assign(B.defaultBristleBrush(), {
+      bristleCount: 96, bristleWidth: 2.5, softness: 0, flow: 1,
+      opacityJitter: 0, loadCapacity: 0, breakup: 0, toothDepth: 0,
+      colorJitter: { hue: 0, sat: 0, bri: 0, fgBg: 0 },
+      splay: 0.3, thickness: 0.45, reloadOnLift: true,
+    });
+    const colors = { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 } };
+    const samp = (x, y, p) => ({ x, y, pressure: p, tiltX: 0, tiltY: 0, twist: 0 });
+    const drag = (settings, sizePx) => {
+      eng.beginStroke(NL.brush.bristleEngineParams(settings, makeBrush({})));
+      const session = new NL.BristleStrokeSession(eng, settings,
+        Object.assign({ sizePx, smoothing: 0, rng: B.mulberry32(5) }, colors));
+      session.down(samp(100, 150, 1));
+      for (let x = 110; x <= 300; x += 10) session.move([samp(x, 150, 1)]);
+      session.up();
+      eng.endStroke('bg');
+    };
+
+    drag(solidSettings, 40);
+    let d = await read();
+    // the stroke spine should be covered along the whole gesture
+    let gaps = 0;
+    for (let x = 110; x <= 290; x += 5) {
+      let lo = 255;
+      for (let y = 146; y <= 154; y += 2) lo = Math.min(lo, px(d, x, y)[0]);
+      if (lo > 120) gaps++;
+    }
+    assert('bristle GPU: tracks cover the stroke spine', gaps === 0, gaps + ' gaps');
+    assert('bristle GPU: nothing outside the tuft width', px(d, 200, 250)[0] === 255,
+      'v=' + px(d, 200, 250)[0]);
+    await eng.undo();
+
+    // depletion: the tail of a stroke is drier (lighter) than the head
+    const drySettings = Object.assign({}, solidSettings, { loadCapacity: 100, flow: 0.9 });
+    drag(drySettings, 40);
+    d = await read();
+    const avgCol = (x) => {
+      let s2 = 0, n = 0;
+      for (let y = 144; y <= 156; y += 2) { s2 += px(d, x, y)[0]; n++; }
+      return s2 / n;
+    };
+    const head = avgCol(115);
+    const tail = avgCol(290);
+    assert('bristle GPU: paint runs out along the stroke', tail - head > 40,
+      'head=' + head.toFixed(0) + ' tail=' + tail.toFixed(0));
+    await eng.undo();
+
+    // pressure footprint: a light touch marks a much thinner band than full press
+    const bandHeight = (data) => {
+      let top = 1e9, bot = -1e9;
+      for (let y = 100; y <= 200; y++) {
+        if (px(data, 200, y)[0] < 200) { top = Math.min(top, y); bot = Math.max(bot, y); }
+      }
+      return bot >= top ? bot - top : 0;
+    };
+    drag(solidSettings, 60);
+    d = await read();
+    const hFull = bandHeight(d);
+    await eng.undo();
+
+    eng.beginStroke(NL.brush.bristleEngineParams(solidSettings, makeBrush({})));
+    const light = new NL.BristleStrokeSession(eng, solidSettings,
+      Object.assign({ sizePx: 60, smoothing: 0, rng: B.mulberry32(5) }, colors));
+    light.down(samp(100, 150, 0.1));
+    for (let x = 110; x <= 300; x += 10) light.move([samp(x, 150, 0.1)]);
+    light.up();
+    eng.endStroke('bg');
+    d = await read();
+    const hLight = bandHeight(d);
+    assert('bristle GPU: light pressure engages a thinner band',
+      hLight > 0 && hLight < hFull * 0.6, hLight + ' vs ' + hFull);
+    await eng.undo();
+  }
+
   // ---- 20. dynamics unit tests (pure) ----
   {
     const ctx = (pressure, stepIndex = 0) => ({
