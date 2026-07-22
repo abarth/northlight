@@ -95,26 +95,52 @@ Per-bristle pigment state (the per-stamp jitter idea, moved to bristles):
   plus an optional blend toward the background color, so the tuft carries
   imperfectly mixed paint. The streaks this makes run along the stroke.
 - **Base opacity**: per-bristle jitter; some bristles print harder.
-- **Load**: depletes with track distance (`loadCapacity` px of travel).
-  Segment alpha fades with load, and — see below — dryness also raises the
-  canvas-tooth gate. Lifting the pen reloads the brush (optional), making
-  reload part of the stroke rhythm as it is in paint.
+- **Load**: depletes with track distance. `load` is measured in **brush
+  diameters** of travel, so "one brush-load of paint" is the same gesture at
+  any size. Segment alpha fades with load, and — see below — dryness also
+  raises the canvas-tooth gate. Lifting the pen reloads the brush
+  (optional), making reload part of the stroke rhythm as it is in paint.
 - **Flow breakup**: deposition along a track is gated by a smooth per-bristle
   value noise over arc length (each bristle has its own seed and phase). A
   streak deposits, dies for a stretch, catches again — coherent gaps along
   the track, the drybrush signature. `breakup` sets the threshold (how much
-  of the track is dry), `breakupScale` the wavelength of the gaps.
+  of the track is dry), `breakupScale` the wavelength of the gaps as a
+  fraction of brush size.
+
+### Scale invariance
+
+Every mark-quality parameter is defined relative to brush size, so resizing
+the brush scales the whole mark instead of thinning it. Track width is not a
+px setting: it derives from `coverage` × size/√bristleCount (× a thickness
+term) — the width at which the tracks would exactly tile the footprint,
+scaled by coverage. Growing the brush widens every streak proportionally;
+raising the bristle count splits the same coverage into finer streaks. Load
+and breakup wavelength are size-relative for the same reason. The only
+absolute-px quantities are rendering details (segment subdivision length)
+and the document-anchored tooth texture, which is a property of the
+*surface*, not the brush.
 
 ### Canvas tooth
 
 Segments render through the existing texture pipeline in **subtract** mode
-with *texture-each-tip* semantics: the pattern (canvas/paper/imported) is a
-height field, and each segment loses coverage in the valleys
-(`a′ = a − (1−v)·depth`). The per-instance `depthScale` attribute — already
-in the stamp vertex layout — is driven by **bristle dryness**: a loaded
-bristle floods the tooth (low depth), a dry one only kisses the peaks (high
-depth). Dry-brush over canvas texture emerges from the interaction instead
-of being painted on.
+with *texture-each-tip* semantics: the pattern is a height field, and each
+segment loses coverage in the valleys (`a′ = a − (1−v)·depth`). The
+per-instance `depthScale` attribute — already in the stamp vertex layout —
+is driven by **bristle dryness**: a loaded bristle floods the tooth (low
+depth), a dry one only kisses the peaks (high depth). Dry-brush over canvas
+texture emerges from the interaction instead of being painted on.
+
+The default tooth is the **`tooth` pattern**: isotropic multi-octave noise
+with no weave or lattice structure. A woven-canvas pattern turned out to
+read as a mechanical checkerboard when large areas are filled — the weave
+is a screen-aligned periodic grid, and every stroke reveals the same grid.
+We are not emulating cloth; what the tooth is *for* is (a) spatially
+anchored breakup — two overlapping dry strokes skip at the same places, so
+the holes read as a shared surface rather than per-stroke noise — and (b)
+cross-track granularity that the along-track breakup noise cannot provide.
+Aperiodic granular noise keeps both without the grid. The woven `canvas`
+pattern is still selectable, and `toothDepth: 0` removes the surface
+entirely — then all breakup is per-bristle and travels with the stroke.
 
 ### Rendering: capsule segments through the stamp pipeline
 

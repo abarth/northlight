@@ -41,6 +41,7 @@ export type PatternId =
   | 'sponge'
   | 'clouds'
   | 'speckle'
+  | 'tooth'
   | (string & {});
 
 /** How texture/dual-brush values combine with brush coverage. */
@@ -265,4 +266,5 @@ export const PATTERNS: { id: PatternId; label: string }[] = [
   { id: 'sponge', label: 'Sponge' },
   { id: 'clouds', label: 'Clouds' },
   { id: 'speckle', label: 'Speckle' },
+  { id: 'tooth', label: 'Tooth (Noise)' },
 ];

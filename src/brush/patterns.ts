@@ -129,6 +129,20 @@ function makePattern(id: PatternId): GrayMap {
       for (let i = 0; i < out.length; i++) out[i] = clamp01(0.5 + (n[i] - 0.5) * 1.6);
       break;
     }
+    case 'tooth': {
+      // Dry-brush tooth: isotropic granular noise with no directional weave
+      // or lattice structure — mostly-paintable surface with irregular dips
+      // that catch a dry bristle. Digital-first: reads as "surface" without
+      // the mechanical repetition of a woven canvas.
+      const body = fractal(size, 901, 5, 6);
+      const grain = fractal(size, 902, 3, 24);
+      for (let i = 0; i < out.length; i++) {
+        // bias high (peaks take paint), soft-threshold the dips into pockets
+        const t = smooth(clamp01((body[i] - 0.32) / 0.42));
+        out[i] = clamp01(0.3 + 0.7 * t + (grain[i] - 0.5) * 0.45);
+      }
+      break;
+    }
     case 'speckle': {
       out.fill(0.95);
       const rng = mulberry32(501);
@@ -242,7 +256,14 @@ const registeredTips = new Map<string, GrayMap>();
 /** Patterns registered at runtime (e.g. imported from .abr patt sections). */
 const registeredPatterns = new Map<string, { map: GrayMap; label: string }>();
 
-const BUILTIN_PATTERNS: PatternId[] = ['paper', 'canvas', 'sponge', 'clouds', 'speckle'];
+const BUILTIN_PATTERNS: PatternId[] = [
+  'paper',
+  'canvas',
+  'sponge',
+  'clouds',
+  'speckle',
+  'tooth',
+];
 
 export function getPattern(id: PatternId): GrayMap {
   const registered = registeredPatterns.get(id);

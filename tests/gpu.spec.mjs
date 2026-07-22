@@ -718,7 +718,7 @@ const TEST = `
     // deposition: tracks emit 11-float records; breakup thins them
     const simRecords = (over) => {
       const s2 = Object.assign({}, bs, {
-        opacityJitter: 0, loadCapacity: 0, breakup: 0,
+        opacityJitter: 0, load: 0, breakup: 0,
         colorJitter: { hue: 0, sat: 0, bri: 0, fgBg: 0 },
       }, over);
       const sim = new B.BristleSim(s2, 40,
@@ -739,7 +739,8 @@ const TEST = `
       broken.length + ' vs ' + solid.length);
 
     // depletion: alpha fades and the tooth gate deepens as bristles dry
-    const dry = simRecords({ loadCapacity: 120 });
+    // (load is in brush diameters: 3 x 40px size = 120px of travel)
+    const dry = simRecords({ load: 3 });
     const alphaAt = (rs, i) => rs[i * 11 + 3];
     const depthAt = (rs, i) => rs[i * 11 + 10];
     const nRec = dry.length / 11;
@@ -749,6 +750,41 @@ const TEST = `
     assert('bristle: dryness raises the tooth gate',
       depthAt(dry, nRec - 1) > depthAt(dry, 0),
       depthAt(dry, 0).toFixed(3) + ' -> ' + depthAt(dry, nRec - 1).toFixed(3));
+
+    // scale invariance: the same gesture at 3x size makes the same mark 3x
+    // larger — track width scales with size, and the load runs out at the
+    // same point of the (relative) stroke.
+    {
+      const runAt = (scale) => {
+        const s2 = Object.assign({}, bs, {
+          opacityJitter: 0, load: 4, breakup: 0,
+          colorJitter: { hue: 0, sat: 0, bri: 0, fgBg: 0 },
+        });
+        const sim = new B.BristleSim(s2, 40 * scale,
+          { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 }, rng: B.mulberry32(21) });
+        const out = [];
+        for (let i = 0; i <= 40; i++) {
+          sim.update({ x: (100 + i * 10) * scale, y: 150 * scale, pressure: 1,
+            tiltX: 0, tiltY: 0, twist: 0 }, out);
+        }
+        const widths = [];
+        for (let i = 0; i < out.length; i += 11) {
+          widths.push(out[i + 5] * 2 * out[i + 2]); // roundness x 2 x radius
+        }
+        return {
+          meanWidth: widths.reduce((a, b2) => a + b2, 0) / widths.length,
+          lastAlpha: out[out.length - 11 + 3],
+        };
+      };
+      const at1 = runAt(1);
+      const at3 = runAt(3);
+      assert('bristle: track width scales with brush size',
+        near(at3.meanWidth / at1.meanWidth, 3, 0.25),
+        'ratio=' + (at3.meanWidth / at1.meanWidth).toFixed(3));
+      assert('bristle: load depletes at the same relative travel at any size',
+        near(at3.lastAlpha, at1.lastAlpha, 0.05),
+        at1.lastAlpha.toFixed(3) + ' vs ' + at3.lastAlpha.toFixed(3));
+    }
 
     // engine params: tooth rides the texture-each-tip subtract path
     const ep = NL.brush.bristleEngineParams(bs, makeBrush({}));
@@ -764,8 +800,8 @@ const TEST = `
   {
     const B = NL.brush.bristle;
     const solidSettings = Object.assign(B.defaultBristleBrush(), {
-      bristleCount: 96, bristleWidth: 2.5, softness: 0, flow: 1,
-      opacityJitter: 0, loadCapacity: 0, breakup: 0, toothDepth: 0,
+      bristleCount: 96, coverage: 1, softness: 0, flow: 1,
+      opacityJitter: 0, load: 0, breakup: 0, toothDepth: 0,
       colorJitter: { hue: 0, sat: 0, bri: 0, fgBg: 0 },
       splay: 0.3, thickness: 0.45, reloadOnLift: true,
     });
@@ -796,7 +832,8 @@ const TEST = `
     await eng.undo();
 
     // depletion: the tail of a stroke is drier (lighter) than the head
-    const drySettings = Object.assign({}, solidSettings, { loadCapacity: 100, flow: 0.9 });
+    // (2.5 diameters x 40px = 100px of loaded travel)
+    const drySettings = Object.assign({}, solidSettings, { load: 2.5, flow: 0.9 });
     drag(drySettings, 40);
     d = await read();
     const avgCol = (x) => {
@@ -860,6 +897,9 @@ const TEST = `
           !(s2.thickness > 0 && s2.thickness <= 1) ||
           !(s2.belly > 0 && s2.belly <= 1) ||
           !(s2.flow > 0 && s2.flow <= 1) ||
+          !(s2.coverage > 0 && s2.coverage <= 1.5) ||
+          !(s2.load >= 0 && s2.load <= 50) ||
+          !(s2.breakupScale > 0 && s2.breakupScale <= 3) ||
           !(pr.size >= 1 && pr.size <= 1000) ||
           !(pr.opacity > 0 && pr.opacity <= 1)) valid = false;
       // every preset must actually deposit on a plain pressure-ramp stroke

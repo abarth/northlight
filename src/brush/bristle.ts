@@ -45,8 +45,13 @@ export interface BristleBrushSettings {
   /** rotate the flat with the stylus barrel rotation when available */
   followTwist: boolean;
 
-  /** px — width of a single bristle track */
-  bristleWidth: number;
+  /**
+   * 0..1.5 — how much of the footprint the tracks fill. Track width is
+   * derived from size, bristle count and thickness (width ∝ size/√count),
+   * so the mark quality is scale-invariant: resizing the brush scales the
+   * whole mark, and more bristles means finer streaks at the same coverage.
+   */
+  coverage: number;
   /** 0..1 — softness of the track edges (0 = crisp) */
   softness: number;
   /** 0..1 per-segment deposit; tracks build up like flow */
@@ -54,13 +59,20 @@ export interface BristleBrushSettings {
   /** 0..1 random per-bristle reduction of base opacity */
   opacityJitter: number;
 
-  /** px of travel until a bristle runs dry; 0 = never depletes */
-  loadCapacity: number;
+  /**
+   * Travel until a bristle runs dry, in brush diameters (0 = never).
+   * Size-relative so a stroke "one brush-load long" is the same gesture at
+   * any size.
+   */
+  load: number;
   /** refill the tuft when the pen lifts */
   reloadOnLift: boolean;
   /** 0..1 — fraction of each track that skips (dry-brush breakup) */
   breakup: number;
-  /** px — wavelength of the deposit/skip alternation along a track */
+  /**
+   * Wavelength of the deposit/skip alternation along a track, as a fraction
+   * of brush size (size-relative, like everything else about the mark).
+   */
   breakupScale: number;
 
   colorJitter: BristleColorJitter;
@@ -81,17 +93,17 @@ export function defaultBristleBrush(): BristleBrushSettings {
     tiltResponse: 0.6,
     baseAngle: 0,
     followTwist: true,
-    bristleWidth: 1.6,
+    coverage: 0.7,
     softness: 0.25,
     flow: 0.75,
     opacityJitter: 0.35,
-    loadCapacity: 700,
+    load: 15,
     reloadOnLift: true,
     breakup: 0.3,
-    breakupScale: 28,
+    breakupScale: 0.7,
     colorJitter: { hue: 0.03, sat: 0.12, bri: 0.14, fgBg: 0 },
-    toothDepth: 0.6,
-    pattern: 'canvas',
+    toothDepth: 0.5,
+    pattern: 'tooth',
     patternScale: 1,
   };
 }
@@ -292,10 +304,26 @@ export class BristleSim {
   private bundle: Bristle[];
   private runs: BristleRun[];
   private sizePx: number;
+  /** px — derived from coverage/size/count so marks are scale-invariant */
+  private trackWidth: number;
+  /** px of travel until dry (0 = never), derived from `load` × size */
+  private loadPx: number;
+  /** px — breakup wavelength, derived from breakupScale × size */
+  private breakupPx: number;
 
   constructor(s: BristleBrushSettings, sizePx: number, opts: BristleSimOptions) {
     this.s = s;
     this.sizePx = sizePx;
+    // Tracks tile the footprint at coverage 1: the elliptical cross-section
+    // area split among bristleCount tracks gives width ∝ size/√count.
+    this.trackWidth = Math.max(
+      s.coverage *
+        (sizePx / 2) *
+        Math.sqrt((Math.PI * s.thickness) / Math.max(s.bristleCount, 1)),
+      0.4,
+    );
+    this.loadPx = s.load > 0 ? s.load * sizePx : 0;
+    this.breakupPx = Math.max(s.breakupScale * sizePx, 1);
     const rng = opts.rng ?? Math.random;
     this.bundle = makeBundle(s, rng);
     this.runs = this.bundle.map(() => ({
@@ -327,7 +355,7 @@ export class BristleSim {
   update(sample: PointerSample, out: number[]): void {
     const s = this.s;
     const pose = penPose(s, sample);
-    const w = Math.max(s.bristleWidth, 0.4);
+    const w = this.trackWidth;
 
     for (let i = 0; i < this.bundle.length; i++) {
       const b = this.bundle[i];
@@ -386,12 +414,12 @@ export class BristleSim {
     let gate = 1;
     if (s.breakup > 0) {
       const mid = run.travel + len / 2;
-      const n = valueNoise1(run.seed, mid / Math.max(s.breakupScale, 1));
+      const n = valueNoise1(run.seed, mid / this.breakupPx);
       gate = clamp((n - s.breakup) / 0.1, 0, 1);
       if (gate <= 0) return;
     }
 
-    const load = s.loadCapacity > 0 ? Math.max(0, 1 - run.travel / s.loadCapacity) : 1;
+    const load = this.loadPx > 0 ? Math.max(0, 1 - run.travel / this.loadPx) : 1;
     const alpha =
       s.flow * run.baseAlpha * gate * (0.15 + 0.85 * load) * (0.35 + 0.65 * pose.press);
     if (alpha <= 0.003) return;

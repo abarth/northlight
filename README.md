@@ -108,10 +108,14 @@ design). The brush is a 3D filbert-shaped tuft of up to 256 bristles:
   per-bristle opacity, and a paint **load** that depletes with travel so
   strokes run dry along the gesture ("reload on lift" off keeps the tuft
   drying across strokes until it's re-dipped).
+- **Scale-invariant marks**: track width derives from coverage ×
+  size/√bristles, and load / breakup wavelength are measured relative to
+  brush size — resizing the brush scales the mark, it never thins it.
 - **Breakup** gates deposition with coherent per-bristle noise along each
-  track — streaks die and catch again, the dry-brush signature — and canvas
-  **tooth** (any texture pattern) carves dry bristles harder than loaded
-  ones via the per-segment texture depth.
+  track — streaks die and catch again, the dry-brush signature — and
+  surface **tooth** (default: an aperiodic granular noise pattern, no
+  weave grid) carves dry bristles harder than loaded ones via the
+  per-segment texture depth.
 - The brush cursor shows the analytic footprint before the pen lands: the
   full-pressure outline (dashed), the light-touch outline (solid), and the
   flat's orientation, all following live pen tilt/twist.

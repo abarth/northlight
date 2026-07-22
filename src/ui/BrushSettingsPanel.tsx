@@ -181,14 +181,13 @@ export function BrushSettingsPanel() {
             checked={bristle.followTwist}
             onChange={(v) => updateBristle({ followTwist: v })}
           />
-          <ValSlider
-            label="Bristle Width"
-            value={bristle.bristleWidth}
-            min={0.4}
-            max={6}
-            step={0.1}
-            unit="px"
-            onChange={(v) => updateBristle({ bristleWidth: v })}
+          <PctSlider
+            label="Coverage"
+            value={bristle.coverage}
+            min={5}
+            max={150}
+            title="How much of the footprint the tracks fill (track width scales with size and bristle count)"
+            onChange={(v) => updateBristle({ coverage: v })}
           />
           <PctSlider
             label="Softness"
@@ -210,13 +209,13 @@ export function BrushSettingsPanel() {
           />
           <ValSlider
             label="Paint Load"
-            value={bristle.loadCapacity}
+            value={bristle.load}
             min={0}
-            max={3000}
-            step={10}
-            unit="px"
-            title="Travel until a bristle runs dry (0 = never)"
-            onChange={(v) => updateBristle({ loadCapacity: v })}
+            max={40}
+            step={0.5}
+            unit="×size"
+            title="Travel until a bristle runs dry, in brush diameters (0 = never)"
+            onChange={(v) => updateBristle({ load: v })}
           />
           <CheckRow
             label="Reload on lift"
@@ -230,13 +229,12 @@ export function BrushSettingsPanel() {
             title="Fraction of each track that skips (dry-brush gaps)"
             onChange={(v) => updateBristle({ breakup: v })}
           />
-          <ValSlider
+          <PctSlider
             label="Breakup Scale"
             value={bristle.breakupScale}
-            min={4}
-            max={200}
-            unit="px"
-            title="Wavelength of the deposit/skip alternation"
+            min={5}
+            max={300}
+            title="Wavelength of the deposit/skip alternation, relative to brush size"
             onChange={(v) => updateBristle({ breakupScale: v })}
           />
           <PctSlider
