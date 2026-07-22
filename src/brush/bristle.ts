@@ -192,15 +192,28 @@ export function penPose(s: BristleBrushSettings, p: PointerSample): PenPose {
   return { press, rot, lean, leanX, leanY };
 }
 
+/** Width of the soft contact band, in pressure units. */
+const CONTACT_BAND = 0.08;
+
 /**
- * Whether a bristle touches the canvas under this pose. Bristles on the
- * leaning side get an effective depth bonus, so tilt slides the contact
+ * How firmly a bristle presses the canvas under this pose, 0..1. Contact is
+ * a smooth band rather than a hard threshold: bristles graze in and out of
+ * contact gradually as pressure/tilt recruit them (no chain-chopping pops
+ * at the footprint boundary while splay/pressure fluctuates). Bristles on
+ * the leaning side get an effective depth bonus, so tilt slides the contact
  * patch toward the lean — painting with the side of the filbert.
  */
-export function bristleTouches(s: BristleBrushSettings, b: Bristle, pose: PenPose): boolean {
-  if (pose.press <= 0) return false;
+export function contactFactor(s: BristleBrushSettings, b: Bristle, pose: PenPose): number {
+  if (pose.press <= 0) return 0;
   const along = leanComponent(s, b, pose);
-  return b.tipZ - pose.lean * s.belly * along <= pose.press;
+  const margin = pose.press - (b.tipZ - pose.lean * s.belly * along);
+  const t = clamp(margin / CONTACT_BAND, 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+/** Whether a bristle touches at all (see contactFactor for how firmly). */
+export function bristleTouches(s: BristleBrushSettings, b: Bristle, pose: PenPose): boolean {
+  return contactFactor(s, b, pose) > 0;
 }
 
 /** Component of the bristle's (flattened, rotated) offset along the lean. */
@@ -294,8 +307,6 @@ interface PendingSeg {
   /** start-edge lateral (unit perpendicular, or miter-scaled bisector) */
   l0x: number;
   l0y: number;
-  /** render a round cap at the start (chain begins here) */
-  startCap: boolean;
   a0: number;
   a1: number;
   d0: number;
@@ -325,8 +336,10 @@ interface BristleRun {
   lastD: number;
   /** pressure/turn multiplier at the current position (ramped per move) */
   prevMult: number;
-  /** the next chain start renders a round cap (touch / lift / sharp turn) */
-  capNext: boolean;
+  /** travel at the current chain's start — drives the fade-in ramp */
+  chainStartTravel: number;
+  /** pen travel at the last touch-down, to tell a tap from a grazing touch */
+  touchPenTravel: number;
 }
 
 export interface BristleSimOptions {
@@ -386,22 +399,25 @@ export class BristleSim {
       lastA: 0,
       lastD: 0,
       prevMult: 1,
-      capNext: true,
+      chainStartTravel: 0,
+      touchPenTravel: 0,
     }));
   }
+
+  /** cumulative pen travel this stroke, for telling taps from moves */
+  private penTravel = 0;
 
   /** Refills every bristle (start of a stroke when reloadOnLift is set). */
   reload(): void {
     for (const run of this.runs) run.travel = 0;
   }
 
-  /** All bristles leave the canvas (pen lift), capping their tracks. */
+  /** All bristles leave the canvas (pen lift), fading their tracks out. */
   liftAll(out: number[]): void {
     for (const run of this.runs) {
       this.flushPending(run, out, true);
       run.down = false;
       run.dir = null;
-      run.capNext = true;
     }
     this.lastPen = null;
   }
@@ -421,36 +437,39 @@ export class BristleSim {
     const penStep = this.lastPen
       ? Math.hypot(sample.x - this.lastPen.x, sample.y - this.lastPen.y)
       : 0;
+    this.penTravel += penStep;
     this.lastPen = { x: sample.x, y: sample.y };
 
     for (let i = 0; i < this.bundle.length; i++) {
       const b = this.bundle[i];
       const run = this.runs[i];
-      if (!bristleTouches(s, b, pose)) {
+      const contact = contactFactor(s, b, pose);
+      if (contact <= 0) {
         this.flushPending(run, out, true);
         run.down = false;
         run.dir = null;
-        run.capNext = true;
         continue;
       }
       const off = bristleOffset(s, b, pose, this.sizePx);
       const tx = sample.x + off.x;
       const ty = sample.y + off.y;
-      const pressMult = 0.35 + 0.65 * pose.press;
+      // grazing bristles at the footprint boundary press (and print) lightly
+      const pressMult = (0.35 + 0.65 * pose.press) * contact;
 
       if (!run.down) {
         run.down = true;
         run.x = tx;
         run.y = ty;
         run.prevMult = pressMult;
-        run.capNext = true;
+        run.touchPenTravel = this.penTravel;
         const p = this.pointParams(run, run.travel, pressMult);
         run.lastA = p.alpha;
         run.lastD = p.depth;
-        // a lone touch renders as a dab if the pen lifts without moving
+        // held only if the pen never moves: a stationary tap prints a dab,
+        // while a grazing touch during a moving stroke prints nothing
         run.pend = {
           x0: tx, y0: ty, x1: tx, y1: ty,
-          l0x: 0, l0y: 1, startCap: true,
+          l0x: 0, l0y: 1,
           a0: p.alpha, a1: p.alpha, d0: p.depth, d1: p.depth,
         };
         continue;
@@ -535,8 +554,10 @@ export class BristleSim {
   /**
    * Advances a bristle by one sub-segment: mitering the joint with the
    * pending segment when the turn allows (the shared slanted edge makes the
-   * chain exactly overlap-free), or capping and restarting the chain when it
-   * does not. The new segment becomes pending; its predecessor is emitted.
+   * chain exactly overlap-free), or fading the chain out and restarting it
+   * when the turn is too sharp. The new segment becomes pending; its
+   * predecessor is emitted. Chain starts fade in from transparent over
+   * about one track width of travel — no caps, no dark knots.
    */
   private pushSegment(
     run: BristleRun,
@@ -549,18 +570,6 @@ export class BristleSim {
     w: number,
     out: number[],
   ): void {
-    const end = this.pointParams(run, travelEnd, mult);
-    const a0 = run.lastA;
-    const d0 = run.lastD;
-    run.lastA = end.alpha;
-    run.lastD = end.depth;
-
-    // fully dry stretch: break the chain (ends ramp to ~0, so no caps needed)
-    if (a0 <= 0.003 && end.alpha <= 0.003) {
-      this.flushPending(run, out, false);
-      return;
-    }
-
     const len = Math.hypot(x1 - x0, y1 - y0);
     if (len < 1e-6) return;
     const dx = (x1 - x0) / len;
@@ -568,15 +577,17 @@ export class BristleSim {
     // unit perpendicular of this segment (start lateral when no miter)
     let l0x = -dy;
     let l0y = dx;
-    let startCap = run.capNext;
+    let a0 = run.lastA;
+    const d0 = run.lastD;
+    let newChain = false;
 
     const pend = run.pend;
     if (pend) {
       const plen = Math.hypot(pend.x1 - pend.x0, pend.y1 - pend.y0);
       if (plen < 1e-6) {
-        // lone-touch pending: this move absorbs it into a capped chain start
+        // lone-touch pending: the move absorbs it; the chain fades in here
         run.pend = null;
-        startCap = true;
+        newChain = true;
       } else {
         const pdx = (pend.x1 - pend.x0) / plen;
         const pdy = (pend.y1 - pend.y0) / plen;
@@ -588,10 +599,11 @@ export class BristleSim {
         const cosTurn = pdx * dx + pdy * dy;
         const tanHalf = Math.abs(pdx * dy - pdy * dx) / Math.max(1 + cosTurn, 1e-4);
         const hw = w / 2 + 1;
-        // too sharp (or miter longer than the segments can host): cap + restart
+        // too sharp (or miter longer than the segments can host): the chain
+        // fades out over its last segment and a new one fades back in
         if (c < 0.5 || hw * tanHalf > 0.45 * Math.min(plen, len)) {
           this.flushPending(run, out, true);
-          startCap = true;
+          newChain = true;
         } else {
           const scale = 1 / c;
           const mx = (msx / mlen) * scale;
@@ -599,62 +611,77 @@ export class BristleSim {
           this.flushPending(run, out, false, { x: mx, y: my });
           l0x = mx;
           l0y = my;
-          startCap = false;
         }
       }
     }
-    run.capNext = false;
 
-    run.pend = {
-      x0, y0, x1, y1,
-      l0x, l0y, startCap,
-      a0, a1: end.alpha, d0, d1: end.depth,
-    };
+    if (newChain) {
+      a0 = 0;
+      run.chainStartTravel = travelEnd - len;
+    }
+    // fade in from transparent over ~one track width of travel
+    const taper = Math.max(this.trackWidth, 1);
+    const fadeIn = clamp((travelEnd - run.chainStartTravel) / taper, 0, 1);
+    const end = this.pointParams(run, travelEnd, mult);
+    const a1 = end.alpha * fadeIn;
+    run.lastA = a1;
+    run.lastD = end.depth;
+
+    // fully dry stretch: break the chain (ends ramp to ~0 on their own)
+    if (a0 <= 0.003 && a1 <= 0.003) {
+      this.flushPending(run, out, false);
+      return;
+    }
+
+    run.pend = { x0, y0, x1, y1, l0x, l0y, a0, a1, d0, d1: end.depth };
   }
 
   /**
-   * Emits the pending segment. `roundEnd` caps it (chain ends here);
-   * `endLateral` is the miter-scaled bisector when the chain continues.
+   * Emits the pending segment. `fadeEnd` ends the chain by ramping its
+   * final segment to transparent; `endLateral` is the miter-scaled bisector
+   * when the chain continues. A zero-length pending (touch that never
+   * moved) prints a dab only for a genuinely stationary tap.
    */
   private flushPending(
     run: BristleRun,
     out: number[],
-    roundEnd: boolean,
+    fadeEnd: boolean,
     endLateral?: { x: number; y: number },
   ): void {
     const pend = run.pend;
     if (!pend) return;
     run.pend = null;
-    if (Math.max(pend.a0, pend.a1) <= 0.003) return;
 
     const hw = Math.max(this.trackWidth / 2, 0.2);
-    const len = Math.hypot(pend.x1 - pend.x0, pend.y1 - pend.y0);
-    let l0x = pend.l0x;
-    let l0y = pend.l0y;
-    let l1x: number;
-    let l1y: number;
-    let flags: number;
-    if (len < 1e-6) {
-      // lone touch dab: both ends capped, lateral spans the disc
-      l0x = 0;
-      l0y = 1;
-      l1x = 0;
-      l1y = 1;
-      flags = 3;
-    } else {
-      const dx = (pend.x1 - pend.x0) / len;
-      const dy = (pend.y1 - pend.y0) / len;
-      l1x = endLateral ? endLateral.x : -dy;
-      l1y = endLateral ? endLateral.y : dx;
-      flags = (pend.startCap ? 1 : 0) + (roundEnd ? 2 : 0);
-    }
     const c = run.color;
+    const len = Math.hypot(pend.x1 - pend.x0, pend.y1 - pend.y0);
+    if (len < 1e-6) {
+      // grazing touches during a moving stroke print nothing; a stationary
+      // tap prints the tuft's dab (a both-capped disc)
+      if (pend.a0 > 0.003 && this.penTravel - run.touchPenTravel < 0.5) {
+        out.push(
+          pend.x0, pend.y0, pend.x1, pend.y1,
+          0, 1, 0, 1,
+          hw, pend.a0, pend.a0,
+          c.r, c.g, c.b, c.r, c.g, c.b,
+          pend.d0, pend.d0, 3,
+        );
+      }
+      return;
+    }
+
+    const a1 = fadeEnd ? 0 : pend.a1;
+    if (Math.max(pend.a0, a1) <= 0.003) return;
+    const dx = (pend.x1 - pend.x0) / len;
+    const dy = (pend.y1 - pend.y0) / len;
+    const l1x = endLateral ? endLateral.x : -dy;
+    const l1y = endLateral ? endLateral.y : dx;
     out.push(
       pend.x0, pend.y0, pend.x1, pend.y1,
-      l0x, l0y, l1x, l1y,
-      hw, pend.a0, pend.a1,
+      pend.l0x, pend.l0y, l1x, l1y,
+      hw, pend.a0, a1,
       c.r, c.g, c.b, c.r, c.g, c.b,
-      pend.d0, pend.d1, flags,
+      pend.d0, pend.d1, 0,
     );
   }
 }

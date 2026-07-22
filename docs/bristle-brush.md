@@ -170,12 +170,21 @@ as a chain decomposition with **zero double-coverage anywhere**:
   stamps, then perpendicular butt ends — both had per-joint artifacts:
   lens-shaped double deposits, then wedge overlap/gap striation as the
   track curved.)
-- Chain ends (touch, lift, too-sharp turns) render **SDF half-circle
-  caps** past the endpoint; the cap and its adjoining segment split the
-  plane, so there is no cap-over-body double deposit. A lone touch is a
-  zero-length segment with both caps (a disc). Turns too sharp to miter
-  (≳120°, or when the miter would outrun a short segment) break the chain
-  with caps — and turn softening fades those to near-invisibility anyway.
+- Chain ends **fade, they are not capped**: a chain fades in from
+  transparent over ~one track width of travel, and its final segment ramps
+  to transparent at lift or at a turn too sharp to miter (≳120°, or when
+  the miter would outrun a short segment). Caps were tried first and read
+  as dark full circles: every bristle's protruding half-disc overlapped its
+  neighbors' tracks (cross-bristle double deposit), and bristles grazing
+  in and out of contact at the footprint boundary printed lone dabs
+  mid-stroke. Fading removes the whole artifact class and matches the
+  tapered look the breakup gaps already have. The one remaining disc is
+  deliberate: a genuinely stationary tap (the pen never moved) prints the
+  tuft's footprint as one dab per bristle.
+- Contact is a **smooth band**, not a hard threshold: a bristle's deposit
+  is scaled by how firmly it presses (smoothstep over a small pressure
+  margin), so pressure/splay fluctuation recruits and releases boundary
+  bristles gradually instead of chopping their chains.
 - Alpha, color and tooth depth are stored **per endpoint** and interpolate
   along each segment. The emitter evaluates them at the shared joint
   positions (never per segment), so a bristle running dry or fading

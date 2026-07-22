@@ -741,7 +741,7 @@ const TEST = `
     // depletion: alpha fades and the tooth gate deepens as bristles dry
     // (load is in brush diameters: 3 x 40px size = 120px of travel)
     const dry = simRecords({ load: 3 });
-    const alphaAt = (rs, i) => rs[i * 20 + 9];
+    const alphaAt = (rs, i) => rs[i * 20 + 10]; // segment-end alpha
     const depthAt = (rs, i) => rs[i * 20 + 17];
     const nRec = dry.length / 20;
     assert('bristle: load depletion fades the track tail',
@@ -865,7 +865,7 @@ const TEST = `
       for (let i = 0; i + 1 < n; i++) {
         const a = i * 20;
         const b2 = (i + 1) * 20;
-        if (out[a + 19] >= 2) continue; // chain ended here (round end cap)
+        if (out[a + 10] === 0) continue; // chain faded out here
         if (out[a + 2] !== out[b2] || out[a + 3] !== out[b2 + 1]) joined = false;
         if (out[a + 6] !== out[b2 + 4] || out[a + 7] !== out[b2 + 5]) joined = false;
         if (out[a + 10] !== out[b2 + 9]) joined = false; // alpha continuous
@@ -875,10 +875,39 @@ const TEST = `
       assert('bristle: chain joints share point, lateral and alpha exactly', joined);
       assert('bristle: curved joints are mitered (scaled bisector laterals)', mitered);
       const last = (n - 1) * 20;
-      assert('bristle: lift caps the chain end', (out[last + 19] & 2) === 2,
-        'flags=' + out[last + 19]);
-      assert('bristle: chain start is capped', (out[19] & 1) === 1,
-        'flags=' + out[19]);
+      assert('bristle: chain fades in from transparent (no start cap)',
+        out[9] === 0 && out[19] === 0, 'a0=' + out[9] + ' flags=' + out[19]);
+      assert('bristle: lift fades the chain end to transparent (no end cap)',
+        out[last + 10] === 0 && out[last + 19] === 0,
+        'a1=' + out[last + 10] + ' flags=' + out[last + 19]);
+    }
+
+    // stationary tap: the tuft prints dabs; the smooth contact band means
+    // grazing bristles press (and print) partially
+    {
+      const s2 = Object.assign({}, bs, {
+        opacityJitter: 0, load: 0, breakup: 0,
+        colorJitter: { hue: 0, sat: 0, bri: 0, fgBg: 0 },
+      });
+      const sim = new B.BristleSim(s2, 40,
+        { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 }, rng: B.mulberry32(71) });
+      const out = [];
+      sim.update(pen(1), out);
+      sim.liftAll(out);
+      const n = out.length / 20;
+      let allDabs = n === s2.bristleCount;
+      for (let i = 0; i < n; i++) {
+        const a = i * 20;
+        if (out[a] !== out[a + 2] || out[a + 1] !== out[a + 3]) allDabs = false;
+        if (out[a + 19] !== 3) allDabs = false;
+      }
+      assert('bristle: a stationary tap prints one dab per bristle', allDabs,
+        'n=' + n + '/' + s2.bristleCount);
+
+      const bMid = bundle.find((bb) => bb.tipZ > 0.1 && bb.tipZ < 0.5);
+      const f = B.contactFactor(bs, bMid, B.penPose(bs, pen(bMid.tipZ + 0.04)));
+      assert('bristle: contact is a smooth band, not a hard threshold',
+        f > 0.1 && f < 0.9, 'f=' + f);
     }
 
     // engine params: tooth rides the texture-each-tip subtract path
@@ -965,8 +994,9 @@ const TEST = `
       session.up();
       eng.endStroke('bg');
       d = await read();
+      // start sampling past the fade-in taper (~one track width of travel)
       let lo = 255, hi = 0;
-      for (let i = 3; i <= 27; i++) {
+      for (let i = 8; i <= 27; i++) {
         const p = arc(i);
         const v = px(d, Math.round(p.x + off.x), Math.round(p.y + off.y))[0];
         lo = Math.min(lo, v); hi = Math.max(hi, v);
