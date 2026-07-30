@@ -136,12 +136,20 @@ and `patt` texture patterns), including PackBits-compressed and 16-bit tips.
   options-bar state (opacity, flow, smoothing, paint Mode, and the
   pressure-override buttons).
 
+Bristle brushes are read as well as written: a `dBrush` tip's Shape and its
+Bristles / Length / Thickness / Stiffness sliders map onto northlight's
+generated bristle tips, so Photoshop's own bristle presets import as bristle
+tips rather than falling back to a round one.
+
 **Export ABR…** writes the selected brush's whole group back out as a version
-6.2 `.abr` — `samp` tip bitmaps (PackBits-compressed), `patt` texture patterns
-and one `desc` descriptor per brush — so brushes built here can be used in
-Photoshop. `node tools/exportAbr.mjs [group-id | all]` does the same from the
-command line, and a round-trip test asserts every setting, tip and pattern
-survives write-then-read intact.
+9.2 `.abr` — `samp` tip bitmaps (PackBits-compressed), `patt` texture patterns,
+one `desc` descriptor per brush and the `phry` group hierarchy — so brushes built
+here can be used in Photoshop. Bristle tips go out as Photoshop **bristle
+brushes**, keeping its Bristle Qualities sliders live; a tip that a Brush Pose
+has foreshortened goes out as a bitmap instead, because a bristle descriptor
+carries an Angle but no Roundness. `node tools/exportAbr.mjs [group-id | all]
+[--sampled]` does the same from the command line, and a round-trip test asserts
+every setting, tip and pattern survives write-then-read intact.
 
 The descriptor schema was validated against real ABR files from public
 GitHub repositories (spray brushes from MaousamaQAQ/Nopressure and five
@@ -172,8 +180,9 @@ touches of one value, scumbles that skip over the tooth. Every one maps
 pressure to both the width of the mark and how much paint it lays down.
 
 They use only features Photoshop has, and ship as
-[`brushes/northlight-alla-prima.abr`](brushes/northlight-alla-prima.abr) for
-importing straight into it.
+[`brushes/northlight-alla-prima.abr`](brushes/northlight-alla-prima.abr) —
+real Photoshop bristle brushes, so its Bristle Qualities sliders keep working —
+with a `-sampled` variant that embeds northlight's own tip bitmaps instead.
 [`docs/alla-prima-brushes.md`](docs/alla-prima-brushes.md) has the recipe table
 for rebuilding them by hand instead (which keeps Photoshop's own bristle
 sliders live), the reasoning behind the settings, and the
@@ -339,8 +348,9 @@ src/
     abr.ts         Photoshop .abr parser (v1/v2 + v6-v10, PackBits,
                    Actions-descriptor reader, patt pattern decoder,
                    validated settings mapping)
-    abrWrite.ts    .abr writer: v6.2 samp/patt/desc, PackBits encoder,
-                   Actions-descriptor emitter (round-trip tested)
+    abrWrite.ts    .abr writer: v9.2 samp/patt/desc/phry, PackBits encoder,
+                   Actions-descriptor emitter with Photoshop's bristle
+                   descriptors (round-trip tested)
     engineParams.ts settings -> per-stroke GPU parameters
   gpu/
     shaders.ts    WGSL: compositor (all blend modes), brush stamp (rotated

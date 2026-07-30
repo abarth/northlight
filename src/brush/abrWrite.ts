@@ -1,3 +1,4 @@
+import { BRISTLE_SHAPES, isBristleTip, parseBristleTip } from './bristle';
 import { getPattern, getTip } from './patterns';
 import type { BrushSettings, DynamicControl, TextureBlend } from './types';
 import type { BlendMode } from '../types';
@@ -5,22 +6,28 @@ import type { BlendMode } from '../types';
 /**
  * Photoshop .abr writer — the inverse of `abr.ts`.
  *
- * Emits a version 6.2 container: an `8BIM samp` section holding the tip alpha
- * maps (PackBits-compressed), an `8BIM patt` section holding the texture
- * patterns the brushes reference, and an `8BIM desc` section holding one
- * Actions-format `brushPreset` descriptor per brush.
+ * Emits a version 9.2 container laid out the way Photoshop lays one out:
+ * `8BIM samp` for any sampled tip bitmaps (PackBits-compressed), `8BIM patt`
+ * for the texture patterns the brushes reference, `8BIM desc` for one
+ * Actions-format `brushPreset` descriptor per brush, and `8BIM phry` for the
+ * (empty) brush-group hierarchy.
  *
- * Every descriptor key written here is one `abr.ts` reads, and those key names
- * were recorded from real Photoshop files (see the parser's notes and the test
- * fixtures) — so the settings half of the format is grounded in observed data,
- * and `abrRoundTrip` in the test suite proves the writer and reader agree.
+ * The schema — descriptor class ids, key names, value encodings and ranges —
+ * was read off a Legacy Bristle set exported from Photoshop, cross-checked
+ * against the key names `abr.ts` already recovered from other real files.
+ * Notably, and unlike an earlier guess:
  *
- * The one part that is NOT verifiable from inside this repo is the fixed
- * header of a `samp` record: everything between the tip's UUID and its bitmap
- * rectangle. GIMP's loader documents only its size (47 bytes for subversion 1,
- * 301 for subversion 2+) and skips it, so this writer emits the UUID and zeroes
- * the rest. Photoshop may or may not care about those bytes; nothing here can
- * settle that. See docs/alla-prima-brushes.md.
+ *   - every `Objc` carries a class id (`brushPreset`, `dBrush`,
+ *     `sampledBrush`, `dualBrush`, `brushGroup`, `brVr`) rather than `null`,
+ *   - TEXT values are NUL-terminated and their count includes the NUL, as is
+ *     the empty class-name string that precedes every class id,
+ *   - a BRISTLE tip is a `dBrush` computed from its qualities and needs no
+ *     samp record at all,
+ *   - `Cnt ` is a `doub`, blend enums use their long-form values
+ *     (`multiply`, not `Mltp`), and the dual brush carries `Flip`.
+ *
+ * `abr export` in the test suite writes and re-reads every preset to prove the
+ * two halves agree.
  */
 
 // ---------------------------------------------------------------------------
@@ -63,11 +70,15 @@ class Writer {
     return this;
   }
 
-  /** Photoshop unicode string: u32 char count + UTF-16BE chars. */
+  /**
+   * Photoshop unicode string: u32 char count + UTF-16BE chars. Photoshop
+   * NUL-terminates these and counts the NUL, including for the empty class
+   * name that precedes every class id — so an "empty" string is one NUL.
+   */
   unicode(s: string): this {
-    this.u32(s.length);
+    this.u32(s.length + 1);
     for (let i = 0; i < s.length; i++) this.u16(s.charCodeAt(i));
-    return this;
+    return this.u16(0);
   }
 
   /** Pascal string: u8 length + ascii. */
@@ -157,7 +168,7 @@ type Emit = (w: Writer) => void;
 type Entry = [string, Emit];
 
 function writeDescriptor(w: Writer, classId: string, items: Entry[]): void {
-  w.unicode(''); // class name — Photoshop leaves this empty for these
+  w.unicode(''); // class NAME is empty; the class ID below is what identifies it
   w.key(classId);
   w.u32(items.length);
   for (const [k, emit] of items) {
@@ -211,7 +222,7 @@ const CONTROL_INDEX: Record<DynamicControl['source'], number> = {
 
 /** A dynamics variance object: control source, fade steps, jitter, minimum. */
 function dyn(control: DynamicControl, jitter: number, minimum = 0): Emit {
-  return V.objc('null', [
+  return V.objc('brVr', [
     ['bVTy', V.long(CONTROL_INDEX[control.source] ?? 0)],
     ['fStp', V.long(Math.max(1, Math.round(control.fadeSteps)))],
     ['jitter', V.pct(jitter * 100)],
@@ -219,17 +230,21 @@ function dyn(control: DynamicControl, jitter: number, minimum = 0): Emit {
   ]);
 }
 
-/** Inverse of the parser's BLEND_MAP, using the keys Photoshop writes. */
+/**
+ * Inverse of the parser's BLEND_MAP. Photoshop writes the long-form enum
+ * values in current files (observed: BlnM/'multiply'), so these are the
+ * long forms wherever one exists.
+ */
 const TEX_BLEND_KEY: Record<TextureBlend, string> = {
-  multiply: 'Mltp',
-  subtract: 'Sbtr',
-  darken: 'Drkn',
-  overlay: 'Ovrl',
-  height: 'Hght',
-  lighten: 'Lghn',
-  screen: 'Scrn',
-  'color-dodge': 'CDdg',
-  'color-burn': 'CBrn',
+  multiply: 'multiply',
+  subtract: 'subtract',
+  darken: 'darken',
+  overlay: 'overlay',
+  height: 'height',
+  lighten: 'lighten',
+  screen: 'screen',
+  'color-dodge': 'colorDodge',
+  'color-burn': 'colorBurn',
   'linear-burn': 'linearBurn',
   'hard-mix': 'hardMix',
 };
@@ -338,12 +353,37 @@ export function bakedAttitude(s: BrushSettings): { angle: number; roundness: num
 /** Fixed header size of a samp record, measured from the start of the record. */
 const SAMP_HEADER = 301; // subversion 2+; GIMP uses 47 for subversion 1
 
+/**
+ * Writes the fixed block between a samp record's UUID and its bitmap, laid out
+ * the way a Photoshop-written record lays it out.
+ *
+ * GIMP's loader only documents this block's size and skips it, so it used to be
+ * zero-filled here. Reading one from Photoshop showed it is mostly zero, but
+ * not entirely: a u16 1, a couple of small constants, a SECOND copy of the
+ * bitmap rectangle, and a three-word tail ending in the pixel depth. The
+ * constants below are that record's, with our own rectangle substituted; the
+ * remaining ones (3, 0x4FF, 56, 1, 0x3FF) had no size dependence to infer from
+ * a single sample, so they are carried verbatim rather than invented.
+ */
+function sampHeader(rec: Writer, size: number): void {
+  rec.u16(1); // +37
+  rec.u16(0);
+  rec.u32(3);
+  rec.u32(0x4ff);
+  rec.i32(0).i32(0).i32(size).i32(size); // rect, again
+  rec.u32(56);
+  while (rec.length < SAMP_HEADER - 12) rec.u8(0);
+  rec.u32(1);
+  rec.u32(0x3ff);
+  rec.u32(8); // pixel depth
+}
+
 function sampSection(tips: { uuid: string; map: { size: number; data: Uint8Array } }[]): Writer {
   const out = new Writer();
   for (const { uuid, map } of tips) {
     const rec = new Writer();
     rec.pascal(uuid);
-    while (rec.length < SAMP_HEADER) rec.u8(0);
+    sampHeader(rec, map.size);
     rec.i32(0).i32(0).i32(map.size).i32(map.size); // top, left, bottom, right
     rec.u16(8); // depth
     rec.u8(1); // PackBits-compressed
@@ -393,7 +433,47 @@ function pattSection(
   return out;
 }
 
-/** The per-brush tip descriptor (`Brsh`). */
+/**
+ * Bristle Qualities as Photoshop stores them, in a `dBrush` tip.
+ *
+ * `Shp` indexes the Shape dropdown in panel order, which is the order
+ * BRISTLE_SHAPES already uses — confirmed against a Photoshop export whose
+ * preset names name their own shapes (0 Round Point, 1 Round Blunt, 6 Flat
+ * Blunt, 9 Flat Fan). The four quality sliders are stored as fractions where
+ * 1.0 is 100%; Length and Thickness run past that (observed 0.25..2.46 and
+ * 0.01..2.0), so our 0..1 Length is spread over Photoshop's 25%..200%, while
+ * Bristles, Thickness and Stiffness map straight across. `clumping` held 0.25
+ * in every preset in that file and is not on the panel; it is carried at that
+ * value rather than invented.
+ */
+function bristleTipDescriptor(s: BrushSettings, angle: number): Emit {
+  const q = parseBristleTip(s.tip.shape)!;
+  const shp = BRISTLE_SHAPES.findIndex((b) => b.id === q.shape);
+  return V.objc('dBrush', [
+    ['Shp ', V.long(Math.max(0, shp))],
+    ['Angl', V.ang(angle)],
+    ['Dmtr', V.px(s.tip.size)],
+    ['Dnst', V.pct(clampRange(q.bristles, 0.01, 1))],
+    ['Lngt', V.pct(clampRange(0.25 + q.length * 1.75, 0.25, 5))],
+    ['clumping', V.pct(0.25)],
+    ['thickness', V.pct(clampRange(q.thickness, 0.01, 2))],
+    ['stiffness', V.pct(clampRange(q.stiffness, 0.01, 1))],
+    ['physics', V.bool(true)],
+    ['Spcn', V.pct(s.tip.spacing * 100)],
+    ['Intr', V.bool(true)],
+    ['flipX', V.bool(s.tip.flipX)],
+    ['flipY', V.bool(s.tip.flipY)],
+  ]);
+}
+
+const clampRange = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
+
+/**
+ * The per-brush tip descriptor (`Brsh`). Three kinds, with the class id
+ * Photoshop uses for each: a bristle tip is computed (`dBrush`), a bitmap tip
+ * points at a samp record (`sampledBrush`), and a plain round tip is computed
+ * from diameter/hardness/roundness (`computedBrush`).
+ */
 function tipDescriptor(
   s: BrushSettings,
   sampledUuid: string | null,
@@ -401,6 +481,9 @@ function tipDescriptor(
 ): Emit {
   const angle = override ? override.angle : s.tip.angle;
   const roundness = override ? override.roundness : s.tip.roundness;
+  if (!sampledUuid && isBristleTip(s.tip.shape) && parseBristleTip(s.tip.shape)) {
+    return bristleTipDescriptor(s, angle);
+  }
   const items: Entry[] = [
     ['Dmtr', V.px(s.tip.size)],
     ['Angl', V.ang(angle)],
@@ -412,7 +495,7 @@ function tipDescriptor(
     ['flipY', V.bool(s.tip.flipY)],
   ];
   if (sampledUuid) items.push(['sampledData', V.text(sampledUuid)]);
-  return V.objc('null', items);
+  return V.objc(sampledUuid ? 'sampledBrush' : 'computedBrush', items);
 }
 
 /** One brush's full descriptor. */
@@ -457,7 +540,7 @@ function brushDescriptor(
   items.push(['useTexture', V.bool(s.texture.enabled && patternUuid !== null)]);
   if (s.texture.enabled && patternUuid) {
     items.push(
-      ['Txtr', V.objc('null', [['Idnt', V.text(patternUuid)], ['Nm  ', V.text(patternName)]])],
+      ['Txtr', V.objc('pattern', [['Idnt', V.text(patternUuid)], ['Nm  ', V.text(patternName)]])],
       ['textureScale', V.pct(s.texture.scale * 100)],
       ['textureBrightness', V.long(s.texture.brightness * 150)],
       ['textureContrast', V.long(s.texture.contrast * 100)],
@@ -492,38 +575,49 @@ function brushDescriptor(
     );
   }
 
-  if (s.dual.enabled) {
-    items.push([
-      'dualBrush',
-      V.objc('null', [
-        ['useDualBrush', V.bool(true)],
-        [
-          'Brsh',
-          V.objc('null', [
-            ['Dmtr', V.px(s.dual.size)],
-            ['Angl', V.ang(0)],
-            ['Rndn', V.pct(100)],
-            ['Hrdn', V.pct(s.dual.hardness * 100)],
-            // the panel's Spacing slider lives on the nested tip
-            ['Spcn', V.pct(s.dual.spacing * 100)],
-            ['Intr', V.bool(true)],
-            ...(dualTipUuid ? ([['sampledData', V.text(dualTipUuid)]] as Entry[]) : []),
-          ]),
-        ],
-        ['BlnM', V.enm('BlnM', TEX_BLEND_KEY[s.dual.mode])],
-        ['Spcn', V.pct(s.dual.spacing * 100)],
-        ['scatterDynamics', dyn({ source: 'off', fadeSteps: 25 }, s.dual.scatter)],
-        ['countDynamics', dyn({ source: 'off', fadeSteps: 25 }, s.dual.countJitter)],
-        ['Cnt ', V.long(s.dual.count)],
-        ['bothAxes', V.bool(s.dual.bothAxes)],
-      ]),
-    ]);
-  }
+  // Photoshop always writes the dualBrush and brushGroup objects, carrying
+  // just their toggle when the section is off.
+  items.push([
+    'dualBrush',
+    s.dual.enabled
+      ? V.objc('dualBrush', [
+          ['useDualBrush', V.bool(true)],
+          ['Flip', V.bool(false)],
+          [
+            'Brsh',
+            V.objc(dualTipUuid ? 'sampledBrush' : 'computedBrush', [
+              ['Dmtr', V.px(s.dual.size)],
+              ['Angl', V.ang(0)],
+              ['Rndn', V.pct(100)],
+              // the panel's Spacing slider lives on the nested tip
+              ['Spcn', V.pct(s.dual.spacing * 100)],
+              ['Intr', V.bool(true)],
+              ['flipX', V.bool(false)],
+              ['flipY', V.bool(false)],
+              ...(dualTipUuid ? ([['sampledData', V.text(dualTipUuid)]] as Entry[]) : []),
+            ]),
+          ],
+          ['BlnM', V.enm('BlnM', TEX_BLEND_KEY[s.dual.mode])],
+          ['useScatter', V.bool(s.dual.scatter > 0 || s.dual.count > 1)],
+          ['Spcn', V.pct(s.dual.spacing * 100)],
+          ['Cnt ', V.doub(s.dual.count)],
+          ['bothAxes', V.bool(s.dual.bothAxes)],
+          ['countDynamics', dyn({ source: 'off', fadeSteps: 25 }, s.dual.countJitter)],
+          ['scatterDynamics', dyn({ source: 'off', fadeSteps: 25 }, s.dual.scatter)],
+        ])
+      : V.objc('dualBrush', [['useDualBrush', V.bool(false)]]),
+  ]);
+  items.push(['brushGroup', V.objc('brushGroup', [['useBrushGroup', V.bool(false)]])]);
 
   items.push(
     ['Wtdg', V.bool(s.wetEdges)],
     ['Nose', V.bool(s.noise)],
     ['Rpt ', V.bool(s.airbrush)],
+    ['useBrushSize', V.bool(true)],
+    // Brush Pose exists in the descriptor as a section toggle, but this repo
+    // has no recorded keys for its contents, so the pose is baked into the
+    // tip's Angle/Roundness above and the section stays off.
+    ['useBrushPose', V.bool(false)],
     [
       'toolOptions',
       V.objc('null', [
@@ -537,7 +631,7 @@ function brushDescriptor(
     ],
   );
 
-  return V.objc('null', items);
+  return V.objc('brushPreset', items);
 }
 
 // ---------------------------------------------------------------------------
@@ -550,18 +644,48 @@ export interface AbrExportBrush {
 }
 
 /**
- * Serializes brushes to a Photoshop .abr (version 6.2) file.
+ * Whether this brush can go out as a Photoshop bristle tip.
  *
- * Any tip that is not the analytic round one is written into the `samp`
- * section as a sampled tip — which is what a generated bristle tip has to
- * become, since it is a bitmap and not one of Photoshop's computed shapes.
- * Texture patterns the brushes reference are written into `patt`.
+ * A `dBrush` carries an Angle but no Roundness, so a preset whose Brush Pose
+ * foreshortens the tip cannot be expressed as one — that squash would silently
+ * vanish. Those fall back to an embedded bitmap, where `Rndn` does exist and
+ * the mark survives intact.
  */
-export function writeAbr(brushes: AbrExportBrush[]): ArrayBuffer {
+function usesBristleDescriptor(s: BrushSettings, opts: AbrWriteOptions): boolean {
+  if (opts.bristleAsSampled) return false;
+  if (!isBristleTip(s.tip.shape) || !parseBristleTip(s.tip.shape)) return false;
+  return Math.abs(bakedAttitude(s).roundness - 1) < 1e-3;
+}
+
+export interface AbrWriteOptions {
+  /**
+   * Write bristle tips as sampled bitmaps instead of as Photoshop bristle
+   * brushes. The mark is then exactly the one northlight paints, at the cost of
+   * Photoshop's Bristle Qualities sliders no longer being live.
+   */
+  bristleAsSampled?: boolean;
+}
+
+/**
+ * Serializes brushes to a Photoshop .abr (version 9.2) file.
+ *
+ * Bristle tips go out as computed `dBrush` tips carrying their qualities, so
+ * Photoshop draws them with its own bristle engine and its sliders still work
+ * (pass `bristleAsSampled` to embed our bitmaps instead). Chalk/spatter/grain
+ * and imported tips are bitmaps, so those go into the `samp` section. Texture
+ * patterns the brushes reference are written into `patt`.
+ */
+export function writeAbr(brushes: AbrExportBrush[], opts: AbrWriteOptions = {}): ArrayBuffer {
+  // Decided up front so the samp section and the descriptors agree on which
+  // tips are computed and which need a bitmap.
+  const bristleShapes = new Set(
+    brushes.filter((b) => usesBristleDescriptor(b.settings, opts)).map((b) => b.settings.tip.shape),
+  );
   const tipUuids = new Map<string, string>();
   const tipList: { uuid: string; map: { size: number; data: Uint8Array } }[] = [];
   const tipFor = (shape: string): string | null => {
     if (shape === 'round') return null;
+    if (bristleShapes.has(shape)) return null; // computed, so it needs no bitmap
     let uuid = tipUuids.get(shape);
     if (!uuid) {
       uuid = stableUuid(`northlight-tip:${shape}`);
@@ -604,15 +728,23 @@ export function writeAbr(brushes: AbrExportBrush[]): ArrayBuffer {
   descBody.u32(16); // versioned-descriptor prefix
   writeDescriptor(descBody, 'null', [['Brsh', V.list(entries)]]);
 
-  const file = new Writer();
-  file.u16(6).u16(2); // version 6, subversion 2
+  // The brush-group hierarchy: present and empty, as Photoshop writes it for a
+  // flat set.
+  const phryBody = new Writer();
+  phryBody.u32(16);
+  writeDescriptor(phryBody, 'null', [['hierarchy', V.list([])]]);
 
+  const file = new Writer();
+  file.u16(9).u16(2); // version 9.2 — what Photoshop writes for bristle content
+
+  // samp and patt are written even when empty: Photoshop emits a zero-length
+  // patt section in a file with no patterns, and the parser resyncs on 8BIM.
   const section = (key: string, body: Writer) => {
-    if (body.length === 0) return;
     file.ascii('8BIM').ascii(key).u32(body.length).concat(body).align(4);
   };
   section('samp', sampSection(tipList));
   section('patt', pattSection(patList));
   section('desc', descBody);
+  section('phry', phryBody);
   return file.buffer();
 }

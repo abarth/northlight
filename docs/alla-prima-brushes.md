@@ -7,10 +7,9 @@ through the body of the paint, discrete square touches of one value, dry
 scumbles that skip over the tooth, and edges that are found in some places and
 lost in others.
 
-Everything here uses only features Photoshop has. There is a ready-made
-[`brushes/northlight-alla-prima.abr`](../brushes/northlight-alla-prima.abr) to
-import, and a recipe table for rebuilding them by hand — see **The .abr file**
-and **Rebuilding these in Photoshop**. Where northlight was missing one of those
+Everything here uses only features Photoshop has. There are ready-made
+`.abr` files to import and a recipe table for rebuilding them by hand — see
+**The .abr files** and **Rebuilding these in Photoshop**. Where northlight was missing one of those
 features, it was added (see **What was added to the engine**).
 
 ## The three things that decide whether a bristle mark reads as paint
@@ -102,59 +101,100 @@ Beyond the table:
 - Smoothing is 15–50%, highest on the Rigger, where a long line has to stay
   clean at speed.
 
-## The .abr file
+## The .abr files
 
-[`brushes/northlight-alla-prima.abr`](../brushes/northlight-alla-prima.abr)
-(288 KB) holds all thirteen brushes for Photoshop: **Brushes panel ▸ panel menu
-▸ Import Brushes…**, or double-click the file.
+Two files, both holding all thirteen brushes. Import with **Brushes panel ▸
+panel menu ▸ Import Brushes…**, or by double-clicking.
 
-It is a version 6.2 container with three sections: `samp` carries the thirteen
-generated bristle tips as sampled tip bitmaps (256×256, 8-bit,
-PackBits-compressed), `patt` carries the linen tooth as a grayscale pattern,
-and `desc` carries one descriptor per brush with the settings — tip diameter,
-angle, roundness, spacing, Shape Dynamics with its controls and minimums,
-Scattering, Texture, Transfer, Colour Dynamics, and the options-bar state.
+| File | Tips | Use it when |
+| --- | --- | --- |
+| [`brushes/northlight-alla-prima.abr`](../brushes/northlight-alla-prima.abr) (99 KB) | Photoshop **bristle tips** — computed, sliders live | you want to keep tuning the brushes in Photoshop |
+| [`brushes/northlight-alla-prima-sampled.abr`](../brushes/northlight-alla-prima-sampled.abr) (290 KB) | northlight's own tip **bitmaps** | you want the exact mark northlight paints |
 
-Regenerate it with:
+The first is the one to reach for. Photoshop draws its bristle tips with its own
+simulation, so expect a family resemblance to the sheets rather than a pixel
+match — the Shape and the four quality sliders are the same, and everything
+outside the tip (Shape Dynamics, Scattering, Texture, Transfer, Colour Dynamics,
+Flow/Opacity/Smoothing) is identical. The second file trades those sliders for
+exactness.
+
+Regenerate either with:
 
 ```bash
 npm run build
-node tools/exportAbr.mjs              # the alla prima group
-node tools/exportAbr.mjs all          # every built-in group
+node tools/exportAbr.mjs                 # bristle tips
+node tools/exportAbr.mjs --sampled       # embedded bitmaps
+node tools/exportAbr.mjs all             # every built-in group
 ```
 
 or from inside northlight: select a brush and press **Export ABR…** in the
 Brushes panel, which writes out the group that brush belongs to.
 
+### The format, as Photoshop writes it
+
+Reading a Legacy Bristle set exported from Photoshop settled the parts of the
+format that had previously been guesswork. A bristle brush is a **version 9.2**
+container of `samp` / `patt` / `desc` / `phry` sections whose `desc` holds one
+`brushPreset` descriptor per brush, and whose tip is a `dBrush` object:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `Shp ` | long | Shape, indexing the dropdown in panel order: 0 Round Point, 1 Round Blunt, 2 Round Curve, 3 Round Angle, 4 Round Fan, 5 Flat Point, 6 Flat Blunt, 7 Flat Curve, 8 Flat Angle, 9 Flat Fan |
+| `Dnst` | UntF `#Prc` | **Bristles**, as a fraction (0.01 = 1%, the "single bristle" minimum) |
+| `Lngt` | UntF `#Prc` | **Length**; runs past 1.0 (observed 0.25–2.46) |
+| `thickness` | UntF `#Prc` | **Thickness**; runs past 1.0 (observed 0.01–2.0) |
+| `stiffness` | UntF `#Prc` | **Stiffness**, 0..1 |
+| `clumping` | UntF `#Prc` | 0.25 in every preset seen, and not on the panel — carried, not interpreted |
+| `Angl` | UntF `#Ang` | bristle Angle |
+| `Dmtr` | UntF `#Pxl` | Size |
+| `Spcn` | UntF `#Prc` | Spacing, on a 0–100 scale (unlike the qualities above) |
+| `physics` | bool | true |
+| `Intr`, `flipX`, `flipY` | bool | |
+
+The `Shp` order was confirmed from the presets' own names — 0 for the two
+"Round Point" brushes, 1 for "Round Blunt Streaks", 6 for "Flat Blunt Streaks",
+9 for the three "Flat Fan" ones — and it is the order this repo already listed
+the shapes in.
+
+The same file corrected four things about the rest of the container, all of
+which had been written the wrong way here before:
+
+- **Every `Objc` carries a class id**, not `null`: `brushPreset`, `dBrush`,
+  `sampledBrush`, `dualBrush`, `brushGroup`, and `brVr` for a dynamics variance
+  object.
+- **Strings are NUL-terminated and the count includes the NUL** — including the
+  empty class-name string that precedes every class id, which is therefore one
+  NUL and not zero characters.
+- **`Cnt ` is a `doub`**, and blend modes use their **long-form enum values**
+  (`multiply`, not `Mltp`). The parser now reads both forms; without the long
+  ones, a modern file's `darken` fell through to multiply.
+- **A bristle tip needs no `samp` record at all.** That retires the one part of
+  the format this repo could not previously verify: the fixed 301-byte header
+  inside a samp record. It is still written for genuinely sampled tips, and now
+  mirrors a real Photoshop record (a u16 1, a few small constants, a second copy
+  of the bitmap rectangle, and a tail ending in the pixel depth) instead of
+  being zero-filled.
+
+Photoshop also stores Brush Pose as a section toggle, `useBrushPose`. Its
+contents are still unrecorded, so the pose stays baked (below) and the toggle is
+written false.
+
 ### What the export can and cannot carry
 
-**The tips arrive as sampled tips, not as Photoshop bristle tips.** A generated
-bristle tip is a bitmap; Photoshop's bristle tips are parameters to its own
-simulation, and this repo has no recorded descriptor keys for Bristle
-Qualities. Exporting the bitmap means the marks are the ones these brushes
-actually make — but in Photoshop the Bristles / Length / Thickness / Stiffness
-sliders will not be there to adjust. If you want them live, build the brush from
-the recipe table below instead; the two approaches trade fidelity for
-adjustability.
+**Brush Pose and Brush Projection are baked.** The attitude those settings
+produce is computed and written into the tip's Angle, so the exported brush
+makes the same mark but will not respond to tilting the pen. There is one wrinkle
+worth knowing: a `dBrush` has an Angle but **no Roundness**, so a preset whose
+pose *foreshortens* the tip cannot be a bristle descriptor at all — the squash
+would silently vanish. The writer detects exactly that case and falls back to an
+embedded bitmap for that brush, where `Rndn` does exist. In this set that is one
+brush, `Flat Bristle, Fixed Pose`; the other twelve go out as bristle tips.
 
-**Brush Pose and Brush Projection are baked, not carried** — same reason. For
-`Flat Bristle, Fixed Pose`, the attitude those settings produce is computed and
-written into the tip's own Angle and Roundness, so the exported brush makes the
-same mark; it just will not respond to tilting the pen. `Round Bristle, Tilt
-Projected` loses its tilt response entirely and exports as the round mark it
-makes with the pen upright.
+**`Round Bristle, Tilt Projected`** loses its tilt response and exports as the
+round mark it makes with the pen upright.
 
-**One part of the file is unverified.** A `samp` record has a fixed-size header
-between the tip's UUID and its bitmap rectangle — 301 bytes in a subversion-2
-file. GIMP's loader documents the size and skips the contents, and no real ABR
-file was reachable from this environment to read them off, so the writer emits
-the UUID and zeroes the rest. Everything else is checked three ways: the
-descriptor keys are the ones the parser reads, and the parser was validated
-against 288 brushes from real Photoshop files; a round-trip test writes the file
-and reads it back, asserting every setting, both tip bitmaps and the pattern
-survive byte for byte; and the byte layout was walked by a second, independent
-reader. If Photoshop rejects the tips, those 301 bytes are the first place to
-look — and the recipe table below is the fallback.
+**The `linen` tooth travels with the file** as a pattern in the `patt` section,
+so Texture works on import without hunting for a substitute.
 
 ## Rebuilding these in Photoshop
 
@@ -181,7 +221,8 @@ Two caveats, stated plainly:
   not published. northlight builds the contact patch those six parameters
   describe and streaks it with the hairs. The same sliders move the mark the
   same way, and the marks are the same kind of mark, but they are not
-  bit-identical to Photoshop's, and they cannot be.
+  bit-identical to Photoshop's, and they cannot be. (Which is why there are two
+  `.abr` files: one that keeps the sliders, one that keeps the mark.)
 - Photoshop's Brush Pose slider values apply as the pen's fallback; northlight
   applies the pose value when its Override is ticked and the pen's value
   otherwise. For the one preset that uses it, all the relevant Overrides are
@@ -200,8 +241,10 @@ Each of these exists in Photoshop and was missing from northlight:
 | Scattering ▸ Count Control | `types.ts`, `dynamics.ts` |
 
 And, so the brushes can leave northlight at all, an **.abr writer**
-(`src/brush/abrWrite.ts`) — the inverse of the existing parser, emitting v6.2
-`samp` / `patt` / `desc` sections.
+(`src/brush/abrWrite.ts`) — the inverse of the existing parser, emitting v9.2
+`samp` / `patt` / `desc` / `phry` sections with Photoshop's own bristle
+descriptors. The parser gained the matching read path, so Photoshop's bristle
+brushes now import as northlight bristle tips.
 
 Two supporting changes that are not Photoshop features but are needed to render
 the above honestly:

@@ -1,3 +1,4 @@
+import { BRISTLE_SHAPES, bristleTipId, isBristleTip } from './bristle';
 import type { GrayMap } from './patterns';
 import type { BlendMode } from '../types';
 import type { BrushPatch, DynamicControl, TextureBlend } from './types';
@@ -480,6 +481,18 @@ const BLEND_MAP: Record<string, TextureBlend> = {
   Hght: 'height',
   linearHeight: 'height',
   hardMix: 'hard-mix',
+  // Recent Photoshop writes the long-form enum values instead of the four-char
+  // ones (observed in a CS-era Legacy Bristle export: BlnM/'multiply'). Without
+  // these, 'darken' and friends fall through to the multiply default.
+  multiply: 'multiply',
+  darken: 'darken',
+  lighten: 'lighten',
+  screen: 'screen',
+  subtract: 'subtract',
+  overlay: 'overlay',
+  colorDodge: 'color-dodge',
+  colorBurn: 'color-burn',
+  height: 'height',
 };
 
 function mapBlend(v: DescValue | undefined): TextureBlend {
@@ -516,6 +529,8 @@ const PAINT_MODE_MAP: Record<string, BlendMode> = {
 
 interface TipInfo {
   tipId: string | null;
+  /** generated bristle tip id, when the descriptor is a `dBrush` */
+  bristleId?: string | null;
   size?: number;
   angle?: number;
   roundness?: number;
@@ -525,11 +540,42 @@ interface TipInfo {
   flipY?: boolean;
 }
 
+/**
+ * Photoshop's Bristle Qualities, as stored in a `dBrush` tip descriptor.
+ *
+ * Field names and ranges read off a Legacy Bristle set exported from
+ * Photoshop (file version 9.2). `Shp` indexes the Shape dropdown in panel
+ * order — confirmed by the presets' own names: 0 for the two "Round Point"
+ * brushes, 1 for "Round Blunt Streaks", 6 for "Flat Blunt Streaks", 9 for the
+ * three "Flat Fan" ones. `Dnst` is the Bristles slider, `Lngt` Length,
+ * `thickness` Thickness, `stiffness` Stiffness, all as fractions where 1.0 is
+ * 100% (Length and Thickness run past 1.0; observed 0.25..2.46 and 0.01..2.0).
+ * `clumping` was 0.25 in every preset and is not on the panel, so it is
+ * carried but ignored.
+ */
+function mapBristleTip(tip: Descriptor): string | null {
+  const shp = num(tip['Shp']);
+  if (shp === undefined) return null;
+  const shape = BRISTLE_SHAPES[Math.round(shp)]?.id;
+  if (!shape) return null;
+  return bristleTipId({
+    shape,
+    bristles: clamp01(num(tip['Dnst']) ?? 0.35),
+    // undo the writer's 25%..200% spread back onto our 0..1
+    length: clamp01(((num(tip['Lngt']) ?? 1) - 0.25) / 1.75),
+    thickness: clamp01(num(tip['thickness']) ?? 0.45),
+    stiffness: clamp01(num(tip['stiffness']) ?? 0.7),
+  });
+}
+
 function mapTip(tip: Descriptor | undefined): TipInfo {
   if (!tip) return { tipId: null };
   const spacingOn = bool(tip['Intr']);
   const spacing = num(tip['Spcn']) ?? num(tip['Spcg']);
   return {
+    // A bristle tip is computed from its qualities, so it has no sampled
+    // bitmap to reference; it resolves to a generated tip id instead.
+    bristleId: mapBristleTip(tip),
     tipId: str(tip['sampledData'])?.toLowerCase() ?? null,
     size: num(tip['Dmtr']),
     angle: num(tip['Angl']),
@@ -549,6 +595,9 @@ function mapBrushDescriptor(d: Descriptor): AbrBrush {
   const settings: BrushPatch = {};
   const tipPatch: NonNullable<BrushPatch['tip']> = {};
 
+  // A bristle tip carries its shape in its qualities, not in a bitmap, so it
+  // resolves straight to a generated tip rather than waiting on a samp record.
+  if (tip.bristleId) tipPatch.shape = tip.bristleId;
   if (tip.size !== undefined) tipPatch.size = Math.min(Math.max(tip.size, 1), 1000);
   if (tip.angle !== undefined) tipPatch.angle = tip.angle;
   if (tip.roundness !== undefined) tipPatch.roundness = clamp01(tip.roundness / 100) || 0.01;
@@ -658,7 +707,7 @@ function mapBrushDescriptor(d: Descriptor): AbrBrush {
     const panelSpacing = num(dualDesc['Spcn']);
     settings.dual = {
       enabled: true,
-      shape: dualTip.tipId ?? 'round',
+      shape: dualTip.bristleId ?? dualTip.tipId ?? 'round',
       hardness: dualTip.hardness !== undefined ? clamp01(dualTip.hardness / 100) : 1,
       mode: mapBlend(dualDesc['BlnM']),
       size: Math.min(Math.max(dualTip.size ?? 40, 1), 1000),
@@ -878,7 +927,13 @@ function parseV6(r: Reader, version: number, subVersion: number): AbrResult {
         if (!resolved) continue;
         b.tipId = resolved;
       }
-      if (b.settings.dual?.enabled && typeof b.settings.dual.shape === 'string') {
+      // A bristle dual tip is generated, not sampled, so it needs no lookup —
+      // and it must not be mistaken for an unresolved UUID and reset to round.
+      if (
+        b.settings.dual?.enabled &&
+        typeof b.settings.dual.shape === 'string' &&
+        !isBristleTip(b.settings.dual.shape)
+      ) {
         const dualResolved = resolveId(b.settings.dual.shape, tips.keys());
         if (dualResolved) b.settings.dual.shape = dualResolved;
         else if (b.settings.dual.shape.includes('-')) b.settings.dual.shape = 'round';

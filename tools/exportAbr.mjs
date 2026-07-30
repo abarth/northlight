@@ -12,13 +12,21 @@
  * built-in group, or one or more group ids (general, size-flow, opacity-flow,
  * dry-media, alla-prima, wet-media, fx).
  *
+ * Bristle tips normally go out as Photoshop bristle brushes, so Photoshop draws
+ * them with its own bristle engine and the Bristle Qualities sliders stay live.
+ * `--sampled` embeds northlight's own tip bitmaps instead: the mark is then
+ * exactly the one northlight paints, but the sliders are gone.
+ *
  * Env: APP_URL, CHROMIUM_PATH, CHROMIUM_FLAGS, OUT (output path).
  */
 import { spawn } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
 import { chromium } from 'playwright';
 
-const groups = process.argv.slice(2);
+const argv = process.argv.slice(2);
+// --sampled embeds our own tip bitmaps instead of Photoshop bristle tips
+const sampled = argv.includes('--sampled');
+const groups = argv.filter((a) => a !== '--sampled');
 const PORT = process.env.PORT ?? '4187';
 let appUrl = process.env.APP_URL;
 let server = null;
@@ -71,7 +79,7 @@ page.on('pageerror', (e) => console.error('[page error]', e.message));
 await page.goto(`${appUrl}?w=64&h=64`);
 await page.waitForTimeout(800);
 
-const out = await page.evaluate((wanted) => {
+const out = await page.evaluate(({ wanted, sampled }) => {
   const NL = window.__northlight;
   const all = NL.brush.presets.BRUSH_GROUPS;
   const ids = wanted.length === 0 ? ['alla-prima'] : wanted.includes('all') ? all.map((g) => g.id) : wanted;
@@ -83,7 +91,7 @@ const out = await page.evaluate((wanted) => {
   const brushes = picked.flatMap((g) =>
     g.presets.map((p) => ({ name: p.name, settings: p.settings })),
   );
-  const buf = NL.brush.abrWrite.writeAbr(brushes);
+  const buf = NL.brush.abrWrite.writeAbr(brushes, { bristleAsSampled: sampled });
 
   // Read it straight back with the parser as a sanity check before it lands
   // on disk, so a broken file never gets written.
@@ -97,8 +105,10 @@ const out = await page.evaluate((wanted) => {
     names: brushes.map((b) => b.name),
     groups: picked.map((g) => g.name),
     parsed: { brushes: back.brushes.length, tips: back.tips.size, patterns: back.patterns.size },
+    bristle: back.brushes.filter((b) => NL.brush.bristle.isBristleTip(b.settings.tip?.shape ?? ''))
+      .length,
   };
-}, groups);
+}, { wanted: groups, sampled });
 
 await browser.close();
 if (server) server.kill();
@@ -110,11 +120,14 @@ if (out.parsed.brushes !== out.names.length) {
   process.exit(1);
 }
 
-const path = process.env.OUT ?? new URL('../brushes/northlight-alla-prima.abr', import.meta.url).pathname;
+const suffix = sampled ? '-sampled' : '';
+const path =
+  process.env.OUT ??
+  new URL(`../brushes/northlight-alla-prima${suffix}.abr`, import.meta.url).pathname;
 const bytes = Buffer.from(out.base64, 'base64');
 writeFileSync(path, bytes);
 console.log(`wrote ${path} (${(bytes.length / 1024).toFixed(0)} KB)`);
 console.log(`  groups:   ${out.groups.join(', ')}`);
 console.log(`  brushes:  ${out.parsed.brushes} — ${out.names.join(', ')}`);
-console.log(`  tips:     ${out.parsed.tips} sampled`);
+console.log(`  tips:     ${out.parsed.tips} sampled bitmap(s), ${out.bristle} bristle`);
 console.log(`  patterns: ${out.parsed.patterns}`);

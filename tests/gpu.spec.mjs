@@ -1578,16 +1578,36 @@ const TEST = `
     const buf = NL.brush.abrWrite.writeAbr(exported);
     const res = NL.brush.abr.parseAbr(buf);
 
-    assert('abr export: file is a v6 container with every brush and tip',
-      res.version === 6 && res.brushes.length === exported.length &&
-      res.tips.size === new Set(exported.map((b) => b.settings.tip.shape)).size &&
+    assert('abr export: file is a v9.2 container with every brush',
+      res.version === 9 && res.brushes.length === exported.length &&
       res.patterns.size === 1,
-      'v' + res.version + ' brushes=' + res.brushes.length + ' tips=' + res.tips.size +
+      'v' + res.version + ' brushes=' + res.brushes.length +
       ' patterns=' + res.patterns.size);
 
-    // Tips must survive PackBits compression byte for byte.
+    // A bristle tip is COMPUTED by Photoshop from its qualities, so the file
+    // carries no bitmap for it — and the qualities must survive the trip out
+    // through Photoshop's own encoding (Shp index, Dnst/Lngt/thickness/
+    // stiffness as fractions) and back.
+    //
+    // The exception is a preset whose Brush Pose foreshortens the tip: a dBrush
+    // descriptor has an Angle but no Roundness, so that one falls back to an
+    // embedded bitmap where the squash can be carried.
+    const squashed = exported.filter(
+      (b) => Math.abs(NL.brush.abrWrite.bakedAttitude(b.settings).roundness - 1) > 1e-3);
+    assert('abr export: only a pose-squashed tip needs a sampled bitmap',
+      res.tips.size === squashed.length && squashed.length === 1,
+      'tips=' + res.tips.size + ' squashed=' + squashed.length);
+    const wrongTip = exported
+      .map((b, i) => [b.name, b.settings.tip.shape, res.brushes[i].settings.tip?.shape])
+      .filter(([name, a, b]) => !squashed.some((sq) => sq.name === name) && a !== b);
+    assert('abr export: every bristle tip round-trips to the same qualities',
+      wrongTip.length === 0, JSON.stringify(wrongTip.slice(0, 2)));
+
+    // ...and the bitmap path still works when it is asked for.
+    const sampledBuf = NL.brush.abrWrite.writeAbr(exported, { bristleAsSampled: true });
+    const sampledRes = NL.brush.abr.parseAbr(sampledBuf);
     const srcTip = NL.brush.patterns.getTip(exported[0].settings.tip.shape);
-    const gotTip = res.tips.get(res.brushes[0].tipId);
+    const gotTip = sampledRes.tips.get(sampledRes.brushes[0].tipId);
     let tipDiff = 0;
     if (gotTip && gotTip.size === srcTip.size) {
       for (let i = 0; i < srcTip.data.length; i++) {
@@ -1596,8 +1616,10 @@ const TEST = `
     } else {
       tipDiff = -1;
     }
-    assert('abr export: sampled tip round-trips exactly through PackBits',
-      tipDiff === 0, 'diff=' + tipDiff);
+    assert('abr export: bristleAsSampled embeds the tips, exact through PackBits',
+      sampledRes.tips.size ===
+        new Set(exported.map((b) => b.settings.tip.shape)).size && tipDiff === 0,
+      'tips=' + sampledRes.tips.size + ' diff=' + tipDiff);
 
     const srcPat = NL.brush.patterns.getPattern('linen');
     const gotPat = [...res.patterns.values()][0];
@@ -1715,6 +1737,165 @@ const TEST = `
       count === exported.length && inked >= 40 && inked <= 80,
       'presets=' + count + ' inked=' + inked);
     eng.fillLayer('bg', [1, 1, 1, 1]);
+  }
+
+  // ---- 29. importing Photoshop's own bristle brushes ----
+  //
+  // Fixture replicating the schema of a Legacy Bristle set exported from
+  // Photoshop (file version 9.2): a dBrush tip whose Bristle Qualities are
+  // Shp/Dnst/Lngt/thickness/stiffness, class ids on every Objc, NUL-terminated
+  // TEXT, Cnt as a doub and long-form blend enums. The Adobe presets
+  // themselves are not committed; these are the field names and encodings.
+  {
+    class W {
+      constructor() { this.b = []; }
+      u8(x) { this.b.push(x & 0xff); return this; }
+      u16(x) { return this.u8(x >> 8).u8(x); }
+      u32(x) { return this.u16(Math.floor(x / 65536)).u16(x); }
+      f64(x) {
+        const dv = new DataView(new ArrayBuffer(8));
+        dv.setFloat64(0, x);
+        for (let i = 0; i < 8; i++) this.u8(dv.getUint8(i));
+        return this;
+      }
+      ascii(s) { for (const c of s) this.u8(c.charCodeAt(0)); return this; }
+      // Photoshop NUL-terminates and counts the NUL
+      uni(s) { this.u32(s.length + 1); for (const c of s) this.u16(c.charCodeAt(0)); return this.u16(0); }
+      dkey(s) { return s.length === 4 ? this.u32(0).ascii(s) : this.u32(s.length).ascii(s); }
+      raw(a) { this.b.push(...a); return this; }
+      buffer() { return new Uint8Array(this.b).buffer; }
+      get length() { return this.b.length; }
+    }
+    const wd = (w, cls, items) => {
+      w.uni(''); w.dkey(cls); w.u32(items.length);
+      for (const [k, fn] of items) { w.dkey(k); fn(w); }
+    };
+    const T = {
+      untf: (u, v) => (w) => w.ascii('UntF').ascii(u).f64(v),
+      text: (s) => (w) => { w.ascii('TEXT'); w.uni(s); },
+      bool: (b) => (w) => w.ascii('bool').u8(b ? 1 : 0),
+      long: (n) => (w) => { w.ascii('long'); w.u32(n); },
+      doub: (n) => (w) => { w.ascii('doub'); w.f64(n); },
+      enm: (t, v) => (w) => { w.ascii('enum'); w.dkey(t); w.dkey(v); },
+      objc: (cls, items) => (w) => { w.ascii('Objc'); wd(w, cls, items); },
+      list: (items) => (w) => { w.ascii('VlLs'); w.u32(items.length); for (const f of items) f(w); },
+    };
+    const brVr = (bVTy, jitter, mnm) => T.objc('brVr', [
+      ['bVTy', T.long(bVTy)], ['fStp', T.long(25)],
+      ['jitter', T.untf('#Prc', jitter)], ['Mnm ', T.untf('#Prc', mnm)],
+    ]);
+    // "Flat Blunt Streaks": Shp 6, and a Flat Fan with a dual brush
+    const preset = (nm, shp, dnst, lngt, thick, stiff, dual) => T.objc('brushPreset', [
+      ['Nm  ', T.text(nm)],
+      ['Brsh', T.objc('dBrush', [
+        ['Shp ', T.long(shp)],
+        ['Angl', T.untf('#Ang', 0)],
+        ['Dmtr', T.untf('#Pxl', 13)],
+        ['Dnst', T.untf('#Prc', dnst)],
+        ['Lngt', T.untf('#Prc', lngt)],
+        ['clumping', T.untf('#Prc', 0.25)],
+        ['thickness', T.untf('#Prc', thick)],
+        ['stiffness', T.untf('#Prc', stiff)],
+        ['physics', T.bool(true)],
+        ['Spcn', T.untf('#Prc', 2)],
+        ['Intr', T.bool(true)],
+        ['flipX', T.bool(false)],
+        ['flipY', T.bool(false)],
+      ])],
+      ['useTipDynamics', T.bool(false)],
+      ['useScatter', T.bool(false)],
+      ['dualBrush', dual
+        ? T.objc('dualBrush', [
+            ['useDualBrush', T.bool(true)],
+            ['Flip', T.bool(false)],
+            ['Brsh', T.objc('dBrush', [
+              ['Shp ', T.long(9)],
+              ['Dmtr', T.untf('#Pxl', 34)],
+              ['Dnst', T.untf('#Prc', 0.2)],
+              ['Lngt', T.untf('#Prc', 1)],
+              ['thickness', T.untf('#Prc', 0.5)],
+              ['stiffness', T.untf('#Prc', 0.6)],
+              ['Spcn', T.untf('#Prc', 50)],
+              ['Intr', T.bool(true)],
+            ])],
+            ['BlnM', T.enm('BlnM', 'darken')],
+            ['useScatter', T.bool(true)],
+            ['Spcn', T.untf('#Prc', 100)],
+            ['Cnt ', T.doub(3)],
+            ['bothAxes', T.bool(true)],
+            ['countDynamics', brVr(0, 0, 0)],
+            ['scatterDynamics', brVr(0, 40, 0)],
+          ])
+        : T.objc('dualBrush', [['useDualBrush', T.bool(false)]])],
+      ['brushGroup', T.objc('brushGroup', [['useBrushGroup', T.bool(false)]])],
+      ['useTexture', T.bool(false)],
+      ['usePaintDynamics', T.bool(false)],
+      ['useColorDynamics', T.bool(false)],
+      ['Wtdg', T.bool(true)],
+      ['Nose', T.bool(false)],
+      ['Rpt ', T.bool(false)],
+      ['useBrushSize', T.bool(true)],
+      ['useBrushPose', T.bool(false)],
+    ]);
+
+    const desc = new W();
+    desc.u32(16);
+    wd(desc, 'null', [['Brsh', T.list([
+      preset('Flat Blunt Streaks', 6, 0.05, 0.25, 0.01, 0.74, false),
+      preset('Flat Fan Dual', 9, 0.08, 2.46, 2.0, 0.85, true),
+      preset('Round Point Thin', 0, 0.47, 1.41, 0.01, 0.74, false),
+    ])]]);
+    const phry = new W();
+    phry.u32(16);
+    wd(phry, 'null', [['hierarchy', T.list([])]]);
+
+    const file = new W();
+    file.u16(9).u16(2);
+    const sect = (key, body) => {
+      file.ascii('8BIM').ascii(key).u32(body.length).raw(body.b);
+      while (file.length % 4 !== 0) file.u8(0);
+    };
+    sect('samp', new W());
+    sect('patt', new W());
+    sect('desc', desc);
+    sect('phry', phry);
+
+    const res = NL.brush.abr.parseAbr(file.buffer());
+    assert('abr bristle import: v9.2 file with an empty samp section parses',
+      res.version === 9 && res.brushes.length === 3 && res.tips.size === 0,
+      'v' + res.version + ' brushes=' + res.brushes.length + ' tips=' + res.tips.size);
+
+    const B = NL.brush.bristle;
+    const q0 = B.parseBristleTip(res.brushes[0].settings.tip.shape);
+    assert('abr bristle import: Shp indexes the Shape list in panel order',
+      res.brushes[0].name === 'Flat Blunt Streaks' && !!q0 && q0.shape === 'flat-blunt' &&
+      B.parseBristleTip(res.brushes[1].settings.tip.shape).shape === 'flat-fan' &&
+      B.parseBristleTip(res.brushes[2].settings.tip.shape).shape === 'round-point',
+      JSON.stringify(q0));
+    assert('abr bristle import: the four quality sliders come across',
+      near(q0.bristles, 0.05, 0.005) && near(q0.length, 0, 0.005) &&
+      near(q0.thickness, 0.01, 0.005) && near(q0.stiffness, 0.74, 0.005),
+      JSON.stringify(q0));
+    const q1 = B.parseBristleTip(res.brushes[1].settings.tip.shape);
+    assert('abr bristle import: Length past 100% and Thickness past 100% clamp sanely',
+      near(q1.length, 1, 0.005) && near(q1.thickness, 1, 0.005), JSON.stringify(q1));
+    assert('abr bristle import: a bristle tip paints without a samp record',
+      res.brushes[0].tipId === null &&
+      NL.brush.patterns.getTip(res.brushes[0].settings.tip.shape).size === 256, '');
+
+    // Dual brush written the modern way: doub Count, long-form blend enum, and
+    // a bristle secondary tip that must not be mistaken for an unresolved UUID.
+    const dual = res.brushes[1].settings.dual;
+    assert('abr bristle import: a bristle dual tip survives with its settings',
+      dual.enabled && B.isBristleTip(dual.shape) &&
+      B.parseBristleTip(dual.shape).shape === 'flat-fan' &&
+      dual.count === 3 && dual.bothAxes === true && dual.mode === 'darken' &&
+      near(dual.scatter, 0.4, 0.001) && near(dual.spacing, 0.5, 0.001),
+      JSON.stringify({ shape: dual.shape, count: dual.count, mode: dual.mode,
+        scatter: dual.scatter, spacing: dual.spacing }));
+    assert('abr bristle import: wet edges and NUL-terminated names read cleanly',
+      res.brushes[1].settings.wetEdges === true && res.brushes[1].name === 'Flat Fan Dual',
+      res.brushes[1].name);
   }
 
   results.push(lost ? 'DEVICE-LOST ' + lost : 'device: alive');
