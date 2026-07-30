@@ -106,15 +106,24 @@ Beyond the table:
 Two files, both holding all thirteen brushes. Import with **Brushes panel ▸
 panel menu ▸ Import Brushes…**, or by double-clicking.
 
-| File | Tips | Use it when |
-| --- | --- | --- |
-| [`brushes/northlight-alla-prima.abr`](../brushes/northlight-alla-prima.abr) (29 KB) | Photoshop **bristle tips** — computed, sliders live | you want to keep tuning the brushes in Photoshop |
-| [`brushes/northlight-alla-prima-sampled.abr`](../brushes/northlight-alla-prima-sampled.abr) (224 KB) | northlight's own tip **bitmaps** | you want the exact mark northlight paints |
+[`brushes/northlight-alla-prima.abr`](../brushes/northlight-alla-prima.abr)
+(23 KB) holds all thirteen, as Photoshop bristle brushes — so its Bristle
+Qualities sliders stay live.
 
-Both leave **Texture off**, so the linen tooth does not travel with them — see
-*What is verified, and what is not* below. Re-adding it in Photoshop is two
-clicks: tick Texture and pick **Canvas** (or **Burlap**) from the legacy pattern
-set, then set Depth and Mode from the table above.
+Two things do not travel with it, both because Photoshop rejects the sections
+that would carry them (see *What is verified, and what is not*):
+
+- **Texture is off**, so the linen tooth is missing. Re-adding it is two clicks:
+  tick Texture, pick **Canvas** (or **Burlap**) from the legacy pattern set, and
+  set Depth and Mode from the table above.
+- **`Flat Bristle, Fixed Pose` loses its foreshortening.** A bristle tip
+  descriptor carries an Angle but no Roundness, so that brush arrives at the
+  right attitude but with a slightly deeper mark than northlight's.
+
+`--sampled` embeds northlight's own tip bitmaps for an exact mark, but those
+files use `samp` records, which Photoshop 2026 rejects; that variant is for
+moving brushes between northlight instances until the samp header is pinned
+down.
 
 The first is the one to reach for. Photoshop draws its bristle tips with its own
 simulation, so expect a family resemblance to the sheets rather than a pixel
@@ -128,7 +137,7 @@ Regenerate either with:
 ```bash
 npm run build
 node tools/exportAbr.mjs                  # bristle tips
-node tools/exportAbr.mjs --sampled        # embedded bitmaps
+node tools/exportAbr.mjs --sampled        # embedded bitmaps (northlight only)
 node tools/exportAbr.mjs --with-texture   # also embed the linen pattern
 node tools/exportAbr.mjs all              # every built-in group
 node tools/exportAbr.mjs --probe          # the diagnostic ladder, below
@@ -188,43 +197,54 @@ written false.
 
 ### What is verified, and what is not
 
-Photoshop 2026 rejected the first version of this file outright ("not compatible
-with this version of Photoshop"), which sent the encoder back to the one thing
-that can settle such a question: reproducing a Photoshop-written file byte for
-byte. Feeding the exported Legacy Bristle set's own decoded descriptor tree back
-through this writer's primitives reproduces **all 7940 bytes of it exactly** —
-container header, section framing and padding, `desc`, and `phry`. So the
-encoding rules are not in question.
+Photoshop 2026 rejected the first two attempts at this file, which forced the
+question to be settled properly rather than guessed at. Two things settled it:
 
-What remains unverified is anything that file does not itself contain:
+**1. Reproducing a Photoshop-written file byte for byte.** Feeding the exported
+Legacy Bristle set's own decoded descriptor tree back through this writer's
+primitives reproduces **all 7940 bytes of it exactly** — container header,
+section framing and padding, `desc`, `phry`. Replaying its samp record the same
+way reproduces **the first 1320 of its 1328 bytes**, including every one of the
+301 fixed header bytes, the rect, depth, compression flag and all 54 row counts;
+the rest is two PackBits rows packed differently (both legal — Photoshop emits a
+2-byte repeat where this encoder emits a literal) and 8 zero bytes of trailing
+padding, since added here.
 
-| Construct | Status |
-| --- | --- |
-| container, section framing, `desc`, `phry` | byte-identical to Photoshop's own file |
-| `dBrush` bristle tip, `sampledBrush` dual tip, `brVr` variance objects, class ids, NUL-terminated strings, `doub` counts | read directly off that file |
-| dynamics keys (`szVr`, `opVr`, `prVr`, `clVr`, `minimumDiameter`, …), `toolOptions` | key names recorded from other real brush packs; encodings now proven |
-| **`patt` pattern entries** | **only ever read here, never seen written by Photoshop** — so Texture is off by default |
-| `samp` record's fixed 301-byte header | mirrors a real record now (a u16 1, small constants, a second copy of the rectangle, a tail ending in the pixel depth) rather than being zeroed; only reachable with `--sampled` or a pose-squashed tip |
-| `computedBrush` class id (plain round tips), `pattern` class id on `Txtr` | inferred, not observed; neither appears in the default alla prima file |
+**2. A ladder of probe files, imported into Photoshop.** Each rung adds one
+construct, which isolates what it objects to:
 
-Two guesses were removed outright rather than left in: blend modes now use the
-four-char enum values attested across every real file (`Hght`, `Sbtr`) instead of
-long forms invented per mode — only `multiply` has ever been seen spelled out —
-and an invented `minimumDepth` key is gone, with Minimum Depth riding in its
-variance object's own minimum where the parser reads it from.
+| Probe | Adds | Photoshop 2026 |
+| --- | --- | --- |
+| `probe-1-bristle` | two bristle brushes, all dynamics off | imports |
+| `probe-2-dynamics` | Shape Dynamics, Transfer, Colour Dynamics, `toolOptions` | imports |
+| `probe-3-texture` | an embedded `patt` pattern + the Texture keys | **rejected** |
+| `probe-4-sampled` | a `samp` record with an embedded tip bitmap | **rejected** |
+| `probe-5-scatter` | Scattering | untested |
 
-### If Photoshop still refuses the file
+So the descriptor half of the format is sound, and both failures are in the
+binary image sections. **The shipped file therefore contains neither**: no
+`samp` records, no `patt` entries — the same section shape as the two probes
+that import.
 
-`node tools/exportAbr.mjs --probe` writes a ladder into `brushes/probes/`, each
-rung adding exactly one construct. Importing them in order says which one
-Photoshop objects to in a single pass:
+#### Why the binary sections still fail
 
-| Probe | Adds |
-| --- | --- |
-| `probe-1-bristle.abr` | two bristle brushes, every dynamics section off — structurally closest to Photoshop's own file |
-| `probe-2-dynamics.abr` | Shape Dynamics, Transfer, Colour Dynamics, `toolOptions` |
-| `probe-3-texture.abr` | the embedded `patt` pattern and the Texture keys |
-| `probe-4-sampled.abr` | a `samp` record with an embedded tip bitmap |
+For `samp`, the writer is not the problem — it reproduces a real record almost
+exactly. The suspect is a **size-dependent field inside the 301-byte header**.
+The one reference available had a 52×54 tip, and among that header's constants
+is `56`, which is exactly what several size-derived quantities would be at that
+size (w rounded up to a multiple of 8; h + 2; w + 4) and one sample cannot
+separate them. On a 256×256 tip that value is very likely wrong. `0x4FF` and
+`0x3FF` read as fixed limits (1280−1, 1024−1) and `3` is unknown.
+
+*Pinning this needs one more reference file: any `.abr` containing a sampled
+(bitmap-tip) brush whose bitmap is a different size from 52×54.* With two
+samples the size-dependent fields fall out immediately.
+
+For `patt`, the layout has only ever been read here, never seen written by
+Photoshop, and the reader tolerates slack a writer cannot rely on — the channel
+table in particular (`maxChannels`, then how many written/unwritten slots
+follow) is guesswork. A reference file containing a brush with a Texture pattern
+would settle that one the same way.
 
 ### What the export can and cannot carry
 

@@ -359,16 +359,24 @@ export function bakedAttitude(s: BrushSettings): { angle: number; roundness: num
 const SAMP_HEADER = 301; // subversion 2+; GIMP uses 47 for subversion 1
 
 /**
- * Writes the fixed block between a samp record's UUID and its bitmap, laid out
- * the way a Photoshop-written record lays it out.
+ * Writes the fixed block between a samp record's UUID and its bitmap.
  *
- * GIMP's loader only documents this block's size and skips it, so it used to be
- * zero-filled here. Reading one from Photoshop showed it is mostly zero, but
- * not entirely: a u16 1, a couple of small constants, a SECOND copy of the
- * bitmap rectangle, and a three-word tail ending in the pixel depth. The
- * constants below are that record's, with our own rectangle substituted; the
- * remaining ones (3, 0x4FF, 56, 1, 0x3FF) had no size dependence to infer from
- * a single sample, so they are carried verbatim rather than invented.
+ * Reading a Photoshop-written record showed this block is mostly zero but not
+ * entirely: a u16 1, two constants, a SECOND copy of the bitmap rectangle, a
+ * lone word, then a three-word tail ending in the pixel depth. Replaying it
+ * through this function reproduces that record byte for byte — every one of its
+ * 301 header bytes, its rect, depth, compression flag and all 54 row counts.
+ *
+ * PHOTOSHOP STILL REJECTS OUR SAMP RECORDS, though, and the reason is almost
+ * certainly in here. The sample that pinned these constants had a 52x54 tip,
+ * and `56` is exactly the sort of value that follows from that (w rounded up to
+ * a multiple of 8, or h + 2, or w + 4 — one sample cannot separate them), so on
+ * a 256x256 tip it is very likely wrong. 0x4FF and 0x3FF read as fixed limits
+ * (1280-1, 1024-1) rather than anything derived, and 3 is unknown.
+ *
+ * Pinning this needs a second reference: one .abr containing a SAMPLED
+ * (bitmap-tip) brush whose bitmap is a different size. Until then, bristle tips
+ * avoid samp records entirely and the export prefers them.
  */
 function sampHeader(rec: Writer, size: number): void {
   rec.u16(1); // +37
@@ -376,7 +384,7 @@ function sampHeader(rec: Writer, size: number): void {
   rec.u32(3);
   rec.u32(0x4ff);
   rec.i32(0).i32(0).i32(size).i32(size); // rect, again
-  rec.u32(56);
+  rec.u32(56); // suspected size-dependent; see above
   while (rec.length < SAMP_HEADER - 12) rec.u8(0);
   rec.u32(1);
   rec.u32(0x3ff);
@@ -395,6 +403,7 @@ function sampSection(tips: { uuid: string; map: { size: number; data: Uint8Array
     const { counts, body } = rleRows(map.data, map.size, map.size);
     for (const c of counts) rec.u16(c);
     rec.raw(body);
+    rec.u32(0).u32(0); // Photoshop pads its records with two zero words
     out.u32(rec.length).concat(rec).align(4);
   }
   return out;
@@ -649,17 +658,17 @@ export interface AbrExportBrush {
 }
 
 /**
- * Whether this brush can go out as a Photoshop bristle tip.
+ * Whether this brush goes out as a Photoshop bristle tip.
  *
- * A `dBrush` carries an Angle but no Roundness, so a preset whose Brush Pose
- * foreshortens the tip cannot be expressed as one — that squash would silently
- * vanish. Those fall back to an embedded bitmap, where `Rndn` does exist and
- * the mark survives intact.
+ * Always, for a bristle tip, unless bitmaps were asked for. A `dBrush` carries
+ * an Angle but no Roundness, so a preset whose Brush Pose foreshortens the tip
+ * loses that squash — the mark comes out a little deeper than northlight's.
+ * That is a smaller loss than the alternative: embedding a bitmap instead means
+ * a samp record, and Photoshop 2026 rejects those (see `sampHeader`).
  */
 function usesBristleDescriptor(s: BrushSettings, opts: AbrWriteOptions): boolean {
   if (opts.bristleAsSampled) return false;
-  if (!isBristleTip(s.tip.shape) || !parseBristleTip(s.tip.shape)) return false;
-  return Math.abs(bakedAttitude(s).roundness - 1) < 1e-3;
+  return isBristleTip(s.tip.shape) && parseBristleTip(s.tip.shape) !== null;
 }
 
 export interface AbrWriteOptions {

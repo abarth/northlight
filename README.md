@@ -154,9 +154,13 @@ intact.
 
 The writer's encoding rules are checked the only way that settles the question:
 feeding a Photoshop-written file's own decoded descriptor tree back through them
-reproduces that file byte for byte. Texture patterns are the exception — a `patt`
-entry has only ever been read here, never seen written by Photoshop — so
-embedding them is opt-in (`--with-texture`) and Texture is otherwise left off.
+reproduces that file byte for byte. The two **binary image sections** are the
+exception — Photoshop 2026 rejects a file containing either an embedded `samp`
+tip bitmap or a `patt` pattern written here, while one of pure bristle tips
+imports — so the export emits neither by default (`--sampled` and
+`--with-texture` opt back in). See
+[`docs/alla-prima-brushes.md`](docs/alla-prima-brushes.md) for how that was
+isolated and what would settle it.
 
 The descriptor schema was validated against real ABR files from public
 GitHub repositories (spray brushes from MaousamaQAQ/Nopressure and five
@@ -188,8 +192,7 @@ pressure to both the width of the mark and how much paint it lays down.
 
 They use only features Photoshop has, and ship as
 [`brushes/northlight-alla-prima.abr`](brushes/northlight-alla-prima.abr) —
-real Photoshop bristle brushes, so its Bristle Qualities sliders keep working —
-with a `-sampled` variant that embeds northlight's own tip bitmaps instead.
+real Photoshop bristle brushes, so its Bristle Qualities sliders keep working.
 [`docs/alla-prima-brushes.md`](docs/alla-prima-brushes.md) has the recipe table
 for rebuilding them by hand instead (which keeps Photoshop's own bristle
 sliders live), the reasoning behind the settings, and the

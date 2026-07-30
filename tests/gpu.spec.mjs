@@ -1590,17 +1590,15 @@ const TEST = `
     // through Photoshop's own encoding (Shp index, Dnst/Lngt/thickness/
     // stiffness as fractions) and back.
     //
-    // The exception is a preset whose Brush Pose foreshortens the tip: a dBrush
-    // descriptor has an Angle but no Roundness, so that one falls back to an
-    // embedded bitmap where the squash can be carried.
-    const squashed = exported.filter(
-      (b) => Math.abs(NL.brush.abrWrite.bakedAttitude(b.settings).roundness - 1) > 1e-3);
-    assert('abr export: only a pose-squashed tip needs a sampled bitmap',
-      res.tips.size === squashed.length && squashed.length === 1,
-      'tips=' + res.tips.size + ' squashed=' + squashed.length);
+    // Nothing here may emit a samp record: Photoshop 2026 rejects them (the
+    // fixed header inside one has a size-dependent field this repo cannot pin
+    // from its single reference file), while a file of pure bristle tips
+    // imports. Any regression that reintroduces one has to fail loudly.
+    assert('abr export: a bristle set needs no samp record at all',
+      res.tips.size === 0, 'tips=' + res.tips.size);
     const wrongTip = exported
       .map((b, i) => [b.name, b.settings.tip.shape, res.brushes[i].settings.tip?.shape])
-      .filter(([name, a, b]) => !squashed.some((sq) => sq.name === name) && a !== b);
+      .filter(([name, a, b]) => a !== b);
     assert('abr export: every bristle tip round-trips to the same qualities',
       wrongTip.length === 0, JSON.stringify(wrongTip.slice(0, 2)));
 
@@ -1646,7 +1644,12 @@ const TEST = `
       if (!close(g.tip.size, s.tip.size, 0.01)) problems.push('size ' + g.tip.size);
       if (!close(g.tip.spacing, s.tip.spacing)) problems.push('spacing ' + g.tip.spacing);
       if (!close(g.tip.angle, attitude.angle, 0.01)) problems.push('angle ' + g.tip.angle);
-      if (!close(g.tip.roundness, attitude.roundness)) problems.push('roundness ' + g.tip.roundness);
+      // A dBrush carries an Angle but no Roundness, so a pose that foreshortens
+      // the tip loses that squash on the way out. Deliberate, and pinned here so
+      // it cannot change silently.
+      const carriesRoundness = !NL.brush.bristle.isBristleTip(s.tip.shape);
+      const wantRound = carriesRoundness ? attitude.roundness : 1;
+      if (!close(g.tip.roundness, wantRound)) problems.push('roundness ' + g.tip.roundness);
       if (g.shape.enabled !== s.shape.enabled) problems.push('shape.enabled');
       if (s.shape.enabled) {
         if (g.shape.sizeControl.source !== s.shape.sizeControl.source) {

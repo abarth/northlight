@@ -125,11 +125,27 @@ const out = await page.evaluate(({ wanted, sampled, withTexture, probe }) => {
       name: b.name,
       settings: D.mergeBrush(b.settings, { texture: { ...b.settings.texture, enabled: false } }),
     }));
+    // Scattering is the one construct in the shipped file that no passing probe
+    // has covered yet, so it gets its own rung.
+    const scattered = bare.map((b) => ({
+      name: b.name + ' Scatter',
+      settings: D.mergeBrush(b.settings, {
+        scatter: {
+          ...b.settings.scatter,
+          enabled: true,
+          scatter: 0.3,
+          count: 3,
+          countJitter: 0.4,
+          countControl: D.pressureControl(),
+        },
+      }),
+    }));
     probes.push(
       ['probe-1-bristle', NL.brush.abrWrite.writeAbr(bare, {})],
       ['probe-2-dynamics', NL.brush.abrWrite.writeAbr(dynamic, {})],
       ['probe-3-texture', NL.brush.abrWrite.writeAbr(two, { embedPatterns: true })],
       ['probe-4-sampled', NL.brush.abrWrite.writeAbr(bare.slice(0, 1), { bristleAsSampled: true })],
+      ['probe-5-scatter', NL.brush.abrWrite.writeAbr(scattered, {})],
     );
   }
   const b64 = (buffer) => {
