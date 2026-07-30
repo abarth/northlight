@@ -1769,8 +1769,10 @@ const TEST = `
         'records=' + records + ' ' + bad.slice(0, 3).join('; '));
     }
     {
-      // patt: the channel table is exactly maxChannels + 2 slots, and the
-      // grayscale image gets a second, solid-255 alpha channel.
+      // patt: the channel table is exactly maxChannels + 2 slots, and WHICH
+      // slot each channel lands in matters — the grey plane at 0, the
+      // transparency plane in the last slot. Alpha at slot 1, where a colour
+      // plane belongs, is what made Photoshop fail on a file with a pattern.
       const dv = new DataView(buf);
       const u32 = (o) => dv.getUint32(o);
       let o = 4;
@@ -1783,30 +1785,29 @@ const TEST = `
         o = o + 12 + len;
         o += (4 - (o % 4)) % 4;
       }
-      const elen = u32(at);
       let p = at + 4 + 12;
       p += 4 + 2 * u32(p); // unicode name
       p += 1 + dv.getUint8(p); // pascal id
       const vmaLen = u32(p + 4);
       const vmaStart = p + 8;
-      let q = vmaStart + 20; // rect + maxChannels
+      const maxChannels = u32(vmaStart + 16);
+      let q = vmaStart + 20;
+      const writtenAt = [];
       let slots = 0;
-      let written = 0;
       while (q < vmaStart + vmaLen) {
         const w = u32(q);
         q += 4;
-        slots++;
         if (w) {
-          written++;
-          const chLen = u32(q);
-          q += 4 + chLen;
+          writtenAt.push(slots);
+          q += 4 + u32(q);
         }
+        slots++;
       }
-      assert('abr export: patt channel table is maxChannels + 2 slots, gray + alpha',
-        u32(vmaStart + 16) === 24 && slots === 26 && written === 2 &&
-        q === vmaStart + vmaLen && elen === at + 4 + elen - (at + 4),
-        'maxChannels=' + u32(vmaStart + 16) + ' slots=' + slots + ' written=' + written +
-        ' vmaEnd=' + (q - vmaStart) + '/' + vmaLen);
+      assert('abr export: patt puts the grey plane at slot 0 and alpha in the last slot',
+        maxChannels === 24 && slots === maxChannels + 2 &&
+        writtenAt.join() === '0,' + (slots - 1) && q === vmaStart + vmaLen,
+        'maxChannels=' + maxChannels + ' slots=' + slots +
+        ' written at [' + writtenAt.join() + ']');
     }
 
     // Re-exporting must be byte-identical, so the file is reproducible and

@@ -199,7 +199,7 @@ check that actually settles an encoding question. That is now true of:
 | --- | --- |
 | container header, section framing and padding, `desc`, `phry` | **all 7940 bytes** of the Legacy Bristle file reproduced exactly |
 | `samp` record fixed header | **all 301 bytes** reproduced for four records across three files — tips of 18×19, 52×54, 183×143 and 211×238, both compressed and uncompressed |
-| `patt` entry lengths and channel table | `vmaLen` and entry-length formulas match both reference patterns exactly (a 256×256 RGB and a 200×200 grayscale) |
+| `patt` entry | **all 41 473 bytes** of the reference grayscale pattern reproduced exactly, alpha channel and its PackBits packing included |
 
 **A probe ladder for the rest.** Small files each adding one construct, imported
 in Photoshop, localise anything reproduction cannot reach. That is what showed
@@ -231,14 +231,25 @@ and `0x3FF`. Written as constants onto a 256×256 tip they are out by two orders
 of magnitude. Four records at four sizes made the pattern unmistakable:
 `+45 = rl − 49` and `+293 = 23 + dataLength` hold for every one.
 
-*In a `patt` entry's channel table:* the table holds exactly `maxChannels + 2` =
-**26** slots — 27 were being written — and a **grayscale pattern has two written
-channels**, the grey plane and a solid-255 alpha, where only one was. Photoshop
-writes the image plane uncompressed and the alpha PackBits-packed, which is what
-this reproduces.
+*In a `patt` entry's channel table:* three separate errors, each caught only by
+importing into Photoshop.
 
-Both rules are now asserted against the raw bytes in the test suite, since the
-parser would not notice them changing back.
+1. The table holds exactly `maxChannels + 2` = **26** slots. 27 were written.
+2. A **grayscale pattern has two written channels** — the grey plane and a
+   solid-255 alpha — where only one was.
+3. **Which slot each channel occupies matters.** The colour planes take slots
+   0.. (one for grayscale, three for RGB), and the transparency plane goes in
+   the *last* slot, 25 — the two slots past `maxChannels` being the extra pair.
+   Putting alpha at slot 1, where a colour plane belongs, changed the failure
+   from "not compatible with this version" to "a program error" but was still a
+   failure.
+
+Photoshop writes the image plane uncompressed and the alpha PackBits-packed,
+which is what this reproduces.
+
+All three rules, and the two samp lengths, are now asserted against the raw
+written bytes in the test suite — the parser reads none of those fields and
+would not notice them changing back.
 
 ### What the export can and cannot carry
 

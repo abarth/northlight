@@ -429,11 +429,12 @@ function sampSection(tips: { uuid: string; map: { size: number; data: Uint8Array
  * 256x256 RGB "Kraft Paper" and a 200x200 grayscale "Oil Pastel Light"):
  *
  *   - the channel table holds exactly `maxChannels + 2` = 26 slots, each a u32
- *     "written" flag followed, when set, by the channel. Writing 27 slots — one
- *     too many — is one of the two things that made Photoshop reject a file
- *     with a pattern in it.
- *   - a GRAYSCALE pattern has TWO written channels: the grey plane and a
- *     solid-255 alpha. Only one was being written here.
+ *     "written" flag followed, when set, by the channel.
+ *   - THE SLOT INDEX MATTERS. The colour planes occupy slots 0.. (one for
+ *     grayscale, three for RGB); the two slots past `maxChannels` are the extra
+ *     pair, and the alpha/transparency plane goes in the LAST one, slot 25.
+ *     Putting alpha at slot 1 — where a colour plane belongs — is what made
+ *     Photoshop fail on a file with a pattern in it.
  *   - a channel is `23 + dataLength` bytes: u32 depth, the rect, u16 pixel
  *     depth, u8 compression, then the data — the same shape as the image block
  *     inside a samp record.
@@ -462,15 +463,20 @@ function pattSection(
       return w;
     };
 
+    const MAX_CHANNELS = 24;
+    const SLOTS = MAX_CHANNELS + 2;
     const alpha = new Uint8Array(map.size * map.size).fill(255);
-    const channels = [channel(map.data, false), channel(alpha, true)];
+    // grey plane in slot 0, transparency in the last slot
+    const channels = new Map<number, Writer>([
+      [0, channel(map.data, false)],
+      [SLOTS - 1, channel(alpha, true)],
+    ]);
 
     const vma = new Writer();
     vma.i32(0).i32(0).i32(map.size).i32(map.size); // rectangle
-    vma.u32(24); // max channels
-    const SLOTS = 26; // maxChannels + 2, as Photoshop writes it
+    vma.u32(MAX_CHANNELS);
     for (let i = 0; i < SLOTS; i++) {
-      const ch = channels[i];
+      const ch = channels.get(i);
       if (!ch) {
         vma.u32(0); // slot not written
         continue;
