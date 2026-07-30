@@ -9,7 +9,7 @@ lost in others.
 
 Everything here uses only features Photoshop has. There are ready-made
 `.abr` files to import and a recipe table for rebuilding them by hand — see
-**The .abr files** and **Rebuilding these in Photoshop**. Where northlight was missing one of those
+**The .abr file** and **Rebuilding these in Photoshop**. Where northlight was missing one of those
 features, it was added (see **What was added to the engine**).
 
 ## The three things that decide whether a bristle mark reads as paint
