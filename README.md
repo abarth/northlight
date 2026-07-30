@@ -49,24 +49,44 @@ Document size defaults to 1600x1000; override with `?w=2048&h=1536` in the URL.
 The **Brush Settings** panel (right sidebar tab) mirrors Photoshop's
 sections, all evaluated per stamp:
 
-- **Brush Tip Shape** — tip (Round analytic, plus sampled Chalk / Spatter /
-  Grain tips), size, hardness, **angle**, **roundness** (rotated elliptical
-  stamps), spacing, flip X/Y. The soft falloff is a Gaussian profile rescaled
+- **Brush Tip Shape** — tip (Round analytic, sampled Chalk / Spatter / Grain,
+  and ten generated **bristle** tips), size, hardness, **angle**,
+  **roundness** (rotated elliptical stamps), spacing, flip X/Y. The soft
+  falloff is a Gaussian profile rescaled
   to reach exactly zero at the brush radius (the closest published fit to
   Photoshop's measured soft round); 100% hardness keeps the ~1px anti-aliased
   rim. Adobe does not publish the exact curve, so "exact" means
   indistinguishable in normal use.
+- **Bristle Qualities** — Photoshop's bristle tips: **Shape** (the ten
+  ferrule/trim combinations, Round or Flat × Point / Blunt / Curve / Angle /
+  Fan), **Bristles**, **Length**, **Thickness**, **Stiffness** and **Angle**.
+  The tip is generated as the contact patch those parameters describe, streaked
+  by the individual hairs, so with the blade pointed across the stroke the
+  hairs draw continuous striations down the mark instead of a train of stamps.
+  Tip ids are content-addressed (`bristle:flat-blunt:b16l50t82s85`), so a
+  bristle tip works anywhere a sampled tip does.
+- **Brush Pose** — **Tilt X**, **Tilt Y**, **Rotation** and **Pressure**, each
+  with an **Override**: a ticked input replaces what the pen reports for the
+  whole stroke, which is the only way to hold a flat brush at one attitude
+  with a mouse, or with a pen that has no tilt sensor.
 - **Shape Dynamics** — size/angle/roundness jitter, each with a Photoshop
   **Control** source (Off / Fade / Pen Pressure / Pen Tilt / Rotation /
   Direction / Initial Direction where applicable), **Minimum Diameter**,
-  **Minimum Roundness**, and flip X/Y jitter.
+  **Minimum Roundness**, flip X/Y jitter, and **Brush Projection** (stylus
+  tilt foreshortens the mark along the direction of tilt and barrel rotation
+  spins it; an upright pen carries no azimuth, so below a degree of tilt the
+  Angle control keeps its result).
 - **Scattering** — scatter % (across-stroke or both axes) with control,
-  **Count** (multiple stamps per step) and **Count Jitter**.
-- **Texture** — five procedural tileable patterns (Paper, Canvas, Sponge,
-  Clouds, Speckle) with scale, brightness, contrast, invert, five combine
-  modes (Multiply/Subtract/Darken/Overlay/Height), **Depth**, and **Texture
-  Each Tip** with depth jitter + control (per-stamp) vs. whole-stroke
-  texturing (Photoshop's default), applied at commit time.
+  **Count** (multiple stamps per step), **Count Jitter** and a Count
+  **Control**.
+- **Texture** — six procedural tileable patterns (Paper, Canvas, **Linen**,
+  Sponge, Clouds, Speckle) with scale, brightness, contrast, invert, five
+  combine modes (Multiply/Subtract/Darken/Overlay/Height), **Depth**, and
+  **Texture Each Tip** with depth jitter, control and **Minimum Depth**
+  (per-stamp) vs. whole-stroke texturing (Photoshop's default), applied at
+  commit time. Linen is a plain weave whose threads wander and vary in width —
+  the tooth a dry-brush drag needs, which a pair of clean sines cannot give
+  without printing a visible grid.
 - **Dual Brush** — a true secondary brush, like Photoshop's: the second tip
   (any shape, with hardness, mode, size, spacing, scatter, both-axes, count)
   stamps its own train along the stroke into a separate GPU coverage mask.
@@ -85,6 +105,10 @@ sections, all evaluated per stamp:
 - **Tip toggles** — **Noise** (grain in the soft falloff band), **Wet Edges**
   (watercolor-style rim build-up), **Build-up** (airbrush: keeps depositing
   while the pointer is held still), **Smoothing**.
+
+Sampled and bristle tips are **mipmapped**, and each dab samples the level
+that matches its own footprint — a 256px hair-striped tip point-sampled onto a
+40px dab moirés.
 
 Flow deposits per stamp and builds up within a stroke; Opacity caps the whole
 stroke (one 50% stroke never self-darkens) — coverage accumulates in a
@@ -124,10 +148,30 @@ The **Brushes** panel (sidebar tab) has a grouped, Photoshop-style preset
 library with live stroke previews (rendered by the real dynamics evaluator):
 General, **Size Flow** (pressure→size), **Opacity Flow** (pressure→opacity),
 Dry Media (a **Graphite Pencil** with scatter/multi-stamp roughness, pressure
-opacity, 50% minimum size; Charcoal; Chalk), Wet Media (a **Sponge** using
-the sponge pattern texture plus a spatter dual brush; Watercolor with wet
-edges; Ink Wash), and Special Effects (spatter spray, scattered dots, color
-confetti).
+opacity, 50% minimum size; Charcoal; Chalk), **Alla Prima (Oils)** (see
+below), Wet Media (a **Sponge** using the sponge pattern texture plus a
+spatter dual brush; Watercolor with wet edges; Ink Wash), and Special Effects
+(spatter spray, scattered dots, color confetti).
+
+### Alla prima brushes
+
+Thirteen direct-painting oil brushes built on the bristle tips — a flat
+chisel, filbert, bright, painting knife, impasto flat, dry drag, broken-colour
+scumbler, fan blender, angular dagger, small round, rigger, and two that hand
+the mark's attitude to stylus tilt or to a fixed Brush Pose. They aim at the
+marks in a Sargent sleeve or a Schmid still life: loaded strokes that turn
+broad-to-thin, hair drag through the body of the paint, discrete square
+touches of one value, scumbles that skip over the tooth. Every one maps
+pressure to both the width of the mark and how much paint it lays down.
+
+They use only features Photoshop has, and
+[`docs/alla-prima-brushes.md`](docs/alla-prima-brushes.md) has the full recipe
+table for rebuilding them there, the reasoning behind the settings, and the
+sample sheets in [`sheets/`](sheets/) — rendered by the real engine over
+synthesized pen paths with `tools/sheets.mjs`, and measured against mark
+targets by `tools/markStats.py`.
+
+![Alla prima marks](sheets/marks-detail.png)
 
 ### Options bar (Photoshop layout)
 Brush tip picker (size/hardness/angle/roundness popover), **Mode** (the
@@ -274,10 +318,13 @@ src/
   brush/
     types.ts       full Photoshop-style brush settings model
     defaults.ts    defaults + preset deep-merge
+    bristle.ts     Photoshop Bristle Qualities -> generated bristle tip maps
+                   (content-addressed by tip id, so they resolve through the
+                   ordinary tip registry)
     dynamics.ts    pure per-stamp evaluation (controls, jitters, scatter,
                    color dynamics, transfer, dual train) — unit-testable
-    patterns.ts    procedural tileable patterns, sampled tips, runtime tip
-                   registry (seeded, deterministic)
+    patterns.ts    procedural tileable patterns, sampled tips, tip mip chains,
+                   runtime tip registry (seeded, deterministic)
     presets.ts     grouped preset library + imported groups
     abr.ts         Photoshop .abr parser (v1/v2 + v6-v10, PackBits,
                    Actions-descriptor reader, patt pattern decoder,
@@ -350,6 +397,18 @@ conversions, and the Photoshop numeric keyboard shortcuts.
 Set `ABR_REAL_DIR=/path/to/abr/files` to additionally validate the parser
 against real brush packs (expected values for the files listed in the test
 comments are baked in).
+
+`tools/sheets.mjs` renders the brush sample sheets by driving the real engine
+in headless Chromium over synthesized pen paths, and `tools/markStats.py`
+measures them (body coverage, striation count and contrast, dab-train ribbing,
+edge crispness, swept width against prediction) against the mark targets
+documented in [`docs/alla-prima-brushes.md`](docs/alla-prima-brushes.md):
+
+```bash
+npm run build
+node tools/sheets.mjs        # -> sheets/*.png
+python3 tools/markStats.py   # needs numpy + pillow
+```
 
 ```bash
 npm run build

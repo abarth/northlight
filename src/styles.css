@@ -348,6 +348,13 @@ select {
   white-space: nowrap;
 }
 
+/* Multi-line explanatory hints inside a panel section, which must wrap to the
+   sidebar's width rather than run off the edge. */
+.bs-body .hint {
+  white-space: normal;
+  line-height: 1.35;
+}
+
 .btn {
   background: var(--bg-3);
   border: 1px solid var(--border);
