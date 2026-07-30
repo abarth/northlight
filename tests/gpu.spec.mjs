@@ -1575,7 +1575,8 @@ const TEST = `
   {
     const group = NL.brush.presets.allGroups().find((g) => g.id === 'alla-prima');
     const exported = group.presets.map((p) => ({ name: p.name, settings: p.settings }));
-    const buf = NL.brush.abrWrite.writeAbr(exported);
+    // Texture patterns are opt-in; ask for them so the round-trip covers patt.
+    const buf = NL.brush.abrWrite.writeAbr(exported, { embedPatterns: true });
     const res = NL.brush.abr.parseAbr(buf);
 
     assert('abr export: file is a v9.2 container with every brush',
@@ -1604,7 +1605,8 @@ const TEST = `
       wrongTip.length === 0, JSON.stringify(wrongTip.slice(0, 2)));
 
     // ...and the bitmap path still works when it is asked for.
-    const sampledBuf = NL.brush.abrWrite.writeAbr(exported, { bristleAsSampled: true });
+    const sampledBuf = NL.brush.abrWrite.writeAbr(exported,
+      { bristleAsSampled: true, embedPatterns: true });
     const sampledRes = NL.brush.abr.parseAbr(sampledBuf);
     const srcTip = NL.brush.patterns.getTip(exported[0].settings.tip.shape);
     const gotTip = sampledRes.tips.get(sampledRes.brushes[0].tipId);
@@ -1703,9 +1705,17 @@ const TEST = `
     assert('abr export: every brush round-trips with its settings intact',
       bad.length === 0, bad.join(' | '));
 
+    // Default export leaves Texture off and embeds no pattern: a patt entry is
+    // the one structure this writer has never seen Photoshop produce.
+    const noPat = NL.brush.abr.parseAbr(NL.brush.abrWrite.writeAbr(exported));
+    assert('abr export: patterns are opt-in, and Texture follows them off',
+      noPat.patterns.size === 0 &&
+      noPat.brushes.every((b) => !b.settings.texture || !b.settings.texture.enabled),
+      'patterns=' + noPat.patterns.size);
+
     // Re-exporting must be byte-identical, so the file is reproducible and
     // re-importing does not pile up duplicate tips.
-    const again = NL.brush.abrWrite.writeAbr(exported);
+    const again = NL.brush.abrWrite.writeAbr(exported, { embedPatterns: true });
     const a = new Uint8Array(buf);
     const b = new Uint8Array(again);
     let same = a.length === b.length;

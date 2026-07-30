@@ -231,20 +231,25 @@ function dyn(control: DynamicControl, jitter: number, minimum = 0): Emit {
 }
 
 /**
- * Inverse of the parser's BLEND_MAP. Photoshop writes the long-form enum
- * values in current files (observed: BlnM/'multiply'), so these are the
- * long forms wherever one exists.
+ * Inverse of the parser's BLEND_MAP.
+ *
+ * Photoshop accepts both the four-char enum values and long-form ones, and
+ * writes long forms in current files — but the only long form actually
+ * OBSERVED is `multiply`. The four-char values below are the ones seen across
+ * every real file the parser was validated against, so they are what gets
+ * written: inventing a long form for a mode nobody has seen spelled out risks
+ * an enum value Photoshop does not recognise.
  */
 const TEX_BLEND_KEY: Record<TextureBlend, string> = {
-  multiply: 'multiply',
-  subtract: 'subtract',
-  darken: 'darken',
-  overlay: 'overlay',
-  height: 'height',
-  lighten: 'lighten',
-  screen: 'screen',
-  'color-dodge': 'colorDodge',
-  'color-burn': 'colorBurn',
+  multiply: 'Mltp',
+  subtract: 'Sbtr',
+  darken: 'Drkn',
+  overlay: 'Ovrl',
+  height: 'Hght',
+  lighten: 'Lghn',
+  screen: 'Scrn',
+  'color-dodge': 'CDdg',
+  'color-burn': 'CBrn',
   'linear-burn': 'linearBurn',
   'hard-mix': 'hardMix',
 };
@@ -532,51 +537,13 @@ function brushDescriptor(
     items.push(
       ['scatterDynamics', dyn(s.scatter.scatterControl, s.scatter.scatter)],
       ['countDynamics', dyn(s.scatter.countControl, s.scatter.countJitter)],
-      ['Cnt ', V.long(s.scatter.count)],
+      ['Cnt ', V.doub(s.scatter.count)],
       ['bothAxes', V.bool(s.scatter.bothAxes)],
     );
   }
 
-  items.push(['useTexture', V.bool(s.texture.enabled && patternUuid !== null)]);
-  if (s.texture.enabled && patternUuid) {
-    items.push(
-      ['Txtr', V.objc('pattern', [['Idnt', V.text(patternUuid)], ['Nm  ', V.text(patternName)]])],
-      ['textureScale', V.pct(s.texture.scale * 100)],
-      ['textureBrightness', V.long(s.texture.brightness * 150)],
-      ['textureContrast', V.long(s.texture.contrast * 100)],
-      ['InvT', V.bool(s.texture.invert)],
-      ['textureBlendMode', V.enm('BlnM', TEX_BLEND_KEY[s.texture.mode])],
-      ['textureDepth', V.pct(s.texture.depth * 100)],
-      ['TxtC', V.bool(s.texture.textureEachTip)],
-      ['textureDepthDynamics', dyn(s.texture.depthControl, s.texture.depthJitter, s.texture.minDepth)],
-      // Photoshop's own Minimum Depth slider, alongside the variance object's
-      // minimum so either reader finds it
-      ['minimumDepth', V.pct(s.texture.minDepth * 100)],
-    );
-  }
-
-  items.push(['usePaintDynamics', V.bool(s.transfer.enabled)]);
-  if (s.transfer.enabled) {
-    items.push(
-      ['opVr', dyn(s.transfer.opacityControl, s.transfer.opacityJitter, s.transfer.opacityMin)],
-      ['prVr', dyn(s.transfer.flowControl, s.transfer.flowJitter, s.transfer.flowMin)],
-    );
-  }
-
-  items.push(['useColorDynamics', V.bool(s.color.enabled)]);
-  if (s.color.enabled) {
-    items.push(
-      ['clVr', dyn(s.color.fgBgControl, s.color.fgBgJitter)],
-      ['H   ', V.long(s.color.hueJitter * 100)],
-      ['Strt', V.long(s.color.satJitter * 100)],
-      ['Brgh', V.long(s.color.briJitter * 100)],
-      ['purity', V.long(s.color.purity * 100)],
-      ['colorDynamicsPerTip', V.bool(s.color.applyPerTip)],
-    );
-  }
-
   // Photoshop always writes the dualBrush and brushGroup objects, carrying
-  // just their toggle when the section is off.
+  // just their toggle when the section is off, and in this position.
   items.push([
     'dualBrush',
     s.dual.enabled
@@ -608,6 +575,44 @@ function brushDescriptor(
       : V.objc('dualBrush', [['useDualBrush', V.bool(false)]]),
   ]);
   items.push(['brushGroup', V.objc('brushGroup', [['useBrushGroup', V.bool(false)]])]);
+
+  const texOn = s.texture.enabled && patternUuid !== null;
+  items.push(['useTexture', V.bool(texOn)]);
+  if (texOn && patternUuid) {
+    items.push(
+      ['Txtr', V.objc('pattern', [['Idnt', V.text(patternUuid)], ['Nm  ', V.text(patternName)]])],
+      ['textureScale', V.pct(s.texture.scale * 100)],
+      ['textureBrightness', V.long(s.texture.brightness * 150)],
+      ['textureContrast', V.long(s.texture.contrast * 100)],
+      ['InvT', V.bool(s.texture.invert)],
+      ['textureBlendMode', V.enm('BlnM', TEX_BLEND_KEY[s.texture.mode])],
+      ['textureDepth', V.pct(s.texture.depth * 100)],
+      ['TxtC', V.bool(s.texture.textureEachTip)],
+      // Minimum Depth rides in the variance object's own minimum; there is no
+      // attested top-level key for it, so none is invented here.
+      ['textureDepthDynamics', dyn(s.texture.depthControl, s.texture.depthJitter, s.texture.minDepth)],
+    );
+  }
+
+  items.push(['usePaintDynamics', V.bool(s.transfer.enabled)]);
+  if (s.transfer.enabled) {
+    items.push(
+      ['opVr', dyn(s.transfer.opacityControl, s.transfer.opacityJitter, s.transfer.opacityMin)],
+      ['prVr', dyn(s.transfer.flowControl, s.transfer.flowJitter, s.transfer.flowMin)],
+    );
+  }
+
+  items.push(['useColorDynamics', V.bool(s.color.enabled)]);
+  if (s.color.enabled) {
+    items.push(
+      ['clVr', dyn(s.color.fgBgControl, s.color.fgBgJitter)],
+      ['H   ', V.long(s.color.hueJitter * 100)],
+      ['Strt', V.long(s.color.satJitter * 100)],
+      ['Brgh', V.long(s.color.briJitter * 100)],
+      ['purity', V.long(s.color.purity * 100)],
+      ['colorDynamicsPerTip', V.bool(s.color.applyPerTip)],
+    );
+  }
 
   items.push(
     ['Wtdg', V.bool(s.wetEdges)],
@@ -664,6 +669,18 @@ export interface AbrWriteOptions {
    * Photoshop's Bristle Qualities sliders no longer being live.
    */
   bristleAsSampled?: boolean;
+  /**
+   * Embed the texture patterns the brushes use, and turn Texture on.
+   *
+   * Off by default, deliberately. Every other structure this writer emits has
+   * been checked byte-for-byte against a Photoshop-written file, but a `patt`
+   * entry has only ever been READ here, never seen written by Photoshop — the
+   * parser tolerates slack (it bounds each channel by its own length and skips
+   * unknown ones) that a strict reader need not. Rather than ship 66 KB of
+   * unverifiable bytes in every file, Texture is left off and the tooth is two
+   * clicks to re-add in Photoshop with its own Canvas or Burlap pattern.
+   */
+  embedPatterns?: boolean;
 }
 
 /**
@@ -717,7 +734,7 @@ export function writeAbr(brushes: AbrExportBrush[], opts: AbrWriteOptions = {}):
       settings,
       tipFor(settings.tip.shape),
       settings.dual.enabled ? tipFor(settings.dual.shape) : null,
-      settings.texture.enabled ? patFor(settings.texture.pattern) : null,
+      settings.texture.enabled && opts.embedPatterns ? patFor(settings.texture.pattern) : null,
       settings.texture.enabled
         ? settings.texture.pattern.charAt(0).toUpperCase() + settings.texture.pattern.slice(1)
         : '',

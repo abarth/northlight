@@ -108,8 +108,13 @@ panel menu ▸ Import Brushes…**, or by double-clicking.
 
 | File | Tips | Use it when |
 | --- | --- | --- |
-| [`brushes/northlight-alla-prima.abr`](../brushes/northlight-alla-prima.abr) (99 KB) | Photoshop **bristle tips** — computed, sliders live | you want to keep tuning the brushes in Photoshop |
-| [`brushes/northlight-alla-prima-sampled.abr`](../brushes/northlight-alla-prima-sampled.abr) (290 KB) | northlight's own tip **bitmaps** | you want the exact mark northlight paints |
+| [`brushes/northlight-alla-prima.abr`](../brushes/northlight-alla-prima.abr) (29 KB) | Photoshop **bristle tips** — computed, sliders live | you want to keep tuning the brushes in Photoshop |
+| [`brushes/northlight-alla-prima-sampled.abr`](../brushes/northlight-alla-prima-sampled.abr) (224 KB) | northlight's own tip **bitmaps** | you want the exact mark northlight paints |
+
+Both leave **Texture off**, so the linen tooth does not travel with them — see
+*What is verified, and what is not* below. Re-adding it in Photoshop is two
+clicks: tick Texture and pick **Canvas** (or **Burlap**) from the legacy pattern
+set, then set Depth and Mode from the table above.
 
 The first is the one to reach for. Photoshop draws its bristle tips with its own
 simulation, so expect a family resemblance to the sheets rather than a pixel
@@ -122,9 +127,11 @@ Regenerate either with:
 
 ```bash
 npm run build
-node tools/exportAbr.mjs                 # bristle tips
-node tools/exportAbr.mjs --sampled       # embedded bitmaps
-node tools/exportAbr.mjs all             # every built-in group
+node tools/exportAbr.mjs                  # bristle tips
+node tools/exportAbr.mjs --sampled        # embedded bitmaps
+node tools/exportAbr.mjs --with-texture   # also embed the linen pattern
+node tools/exportAbr.mjs all              # every built-in group
+node tools/exportAbr.mjs --probe          # the diagnostic ladder, below
 ```
 
 or from inside northlight: select a brush and press **Export ABR…** in the
@@ -178,6 +185,46 @@ which had been written the wrong way here before:
 Photoshop also stores Brush Pose as a section toggle, `useBrushPose`. Its
 contents are still unrecorded, so the pose stays baked (below) and the toggle is
 written false.
+
+### What is verified, and what is not
+
+Photoshop 2026 rejected the first version of this file outright ("not compatible
+with this version of Photoshop"), which sent the encoder back to the one thing
+that can settle such a question: reproducing a Photoshop-written file byte for
+byte. Feeding the exported Legacy Bristle set's own decoded descriptor tree back
+through this writer's primitives reproduces **all 7940 bytes of it exactly** —
+container header, section framing and padding, `desc`, and `phry`. So the
+encoding rules are not in question.
+
+What remains unverified is anything that file does not itself contain:
+
+| Construct | Status |
+| --- | --- |
+| container, section framing, `desc`, `phry` | byte-identical to Photoshop's own file |
+| `dBrush` bristle tip, `sampledBrush` dual tip, `brVr` variance objects, class ids, NUL-terminated strings, `doub` counts | read directly off that file |
+| dynamics keys (`szVr`, `opVr`, `prVr`, `clVr`, `minimumDiameter`, …), `toolOptions` | key names recorded from other real brush packs; encodings now proven |
+| **`patt` pattern entries** | **only ever read here, never seen written by Photoshop** — so Texture is off by default |
+| `samp` record's fixed 301-byte header | mirrors a real record now (a u16 1, small constants, a second copy of the rectangle, a tail ending in the pixel depth) rather than being zeroed; only reachable with `--sampled` or a pose-squashed tip |
+| `computedBrush` class id (plain round tips), `pattern` class id on `Txtr` | inferred, not observed; neither appears in the default alla prima file |
+
+Two guesses were removed outright rather than left in: blend modes now use the
+four-char enum values attested across every real file (`Hght`, `Sbtr`) instead of
+long forms invented per mode — only `multiply` has ever been seen spelled out —
+and an invented `minimumDepth` key is gone, with Minimum Depth riding in its
+variance object's own minimum where the parser reads it from.
+
+### If Photoshop still refuses the file
+
+`node tools/exportAbr.mjs --probe` writes a ladder into `brushes/probes/`, each
+rung adding exactly one construct. Importing them in order says which one
+Photoshop objects to in a single pass:
+
+| Probe | Adds |
+| --- | --- |
+| `probe-1-bristle.abr` | two bristle brushes, every dynamics section off — structurally closest to Photoshop's own file |
+| `probe-2-dynamics.abr` | Shape Dynamics, Transfer, Colour Dynamics, `toolOptions` |
+| `probe-3-texture.abr` | the embedded `patt` pattern and the Texture keys |
+| `probe-4-sampled.abr` | a `samp` record with an embedded tip bitmap |
 
 ### What the export can and cannot carry
 

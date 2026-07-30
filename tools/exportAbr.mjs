@@ -17,6 +17,11 @@
  * `--sampled` embeds northlight's own tip bitmaps instead: the mark is then
  * exactly the one northlight paints, but the sliders are gone.
  *
+ * `--with-texture` also embeds the texture patterns and turns Texture on.
+ * `--probe` writes a ladder of small files into brushes/probes/, each adding
+ * one construct, so a single import run in Photoshop isolates which one it
+ * objects to.
+ *
  * Env: APP_URL, CHROMIUM_PATH, CHROMIUM_FLAGS, OUT (output path).
  */
 import { spawn } from 'node:child_process';
@@ -26,7 +31,11 @@ import { chromium } from 'playwright';
 const argv = process.argv.slice(2);
 // --sampled embeds our own tip bitmaps instead of Photoshop bristle tips
 const sampled = argv.includes('--sampled');
-const groups = argv.filter((a) => a !== '--sampled');
+// Texture is off by default: a patt entry is the one structure this writer has
+// never seen Photoshop produce (see abrWrite.ts).
+const withTexture = argv.includes('--with-texture');
+const probe = argv.includes('--probe');
+const groups = argv.filter((a) => !a.startsWith('--'));
 const PORT = process.env.PORT ?? '4187';
 let appUrl = process.env.APP_URL;
 let server = null;
@@ -79,7 +88,7 @@ page.on('pageerror', (e) => console.error('[page error]', e.message));
 await page.goto(`${appUrl}?w=64&h=64`);
 await page.waitForTimeout(800);
 
-const out = await page.evaluate(({ wanted, sampled }) => {
+const out = await page.evaluate(({ wanted, sampled, withTexture, probe }) => {
   const NL = window.__northlight;
   const all = NL.brush.presets.BRUSH_GROUPS;
   const ids = wanted.length === 0 ? ['alla-prima'] : wanted.includes('all') ? all.map((g) => g.id) : wanted;
@@ -91,24 +100,55 @@ const out = await page.evaluate(({ wanted, sampled }) => {
   const brushes = picked.flatMap((g) =>
     g.presets.map((p) => ({ name: p.name, settings: p.settings })),
   );
-  const buf = NL.brush.abrWrite.writeAbr(brushes, { bristleAsSampled: sampled });
+  const opts = { bristleAsSampled: sampled, embedPatterns: withTexture };
+  const buf = NL.brush.abrWrite.writeAbr(brushes, opts);
 
   // Read it straight back with the parser as a sanity check before it lands
   // on disk, so a broken file never gets written.
   const back = NL.brush.abr.parseAbr(buf);
 
-  let binary = '';
-  const u8 = new Uint8Array(buf);
-  for (let i = 0; i < u8.length; i++) binary += String.fromCharCode(u8[i]);
+  // Diagnostic ladder: same two brushes, one construct added at each rung.
+  const probes = [];
+  if (probe) {
+    const D = NL.brush.defaults;
+    const off = (b) => D.mergeBrush(b, {
+      shape: { ...b.shape, enabled: false },
+      scatter: { ...b.scatter, enabled: false },
+      texture: { ...b.texture, enabled: false },
+      transfer: { ...b.transfer, enabled: false },
+      color: { ...b.color, enabled: false },
+      dual: { ...b.dual, enabled: false },
+    });
+    const two = brushes.slice(0, 2);
+    const bare = two.map((b) => ({ name: b.name, settings: off(b.settings) }));
+    const dynamic = two.map((b) => ({
+      name: b.name,
+      settings: D.mergeBrush(b.settings, { texture: { ...b.settings.texture, enabled: false } }),
+    }));
+    probes.push(
+      ['probe-1-bristle', NL.brush.abrWrite.writeAbr(bare, {})],
+      ['probe-2-dynamics', NL.brush.abrWrite.writeAbr(dynamic, {})],
+      ['probe-3-texture', NL.brush.abrWrite.writeAbr(two, { embedPatterns: true })],
+      ['probe-4-sampled', NL.brush.abrWrite.writeAbr(bare.slice(0, 1), { bristleAsSampled: true })],
+    );
+  }
+  const b64 = (buffer) => {
+    let s2 = '';
+    const a = new Uint8Array(buffer);
+    for (let i = 0; i < a.length; i++) s2 += String.fromCharCode(a[i]);
+    return btoa(s2);
+  };
+
   return {
-    base64: btoa(binary),
+    base64: b64(buf),
+    probes: probes.map(([n, p]) => [n, b64(p)]),
     names: brushes.map((b) => b.name),
     groups: picked.map((g) => g.name),
     parsed: { brushes: back.brushes.length, tips: back.tips.size, patterns: back.patterns.size },
     bristle: back.brushes.filter((b) => NL.brush.bristle.isBristleTip(b.settings.tip?.shape ?? ''))
       .length,
   };
-}, { wanted: groups, sampled });
+}, { wanted: groups, sampled, withTexture, probe });
 
 await browser.close();
 if (server) server.kill();
@@ -120,7 +160,7 @@ if (out.parsed.brushes !== out.names.length) {
   process.exit(1);
 }
 
-const suffix = sampled ? '-sampled' : '';
+const suffix = (sampled ? '-sampled' : '') + (withTexture ? '-texture' : '');
 const path =
   process.env.OUT ??
   new URL(`../brushes/northlight-alla-prima${suffix}.abr`, import.meta.url).pathname;
@@ -131,3 +171,14 @@ console.log(`  groups:   ${out.groups.join(', ')}`);
 console.log(`  brushes:  ${out.parsed.brushes} — ${out.names.join(', ')}`);
 console.log(`  tips:     ${out.parsed.tips} sampled bitmap(s), ${out.bristle} bristle`);
 console.log(`  patterns: ${out.parsed.patterns}`);
+
+if (out.probes.length) {
+  const { mkdirSync } = await import('node:fs');
+  const dir = new URL('../brushes/probes/', import.meta.url).pathname;
+  mkdirSync(dir, { recursive: true });
+  for (const [n, data] of out.probes) {
+    const buf = Buffer.from(data, 'base64');
+    writeFileSync(`${dir}${n}.abr`, buf);
+    console.log(`wrote ${dir}${n}.abr (${buf.length} bytes)`);
+  }
+}

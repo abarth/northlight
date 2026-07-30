@@ -148,8 +148,15 @@ here can be used in Photoshop. Bristle tips go out as Photoshop **bristle
 brushes**, keeping its Bristle Qualities sliders live; a tip that a Brush Pose
 has foreshortened goes out as a bitmap instead, because a bristle descriptor
 carries an Angle but no Roundness. `node tools/exportAbr.mjs [group-id | all]
-[--sampled]` does the same from the command line, and a round-trip test asserts
-every setting, tip and pattern survives write-then-read intact.
+[--sampled] [--with-texture] [--probe]` does the same from the command line, and
+a round-trip test asserts every setting, tip and pattern survives write-then-read
+intact.
+
+The writer's encoding rules are checked the only way that settles the question:
+feeding a Photoshop-written file's own decoded descriptor tree back through them
+reproduces that file byte for byte. Texture patterns are the exception — a `patt`
+entry has only ever been read here, never seen written by Photoshop — so
+embedding them is opt-in (`--with-texture`) and Texture is otherwise left off.
 
 The descriptor schema was validated against real ABR files from public
 GitHub repositories (spray brushes from MaousamaQAQ/Nopressure and five
