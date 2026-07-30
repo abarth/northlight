@@ -23,8 +23,13 @@ import type { BlendMode } from '../types';
  *     the empty class-name string that precedes every class id,
  *   - a BRISTLE tip is a `dBrush` computed from its qualities and needs no
  *     samp record at all,
- *   - `Cnt ` is a `doub`, blend enums use their long-form values
- *     (`multiply`, not `Mltp`), and the dual brush carries `Flip`.
+ *   - `Cnt ` is a `doub` and the dual brush carries `Flip`.
+ *
+ * Two structures hide computed lengths where constants were first assumed — the
+ * fixed header inside a `samp` record, and a `patt` entry's channel table. Both
+ * are documented at `sampHeader` and `pattSection`, and both were solved by
+ * lining up several Photoshop-written records and reproducing them byte for
+ * byte.
  *
  * `abr export` in the test suite writes and re-reads every preset to prove the
  * two halves agree.
@@ -361,46 +366,54 @@ const SAMP_HEADER = 301; // subversion 2+; GIMP uses 47 for subversion 1
 /**
  * Writes the fixed block between a samp record's UUID and its bitmap.
  *
- * Reading a Photoshop-written record showed this block is mostly zero but not
- * entirely: a u16 1, two constants, a SECOND copy of the bitmap rectangle, a
- * lone word, then a three-word tail ending in the pixel depth. Replaying it
- * through this function reproduces that record byte for byte — every one of its
- * 301 header bytes, its rect, depth, compression flag and all 54 row counts.
+ * Most of it is zero, but four of its words are not, and two of those are
+ * LENGTHS rather than the constants they were first mistaken for. Solved by
+ * lining up four records from three Photoshop-written files (tips of 18x19,
+ * 52x54, 183x143 and 211x238):
  *
- * PHOTOSHOP STILL REJECTS OUR SAMP RECORDS, though, and the reason is almost
- * certainly in here. The sample that pinned these constants had a 52x54 tip,
- * and `56` is exactly the sort of value that follows from that (w rounded up to
- * a multiple of 8, or h + 2, or w + 4 — one sample cannot separate them), so on
- * a 256x256 tip it is very likely wrong. 0x4FF and 0x3FF read as fixed limits
- * (1280-1, 1024-1) rather than anything derived, and 3 is unknown.
+ *   +37  u16 1, u16 0
+ *   +41  u32 3                      constant
+ *   +45  u32 recordLength - 49      the rest of the record, as a block length
+ *   +49  the bitmap rectangle, again
+ *   +65  u32 56                     constant
+ *   +289 u32 1                      constant
+ *   +293 u32 23 + dataLength        the image block, same 23-byte channel
+ *                                   header shape a patt channel uses
+ *   +297 u32 8                      pixel depth
  *
- * Pinning this needs a second reference: one .abr containing a SAMPLED
- * (bitmap-tip) brush whose bitmap is a different size. Until then, bristle tips
- * avoid samp records entirely and the export prefers them.
+ * Writing the first sample's lengths (0x4FF, 0x3FF) as if they were constants
+ * is what made Photoshop reject every file that carried a tip bitmap: on a
+ * 256x256 tip they are out by two orders of magnitude. `dataLength` counts the
+ * row-count table plus the packed rows, and the record ends with two zero words
+ * that sit outside the image block but inside the record.
  */
-function sampHeader(rec: Writer, size: number): void {
+function sampHeader(rec: Writer, size: number, dataLength: number): void {
   rec.u16(1); // +37
   rec.u16(0);
   rec.u32(3);
-  rec.u32(0x4ff);
+  // +45: length of everything from +49 to the end of the record. The record is
+  // the 301-byte header, the 19-byte bitmap header, the data, and two zero
+  // words, so this is (328 + dataLength) - 49.
+  rec.u32(279 + dataLength);
   rec.i32(0).i32(0).i32(size).i32(size); // rect, again
-  rec.u32(56); // suspected size-dependent; see above
+  rec.u32(56);
   while (rec.length < SAMP_HEADER - 12) rec.u8(0);
   rec.u32(1);
-  rec.u32(0x3ff);
-  rec.u32(8); // pixel depth
+  rec.u32(23 + dataLength); // +293: the image block
+  rec.u32(8); // +297: pixel depth
 }
 
 function sampSection(tips: { uuid: string; map: { size: number; data: Uint8Array } }[]): Writer {
   const out = new Writer();
   for (const { uuid, map } of tips) {
+    const { counts, body } = rleRows(map.data, map.size, map.size);
+    const dataLength = 2 * counts.length + body.length;
     const rec = new Writer();
     rec.pascal(uuid);
-    sampHeader(rec, map.size);
+    sampHeader(rec, map.size, dataLength);
     rec.i32(0).i32(0).i32(map.size).i32(map.size); // top, left, bottom, right
     rec.u16(8); // depth
     rec.u8(1); // PackBits-compressed
-    const { counts, body } = rleRows(map.data, map.size, map.size);
     for (const c of counts) rec.u16(c);
     rec.raw(body);
     rec.u32(0).u32(0); // Photoshop pads its records with two zero words
@@ -410,37 +423,68 @@ function sampSection(tips: { uuid: string; map: { size: number; data: Uint8Array
 }
 
 /**
- * One `patt` entry: a grayscale (imageMode 1) VirtualMemoryArrayList image.
- * Layout per the parser's validated note.
+ * The `patt` section: one VirtualMemoryArrayList image per pattern.
+ *
+ * Layout confirmed against two Photoshop-written files carrying patterns (a
+ * 256x256 RGB "Kraft Paper" and a 200x200 grayscale "Oil Pastel Light"):
+ *
+ *   - the channel table holds exactly `maxChannels + 2` = 26 slots, each a u32
+ *     "written" flag followed, when set, by the channel. Writing 27 slots — one
+ *     too many — is one of the two things that made Photoshop reject a file
+ *     with a pattern in it.
+ *   - a GRAYSCALE pattern has TWO written channels: the grey plane and a
+ *     solid-255 alpha. Only one was being written here.
+ *   - a channel is `23 + dataLength` bytes: u32 depth, the rect, u16 pixel
+ *     depth, u8 compression, then the data — the same shape as the image block
+ *     inside a samp record.
+ *
+ * Photoshop wrote the image plane uncompressed and the alpha PackBits-packed,
+ * which is what this reproduces.
  */
 function pattSection(
   patterns: { uuid: string; name: string; map: { size: number; data: Uint8Array } }[],
 ): Writer {
   const out = new Writer();
   for (const { uuid, name, map } of patterns) {
+    const channel = (data: Uint8Array, compress: boolean): Writer => {
+      const w = new Writer();
+      w.u32(8); // depth
+      w.i32(0).i32(0).i32(map.size).i32(map.size);
+      w.u16(8); // pixel depth
+      w.u8(compress ? 1 : 0);
+      if (compress) {
+        const { counts, body } = rleRows(data, map.size, map.size);
+        for (const c of counts) w.u16(c);
+        w.raw(body);
+      } else {
+        w.raw(data);
+      }
+      return w;
+    };
+
+    const alpha = new Uint8Array(map.size * map.size).fill(255);
+    const channels = [channel(map.data, false), channel(alpha, true)];
+
+    const vma = new Writer();
+    vma.i32(0).i32(0).i32(map.size).i32(map.size); // rectangle
+    vma.u32(24); // max channels
+    const SLOTS = 26; // maxChannels + 2, as Photoshop writes it
+    for (let i = 0; i < SLOTS; i++) {
+      const ch = channels[i];
+      if (!ch) {
+        vma.u32(0); // slot not written
+        continue;
+      }
+      vma.u32(1);
+      vma.u32(ch.length).concat(ch);
+    }
+
     const entry = new Writer();
     entry.u32(1); // version
     entry.u32(1); // image mode: grayscale
     entry.u16(map.size).u16(map.size); // height, width
     entry.unicode(name);
     entry.pascal(uuid);
-
-    const channel = new Writer();
-    channel.u32(8); // depth
-    channel.i32(0).i32(0).i32(map.size).i32(map.size);
-    channel.u16(8); // pixel depth
-    channel.u8(1); // compressed
-    const { counts, body } = rleRows(map.data, map.size, map.size);
-    for (const c of counts) channel.u16(c);
-    channel.raw(body);
-
-    const vma = new Writer();
-    vma.i32(0).i32(0).i32(map.size).i32(map.size); // rectangle
-    vma.u32(24); // max channels
-    vma.u32(1); // channel written
-    vma.u32(channel.length).concat(channel);
-    for (let i = 0; i < 26; i++) vma.u32(0); // remaining channels not written
-
     entry.u32(3).u32(vma.length).concat(vma);
     out.u32(entry.length).concat(entry).align(4);
   }
@@ -658,17 +702,17 @@ export interface AbrExportBrush {
 }
 
 /**
- * Whether this brush goes out as a Photoshop bristle tip.
+ * Whether this brush can go out as a Photoshop bristle tip.
  *
- * Always, for a bristle tip, unless bitmaps were asked for. A `dBrush` carries
- * an Angle but no Roundness, so a preset whose Brush Pose foreshortens the tip
- * loses that squash — the mark comes out a little deeper than northlight's.
- * That is a smaller loss than the alternative: embedding a bitmap instead means
- * a samp record, and Photoshop 2026 rejects those (see `sampHeader`).
+ * A `dBrush` carries an Angle but no Roundness, so a preset whose Brush Pose
+ * foreshortens the tip cannot be expressed as one — that squash would silently
+ * vanish. Those fall back to an embedded bitmap, where `Rndn` does exist and
+ * the mark survives intact.
  */
 function usesBristleDescriptor(s: BrushSettings, opts: AbrWriteOptions): boolean {
   if (opts.bristleAsSampled) return false;
-  return isBristleTip(s.tip.shape) && parseBristleTip(s.tip.shape) !== null;
+  if (!isBristleTip(s.tip.shape) || !parseBristleTip(s.tip.shape)) return false;
+  return Math.abs(bakedAttitude(s).roundness - 1) < 1e-3;
 }
 
 export interface AbrWriteOptions {
@@ -679,15 +723,8 @@ export interface AbrWriteOptions {
    */
   bristleAsSampled?: boolean;
   /**
-   * Embed the texture patterns the brushes use, and turn Texture on.
-   *
-   * Off by default, deliberately. Every other structure this writer emits has
-   * been checked byte-for-byte against a Photoshop-written file, but a `patt`
-   * entry has only ever been READ here, never seen written by Photoshop — the
-   * parser tolerates slack (it bounds each channel by its own length and skips
-   * unknown ones) that a strict reader need not. Rather than ship 66 KB of
-   * unverifiable bytes in every file, Texture is left off and the tooth is two
-   * clicks to re-add in Photoshop with its own Canvas or Burlap pattern.
+   * Embed the texture patterns the brushes use, and turn Texture on. Defaults
+   * to true; pass false to leave Texture off and the tooth out.
    */
   embedPatterns?: boolean;
 }
@@ -743,7 +780,9 @@ export function writeAbr(brushes: AbrExportBrush[], opts: AbrWriteOptions = {}):
       settings,
       tipFor(settings.tip.shape),
       settings.dual.enabled ? tipFor(settings.dual.shape) : null,
-      settings.texture.enabled && opts.embedPatterns ? patFor(settings.texture.pattern) : null,
+      settings.texture.enabled && opts.embedPatterns !== false
+        ? patFor(settings.texture.pattern)
+        : null,
       settings.texture.enabled
         ? settings.texture.pattern.charAt(0).toUpperCase() + settings.texture.pattern.slice(1)
         : '',

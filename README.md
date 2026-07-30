@@ -148,19 +148,21 @@ here can be used in Photoshop. Bristle tips go out as Photoshop **bristle
 brushes**, keeping its Bristle Qualities sliders live; a tip that a Brush Pose
 has foreshortened goes out as a bitmap instead, because a bristle descriptor
 carries an Angle but no Roundness. `node tools/exportAbr.mjs [group-id | all]
-[--sampled] [--with-texture] [--probe]` does the same from the command line, and
+[--sampled] [--no-texture] [--probe]` does the same from the command line, and
 a round-trip test asserts every setting, tip and pattern survives write-then-read
 intact.
 
 The writer's encoding rules are checked the only way that settles the question:
-feeding a Photoshop-written file's own decoded descriptor tree back through them
-reproduces that file byte for byte. The two **binary image sections** are the
-exception — Photoshop 2026 rejects a file containing either an embedded `samp`
-tip bitmap or a `patt` pattern written here, while one of pure bristle tips
-imports — so the export emits neither by default (`--sampled` and
-`--with-texture` opt back in). See
-[`docs/alla-prima-brushes.md`](docs/alla-prima-brushes.md) for how that was
-isolated and what would settle it.
+feeding Photoshop-written files' own decoded content back through them and
+diffing. That now reproduces a whole 7940-byte brush file exactly, and every
+byte of the fixed header inside four `samp` records spanning four tip sizes and
+both compression modes. Two of that header's words turned out to be **computed
+lengths**, not the constants a single sample made them look like — writing them
+as constants is what made Photoshop reject files carrying a tip bitmap — and a
+`patt` channel table holds exactly `maxChannels + 2` slots with a separate alpha
+channel. Both rules are asserted against raw bytes in the test suite, since the
+parser skips those fields. See
+[`docs/alla-prima-brushes.md`](docs/alla-prima-brushes.md).
 
 The descriptor schema was validated against real ABR files from public
 GitHub repositories (spray brushes from MaousamaQAQ/Nopressure and five

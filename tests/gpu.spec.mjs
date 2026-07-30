@@ -1575,8 +1575,7 @@ const TEST = `
   {
     const group = NL.brush.presets.allGroups().find((g) => g.id === 'alla-prima');
     const exported = group.presets.map((p) => ({ name: p.name, settings: p.settings }));
-    // Texture patterns are opt-in; ask for them so the round-trip covers patt.
-    const buf = NL.brush.abrWrite.writeAbr(exported, { embedPatterns: true });
+    const buf = NL.brush.abrWrite.writeAbr(exported);
     const res = NL.brush.abr.parseAbr(buf);
 
     assert('abr export: file is a v9.2 container with every brush',
@@ -1590,21 +1589,22 @@ const TEST = `
     // through Photoshop's own encoding (Shp index, Dnst/Lngt/thickness/
     // stiffness as fractions) and back.
     //
-    // Nothing here may emit a samp record: Photoshop 2026 rejects them (the
-    // fixed header inside one has a size-dependent field this repo cannot pin
-    // from its single reference file), while a file of pure bristle tips
-    // imports. Any regression that reintroduces one has to fail loudly.
-    assert('abr export: a bristle set needs no samp record at all',
-      res.tips.size === 0, 'tips=' + res.tips.size);
+    // The exception is a preset whose Brush Pose foreshortens the tip: a dBrush
+    // descriptor has an Angle but no Roundness, so that one falls back to an
+    // embedded bitmap where the squash can be carried.
+    const squashed = exported.filter(
+      (b) => Math.abs(NL.brush.abrWrite.bakedAttitude(b.settings).roundness - 1) > 1e-3);
+    assert('abr export: only a pose-squashed tip needs a sampled bitmap',
+      res.tips.size === squashed.length && squashed.length === 1,
+      'tips=' + res.tips.size + ' squashed=' + squashed.length);
     const wrongTip = exported
       .map((b, i) => [b.name, b.settings.tip.shape, res.brushes[i].settings.tip?.shape])
-      .filter(([name, a, b]) => a !== b);
+      .filter(([name, a, b]) => !squashed.some((sq) => sq.name === name) && a !== b);
     assert('abr export: every bristle tip round-trips to the same qualities',
       wrongTip.length === 0, JSON.stringify(wrongTip.slice(0, 2)));
 
     // ...and the bitmap path still works when it is asked for.
-    const sampledBuf = NL.brush.abrWrite.writeAbr(exported,
-      { bristleAsSampled: true, embedPatterns: true });
+    const sampledBuf = NL.brush.abrWrite.writeAbr(exported, { bristleAsSampled: true });
     const sampledRes = NL.brush.abr.parseAbr(sampledBuf);
     const srcTip = NL.brush.patterns.getTip(exported[0].settings.tip.shape);
     const gotTip = sampledRes.tips.get(sampledRes.brushes[0].tipId);
@@ -1647,7 +1647,8 @@ const TEST = `
       // A dBrush carries an Angle but no Roundness, so a pose that foreshortens
       // the tip loses that squash on the way out. Deliberate, and pinned here so
       // it cannot change silently.
-      const carriesRoundness = !NL.brush.bristle.isBristleTip(s.tip.shape);
+      const carriesRoundness = squashed.some((sq) => sq.name === src.name) ||
+        !NL.brush.bristle.isBristleTip(s.tip.shape);
       const wantRound = carriesRoundness ? attitude.roundness : 1;
       if (!close(g.tip.roundness, wantRound)) problems.push('roundness ' + g.tip.roundness);
       if (g.shape.enabled !== s.shape.enabled) problems.push('shape.enabled');
@@ -1708,17 +1709,109 @@ const TEST = `
     assert('abr export: every brush round-trips with its settings intact',
       bad.length === 0, bad.join(' | '));
 
-    // Default export leaves Texture off and embeds no pattern: a patt entry is
-    // the one structure this writer has never seen Photoshop produce.
-    const noPat = NL.brush.abr.parseAbr(NL.brush.abrWrite.writeAbr(exported));
-    assert('abr export: patterns are opt-in, and Texture follows them off',
+    // embedPatterns: false leaves Texture off and the pattern out.
+    const noPat = NL.brush.abr.parseAbr(
+      NL.brush.abrWrite.writeAbr(exported, { embedPatterns: false }));
+    assert('abr export: embedPatterns false leaves Texture off',
       noPat.patterns.size === 0 &&
       noPat.brushes.every((b) => !b.settings.texture || !b.settings.texture.enabled),
       'patterns=' + noPat.patterns.size);
 
+    // The two structures that hide COMPUTED LENGTHS where constants were first
+    // assumed. Writing a constant there is what made Photoshop reject every
+    // file carrying a tip bitmap or a pattern, and our own parser skips both
+    // fields — so they are checked against the raw bytes here, or nothing
+    // would notice a regression.
+    {
+      const dv = new DataView(sampledBuf);
+      const u32 = (o) => dv.getUint32(o);
+      const i32 = (o) => dv.getInt32(o);
+      const bad = [];
+      // walk to the samp section
+      let o = 4;
+      let sampAt = -1;
+      let sampLen = 0;
+      while (o + 12 <= dv.byteLength) {
+        const key = String.fromCharCode(
+          dv.getUint8(o + 4), dv.getUint8(o + 5), dv.getUint8(o + 6), dv.getUint8(o + 7));
+        const len = u32(o + 8);
+        if (key === 'samp') { sampAt = o + 12; sampLen = len; break; }
+        o = o + 12 + len;
+        o += (4 - (o % 4)) % 4;
+      }
+      let records = 0;
+      let p = sampAt;
+      while (sampAt >= 0 && p < sampAt + sampLen - 4) {
+        const rl = u32(p);
+        p += 4;
+        const st = p;
+        const b = st + 301;
+        const h = i32(b + 8) - i32(b);
+        const compressed = dv.getUint8(b + 18) !== 0;
+        let dataLength = 0;
+        if (compressed) {
+          dataLength = 2 * h;
+          for (let y = 0; y < h; y++) dataLength += dv.getInt16(b + 19 + 2 * y);
+        } else {
+          dataLength = (i32(b + 12) - i32(b + 4)) * h;
+        }
+        // +45 is the rest of the record; +293 is the image block
+        if (u32(st + 45) !== rl - 49) bad.push('+45 ' + u32(st + 45) + ' != ' + (rl - 49));
+        if (u32(st + 293) !== 23 + dataLength) {
+          bad.push('+293 ' + u32(st + 293) + ' != ' + (23 + dataLength));
+        }
+        records++;
+        p = st + rl;
+        p += (4 - (p % 4)) % 4;
+      }
+      assert('abr export: samp header carries computed lengths, not constants',
+        records === new Set(exported.map((x) => x.settings.tip.shape)).size && bad.length === 0,
+        'records=' + records + ' ' + bad.slice(0, 3).join('; '));
+    }
+    {
+      // patt: the channel table is exactly maxChannels + 2 slots, and the
+      // grayscale image gets a second, solid-255 alpha channel.
+      const dv = new DataView(buf);
+      const u32 = (o) => dv.getUint32(o);
+      let o = 4;
+      let at = -1;
+      while (o + 12 <= dv.byteLength) {
+        const key = String.fromCharCode(
+          dv.getUint8(o + 4), dv.getUint8(o + 5), dv.getUint8(o + 6), dv.getUint8(o + 7));
+        const len = u32(o + 8);
+        if (key === 'patt') { at = o + 12; break; }
+        o = o + 12 + len;
+        o += (4 - (o % 4)) % 4;
+      }
+      const elen = u32(at);
+      let p = at + 4 + 12;
+      p += 4 + 2 * u32(p); // unicode name
+      p += 1 + dv.getUint8(p); // pascal id
+      const vmaLen = u32(p + 4);
+      const vmaStart = p + 8;
+      let q = vmaStart + 20; // rect + maxChannels
+      let slots = 0;
+      let written = 0;
+      while (q < vmaStart + vmaLen) {
+        const w = u32(q);
+        q += 4;
+        slots++;
+        if (w) {
+          written++;
+          const chLen = u32(q);
+          q += 4 + chLen;
+        }
+      }
+      assert('abr export: patt channel table is maxChannels + 2 slots, gray + alpha',
+        u32(vmaStart + 16) === 24 && slots === 26 && written === 2 &&
+        q === vmaStart + vmaLen && elen === at + 4 + elen - (at + 4),
+        'maxChannels=' + u32(vmaStart + 16) + ' slots=' + slots + ' written=' + written +
+        ' vmaEnd=' + (q - vmaStart) + '/' + vmaLen);
+    }
+
     // Re-exporting must be byte-identical, so the file is reproducible and
     // re-importing does not pile up duplicate tips.
-    const again = NL.brush.abrWrite.writeAbr(exported, { embedPatterns: true });
+    const again = NL.brush.abrWrite.writeAbr(exported);
     const a = new Uint8Array(buf);
     const b = new Uint8Array(again);
     let same = a.length === b.length;

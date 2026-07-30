@@ -17,7 +17,7 @@
  * `--sampled` embeds northlight's own tip bitmaps instead: the mark is then
  * exactly the one northlight paints, but the sliders are gone.
  *
- * `--with-texture` also embeds the texture patterns and turns Texture on.
+ * `--no-texture` leaves the texture patterns out and Texture off.
  * `--probe` writes a ladder of small files into brushes/probes/, each adding
  * one construct, so a single import run in Photoshop isolates which one it
  * objects to.
@@ -31,9 +31,7 @@ import { chromium } from 'playwright';
 const argv = process.argv.slice(2);
 // --sampled embeds our own tip bitmaps instead of Photoshop bristle tips
 const sampled = argv.includes('--sampled');
-// Texture is off by default: a patt entry is the one structure this writer has
-// never seen Photoshop produce (see abrWrite.ts).
-const withTexture = argv.includes('--with-texture');
+const noTexture = argv.includes('--no-texture');
 const probe = argv.includes('--probe');
 const groups = argv.filter((a) => !a.startsWith('--'));
 const PORT = process.env.PORT ?? '4187';
@@ -88,7 +86,7 @@ page.on('pageerror', (e) => console.error('[page error]', e.message));
 await page.goto(`${appUrl}?w=64&h=64`);
 await page.waitForTimeout(800);
 
-const out = await page.evaluate(({ wanted, sampled, withTexture, probe }) => {
+const out = await page.evaluate(({ wanted, sampled, noTexture, probe }) => {
   const NL = window.__northlight;
   const all = NL.brush.presets.BRUSH_GROUPS;
   const ids = wanted.length === 0 ? ['alla-prima'] : wanted.includes('all') ? all.map((g) => g.id) : wanted;
@@ -100,7 +98,7 @@ const out = await page.evaluate(({ wanted, sampled, withTexture, probe }) => {
   const brushes = picked.flatMap((g) =>
     g.presets.map((p) => ({ name: p.name, settings: p.settings })),
   );
-  const opts = { bristleAsSampled: sampled, embedPatterns: withTexture };
+  const opts = { bristleAsSampled: sampled, embedPatterns: !noTexture };
   const buf = NL.brush.abrWrite.writeAbr(brushes, opts);
 
   // Read it straight back with the parser as a sanity check before it lands
@@ -141,11 +139,12 @@ const out = await page.evaluate(({ wanted, sampled, withTexture, probe }) => {
       }),
     }));
     probes.push(
-      ['probe-1-bristle', NL.brush.abrWrite.writeAbr(bare, {})],
-      ['probe-2-dynamics', NL.brush.abrWrite.writeAbr(dynamic, {})],
+      ['probe-1-bristle', NL.brush.abrWrite.writeAbr(bare, { embedPatterns: false })],
+      ['probe-2-dynamics', NL.brush.abrWrite.writeAbr(dynamic, { embedPatterns: false })],
       ['probe-3-texture', NL.brush.abrWrite.writeAbr(two, { embedPatterns: true })],
-      ['probe-4-sampled', NL.brush.abrWrite.writeAbr(bare.slice(0, 1), { bristleAsSampled: true })],
-      ['probe-5-scatter', NL.brush.abrWrite.writeAbr(scattered, {})],
+      ['probe-4-sampled', NL.brush.abrWrite.writeAbr(bare.slice(0, 1),
+        { bristleAsSampled: true, embedPatterns: false })],
+      ['probe-5-scatter', NL.brush.abrWrite.writeAbr(scattered, { embedPatterns: false })],
     );
   }
   const b64 = (buffer) => {
@@ -164,7 +163,7 @@ const out = await page.evaluate(({ wanted, sampled, withTexture, probe }) => {
     bristle: back.brushes.filter((b) => NL.brush.bristle.isBristleTip(b.settings.tip?.shape ?? ''))
       .length,
   };
-}, { wanted: groups, sampled, withTexture, probe });
+}, { wanted: groups, sampled, noTexture, probe });
 
 await browser.close();
 if (server) server.kill();
@@ -176,7 +175,7 @@ if (out.parsed.brushes !== out.names.length) {
   process.exit(1);
 }
 
-const suffix = (sampled ? '-sampled' : '') + (withTexture ? '-texture' : '');
+const suffix = (sampled ? '-sampled' : '') + (noTexture ? '-plain' : '');
 const path =
   process.env.OUT ??
   new URL(`../brushes/northlight-alla-prima${suffix}.abr`, import.meta.url).pathname;
