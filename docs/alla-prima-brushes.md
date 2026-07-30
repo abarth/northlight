@@ -7,9 +7,11 @@ through the body of the paint, discrete square touches of one value, dry
 scumbles that skip over the tooth, and edges that are found in some places and
 lost in others.
 
-Everything here uses only features Photoshop has, so the brushes can be
-rebuilt there from the recipe table below. Where northlight was missing one of
-those features, it was added (see **What was added to the engine**).
+Everything here uses only features Photoshop has. There is a ready-made
+[`brushes/northlight-alla-prima.abr`](../brushes/northlight-alla-prima.abr) to
+import, and a recipe table for rebuilding them by hand — see **The .abr file**
+and **Rebuilding these in Photoshop**. Where northlight was missing one of those
+features, it was added (see **What was added to the engine**).
 
 ## The three things that decide whether a bristle mark reads as paint
 
@@ -100,6 +102,60 @@ Beyond the table:
 - Smoothing is 15–50%, highest on the Rigger, where a long line has to stay
   clean at speed.
 
+## The .abr file
+
+[`brushes/northlight-alla-prima.abr`](../brushes/northlight-alla-prima.abr)
+(288 KB) holds all thirteen brushes for Photoshop: **Brushes panel ▸ panel menu
+▸ Import Brushes…**, or double-click the file.
+
+It is a version 6.2 container with three sections: `samp` carries the thirteen
+generated bristle tips as sampled tip bitmaps (256×256, 8-bit,
+PackBits-compressed), `patt` carries the linen tooth as a grayscale pattern,
+and `desc` carries one descriptor per brush with the settings — tip diameter,
+angle, roundness, spacing, Shape Dynamics with its controls and minimums,
+Scattering, Texture, Transfer, Colour Dynamics, and the options-bar state.
+
+Regenerate it with:
+
+```bash
+npm run build
+node tools/exportAbr.mjs              # the alla prima group
+node tools/exportAbr.mjs all          # every built-in group
+```
+
+or from inside northlight: select a brush and press **Export ABR…** in the
+Brushes panel, which writes out the group that brush belongs to.
+
+### What the export can and cannot carry
+
+**The tips arrive as sampled tips, not as Photoshop bristle tips.** A generated
+bristle tip is a bitmap; Photoshop's bristle tips are parameters to its own
+simulation, and this repo has no recorded descriptor keys for Bristle
+Qualities. Exporting the bitmap means the marks are the ones these brushes
+actually make — but in Photoshop the Bristles / Length / Thickness / Stiffness
+sliders will not be there to adjust. If you want them live, build the brush from
+the recipe table below instead; the two approaches trade fidelity for
+adjustability.
+
+**Brush Pose and Brush Projection are baked, not carried** — same reason. For
+`Flat Bristle, Fixed Pose`, the attitude those settings produce is computed and
+written into the tip's own Angle and Roundness, so the exported brush makes the
+same mark; it just will not respond to tilting the pen. `Round Bristle, Tilt
+Projected` loses its tilt response entirely and exports as the round mark it
+makes with the pen upright.
+
+**One part of the file is unverified.** A `samp` record has a fixed-size header
+between the tip's UUID and its bitmap rectangle — 301 bytes in a subversion-2
+file. GIMP's loader documents the size and skips the contents, and no real ABR
+file was reachable from this environment to read them off, so the writer emits
+the UUID and zeroes the rest. Everything else is checked three ways: the
+descriptor keys are the ones the parser reads, and the parser was validated
+against 288 brushes from real Photoshop files; a round-trip test writes the file
+and reads it back, asserting every setting, both tip bitmaps and the pattern
+survive byte for byte; and the byte layout was walked by a second, independent
+reader. If Photoshop rejects the tips, those 301 bytes are the first place to
+look — and the recipe table below is the fallback.
+
 ## Rebuilding these in Photoshop
 
 Everything in the table maps one-to-one onto Photoshop's Brush Settings panel:
@@ -142,6 +198,10 @@ Each of these exists in Photoshop and was missing from northlight:
 | Shape Dynamics ▸ Brush Projection | `dynamics.ts` (`emitStamps`) |
 | Texture ▸ Minimum Depth | `types.ts`, `dynamics.ts` |
 | Scattering ▸ Count Control | `types.ts`, `dynamics.ts` |
+
+And, so the brushes can leave northlight at all, an **.abr writer**
+(`src/brush/abrWrite.ts`) — the inverse of the existing parser, emitting v6.2
+`samp` / `patt` / `desc` sections.
 
 Two supporting changes that are not Photoshop features but are needed to render
 the above honestly:

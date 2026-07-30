@@ -1565,6 +1565,158 @@ const TEST = `
       linen.size === 256 && lo > 20 && hi < 252 && hi - lo > 80, lo + '..' + hi);
   }
 
+  // ---- 28. ABR export: write -> parse round-trip ----
+  //
+  // The writer's job is to emit what abr.ts reads, and abr.ts was validated
+  // against 288 brushes from real Photoshop files — so a round-trip that
+  // recovers every setting is real evidence the descriptor half of the export
+  // is right. (The fixed header inside a samp record is the one part no test
+  // here can settle; see src/brush/abrWrite.ts.)
+  {
+    const group = NL.brush.presets.allGroups().find((g) => g.id === 'alla-prima');
+    const exported = group.presets.map((p) => ({ name: p.name, settings: p.settings }));
+    const buf = NL.brush.abrWrite.writeAbr(exported);
+    const res = NL.brush.abr.parseAbr(buf);
+
+    assert('abr export: file is a v6 container with every brush and tip',
+      res.version === 6 && res.brushes.length === exported.length &&
+      res.tips.size === new Set(exported.map((b) => b.settings.tip.shape)).size &&
+      res.patterns.size === 1,
+      'v' + res.version + ' brushes=' + res.brushes.length + ' tips=' + res.tips.size +
+      ' patterns=' + res.patterns.size);
+
+    // Tips must survive PackBits compression byte for byte.
+    const srcTip = NL.brush.patterns.getTip(exported[0].settings.tip.shape);
+    const gotTip = res.tips.get(res.brushes[0].tipId);
+    let tipDiff = 0;
+    if (gotTip && gotTip.size === srcTip.size) {
+      for (let i = 0; i < srcTip.data.length; i++) {
+        if (srcTip.data[i] !== gotTip.data[i]) tipDiff++;
+      }
+    } else {
+      tipDiff = -1;
+    }
+    assert('abr export: sampled tip round-trips exactly through PackBits',
+      tipDiff === 0, 'diff=' + tipDiff);
+
+    const srcPat = NL.brush.patterns.getPattern('linen');
+    const gotPat = [...res.patterns.values()][0];
+    let patDiff = 0;
+    for (let i = 0; i < srcPat.data.length; i++) {
+      if (srcPat.data[i] !== gotPat.map.data[i]) patDiff++;
+    }
+    assert('abr export: texture pattern round-trips exactly',
+      gotPat.map.size === srcPat.size && patDiff === 0 && gotPat.name === 'Linen',
+      'size=' + gotPat.map.size + ' diff=' + patDiff + ' name=' + gotPat.name);
+
+    // Every mapped setting, for every brush.
+    const close = (a, b, tol = 0.005) => Math.abs(a - b) <= tol;
+    const bad = [];
+    exported.forEach((src, i) => {
+      const got = res.brushes[i];
+      const s = src.settings;
+      const g = NL.brush.defaults.mergeBrush(NL.brush.defaults.defaultBrush(), got.settings);
+      const attitude = NL.brush.abrWrite.bakedAttitude(s);
+      const problems = [];
+      if (got.name !== src.name) problems.push('name ' + got.name);
+      if (!close(g.tip.size, s.tip.size, 0.01)) problems.push('size ' + g.tip.size);
+      if (!close(g.tip.spacing, s.tip.spacing)) problems.push('spacing ' + g.tip.spacing);
+      if (!close(g.tip.angle, attitude.angle, 0.01)) problems.push('angle ' + g.tip.angle);
+      if (!close(g.tip.roundness, attitude.roundness)) problems.push('roundness ' + g.tip.roundness);
+      if (g.shape.enabled !== s.shape.enabled) problems.push('shape.enabled');
+      if (s.shape.enabled) {
+        if (g.shape.sizeControl.source !== s.shape.sizeControl.source) {
+          problems.push('sizeControl ' + g.shape.sizeControl.source);
+        }
+        if (g.shape.angleControl.source !== s.shape.angleControl.source) {
+          problems.push('angleControl ' + g.shape.angleControl.source);
+        }
+        if (!close(g.shape.minDiameter, s.shape.minDiameter)) {
+          problems.push('minDiameter ' + g.shape.minDiameter);
+        }
+        if (!close(g.shape.sizeJitter, s.shape.sizeJitter)) {
+          problems.push('sizeJitter ' + g.shape.sizeJitter);
+        }
+        if (!close(g.shape.angleJitter, s.shape.angleJitter)) {
+          problems.push('angleJitter ' + g.shape.angleJitter);
+        }
+      }
+      if (g.scatter.enabled !== s.scatter.enabled) problems.push('scatter.enabled');
+      if (s.scatter.enabled) {
+        if (g.scatter.count !== s.scatter.count) problems.push('count ' + g.scatter.count);
+        if (!close(g.scatter.scatter, s.scatter.scatter)) problems.push('scatter ' + g.scatter.scatter);
+        if (!close(g.scatter.countJitter, s.scatter.countJitter)) {
+          problems.push('countJitter ' + g.scatter.countJitter);
+        }
+      }
+      if (g.texture.enabled !== s.texture.enabled) problems.push('texture.enabled');
+      if (s.texture.enabled) {
+        if (!close(g.texture.depth, s.texture.depth)) problems.push('depth ' + g.texture.depth);
+        if (!close(g.texture.scale, s.texture.scale)) problems.push('scale ' + g.texture.scale);
+        if (g.texture.mode !== s.texture.mode) problems.push('texMode ' + g.texture.mode);
+        if (g.texture.textureEachTip !== s.texture.textureEachTip) problems.push('eachTip');
+        if (!close(g.texture.depthJitter, s.texture.depthJitter)) {
+          problems.push('depthJitter ' + g.texture.depthJitter);
+        }
+        if (got.texturePatternId === null) problems.push('pattern unresolved');
+      }
+      if (g.transfer.enabled !== s.transfer.enabled) problems.push('transfer.enabled');
+      if (s.transfer.enabled) {
+        if (g.transfer.flowControl.source !== s.transfer.flowControl.source) {
+          problems.push('flowControl ' + g.transfer.flowControl.source);
+        }
+        if (!close(g.transfer.flowMin, s.transfer.flowMin)) problems.push('flowMin ' + g.transfer.flowMin);
+      }
+      if (g.color.enabled !== s.color.enabled) problems.push('color.enabled');
+      if (s.color.enabled) {
+        if (!close(g.color.satJitter, s.color.satJitter)) problems.push('satJitter ' + g.color.satJitter);
+        if (!close(g.color.briJitter, s.color.briJitter)) problems.push('briJitter ' + g.color.briJitter);
+        if (g.color.applyPerTip !== s.color.applyPerTip) problems.push('perTip');
+      }
+      if (!close(g.flow, s.flow)) problems.push('flow ' + g.flow);
+      if (!close(g.opacity, s.opacity)) problems.push('opacity ' + g.opacity);
+      if (!close(g.smoothing, s.smoothing)) problems.push('smoothing ' + g.smoothing);
+      if (problems.length) bad.push(src.name + ': ' + problems.join(', '));
+    });
+    assert('abr export: every brush round-trips with its settings intact',
+      bad.length === 0, bad.join(' | '));
+
+    // Re-exporting must be byte-identical, so the file is reproducible and
+    // re-importing does not pile up duplicate tips.
+    const again = NL.brush.abrWrite.writeAbr(exported);
+    const a = new Uint8Array(buf);
+    const b = new Uint8Array(again);
+    let same = a.length === b.length;
+    for (let i = 0; same && i < a.length; i++) same = a[i] === b[i];
+    assert('abr export: the file is byte-reproducible', same,
+      a.length + ' vs ' + b.length);
+
+    // The exported tips must actually paint once imported through the real
+    // import path (which registers the tips and patterns and builds presets).
+    const count = NL.brush.importAbr('roundtrip.abr', buf);
+    const importedGroup = NL.brush.presets.allGroups().find((g) => g.name === 'roundtrip');
+    const first = importedGroup.presets[0].settings;
+    eng.fillLayer('bg', [1, 1, 1, 1]);
+    eng.beginStroke(NL.brush.engineStrokeParams(first, 'paint'));
+    {
+      const sess = new NL.StrokeSession(eng, first,
+        { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 },
+          rng: NL.brush.patterns.seededRng(3) });
+      const sm = (x) => ({ x, y: 150, pressure: 1, tiltX: 0, tiltY: 0, twist: 0 });
+      sess.down(sm(80));
+      for (let x = 90; x <= 320; x += 10) sess.move([sm(x)]);
+      sess.up();
+    }
+    eng.endStroke('bg');
+    const d = await read();
+    let inked = 0;
+    for (let y = 110; y <= 190; y++) if (px(d, 200, y)[0] < 200) inked++;
+    assert('abr export: an imported brush paints its mark',
+      count === exported.length && inked >= 40 && inked <= 80,
+      'presets=' + count + ' inked=' + inked);
+    eng.fillLayer('bg', [1, 1, 1, 1]);
+  }
+
   results.push(lost ? 'DEVICE-LOST ' + lost : 'device: alive');
   return results;
 })()

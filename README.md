@@ -117,7 +117,7 @@ pointer-up. Spacing is distance-based and re-evaluated per stamp, so
 pressure-driven size changes stamp density correctly. The **eraser** shares
 the whole engine and erases layer alpha.
 
-### Photoshop ABR import
+### Photoshop ABR import & export
 The Brushes panel's **Import ABR…** button loads Photoshop brush files:
 legacy v1/v2 and modern v6–v10 (8BIM `samp` tips, Actions-descriptor `desc`,
 and `patt` texture patterns), including PackBits-compressed and 16-bit tips.
@@ -135,6 +135,13 @@ and `patt` texture patterns), including PackBits-compressed and 16-bit tips.
   flip), Transfer, Color Dynamics, wet edges, noise, airbrush, and the
   options-bar state (opacity, flow, smoothing, paint Mode, and the
   pressure-override buttons).
+
+**Export ABR…** writes the selected brush's whole group back out as a version
+6.2 `.abr` — `samp` tip bitmaps (PackBits-compressed), `patt` texture patterns
+and one `desc` descriptor per brush — so brushes built here can be used in
+Photoshop. `node tools/exportAbr.mjs [group-id | all]` does the same from the
+command line, and a round-trip test asserts every setting, tip and pattern
+survives write-then-read intact.
 
 The descriptor schema was validated against real ABR files from public
 GitHub repositories (spray brushes from MaousamaQAQ/Nopressure and five
@@ -164,9 +171,12 @@ broad-to-thin, hair drag through the body of the paint, discrete square
 touches of one value, scumbles that skip over the tooth. Every one maps
 pressure to both the width of the mark and how much paint it lays down.
 
-They use only features Photoshop has, and
-[`docs/alla-prima-brushes.md`](docs/alla-prima-brushes.md) has the full recipe
-table for rebuilding them there, the reasoning behind the settings, and the
+They use only features Photoshop has, and ship as
+[`brushes/northlight-alla-prima.abr`](brushes/northlight-alla-prima.abr) for
+importing straight into it.
+[`docs/alla-prima-brushes.md`](docs/alla-prima-brushes.md) has the recipe table
+for rebuilding them by hand instead (which keeps Photoshop's own bristle
+sliders live), the reasoning behind the settings, and the
 sample sheets in [`sheets/`](sheets/) — rendered by the real engine over
 synthesized pen paths with `tools/sheets.mjs`, and measured against mark
 targets by `tools/markStats.py`.
@@ -329,6 +339,8 @@ src/
     abr.ts         Photoshop .abr parser (v1/v2 + v6-v10, PackBits,
                    Actions-descriptor reader, patt pattern decoder,
                    validated settings mapping)
+    abrWrite.ts    .abr writer: v6.2 samp/patt/desc, PackBits encoder,
+                   Actions-descriptor emitter (round-trip tested)
     engineParams.ts settings -> per-stroke GPU parameters
   gpu/
     shaders.ts    WGSL: compositor (all blend modes), brush stamp (rotated

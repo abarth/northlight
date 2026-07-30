@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { allGroups, type BrushPreset } from '../brush/presets';
-import { importAbr } from '../controller';
+import { exportAbrGroup, importAbr } from '../controller';
 import { useStore, type PaintToolId } from '../store';
 import { drawBrushPreview } from './brushPreview';
 import { ValSlider } from './controls';
@@ -51,6 +51,21 @@ export function BrushesPanel() {
     if (fileRef.current) fileRef.current.value = '';
   }
 
+  /** Writes the group the active preset belongs to out as a .abr file. */
+  function onExportGroup() {
+    const group = allGroups().find((g) => g.presets.some((p) => p.id === activePreset));
+    if (!group) {
+      alert('Select a brush first — the export writes out the group it belongs to.');
+      return;
+    }
+    try {
+      const count = exportAbrGroup(group.id);
+      console.info(`[northlight] exported ${count} brushes from ${group.name}`);
+    } catch (err) {
+      alert(`Could not export: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
   return (
     <div className="panel brushes-panel">
       <div className="panel-title-row">
@@ -61,6 +76,13 @@ export function BrushesPanel() {
           onClick={() => fileRef.current?.click()}
         >
           Import ABR…
+        </button>
+        <button
+          className="btn small"
+          title="Write the selected brush's whole group out as a Photoshop .abr file, tips included"
+          onClick={onExportGroup}
+        >
+          Export ABR…
         </button>
         <input
           ref={fileRef}
