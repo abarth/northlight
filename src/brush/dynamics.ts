@@ -1,7 +1,13 @@
 import { clamp, hsvToRgb, rgbToHsv, type RGB } from '../color/convert';
 import type { HSV } from '../types';
 import { getTipAspect } from './patterns';
-import type { BrushSettings, ColorDynamics, DualBrush, DynamicControl } from './types';
+import type {
+  BrushPose,
+  BrushSettings,
+  ColorDynamics,
+  DualBrush,
+  DynamicControl,
+} from './types';
 
 /**
  * Pure per-stamp dynamics evaluation: turns brush settings + pen state into
@@ -38,6 +44,38 @@ export const FLAG_FLIP_X = 1;
 export const FLAG_FLIP_Y = 2;
 
 const TAU = Math.PI * 2;
+const DEG = Math.PI / 180;
+
+/**
+ * Applies Brush Pose to a pen sample: every input whose Override is set is
+ * replaced by the pose's value. Idempotent, so it is safe to run wherever a
+ * sample is consumed.
+ */
+export function posedSample(pose: BrushPose, sample: PointerSample): PointerSample {
+  if (!pose.enabled) return sample;
+  if (
+    !pose.overrideTiltX &&
+    !pose.overrideTiltY &&
+    !pose.overrideRotation &&
+    !pose.overridePressure
+  ) {
+    return sample;
+  }
+  return {
+    x: sample.x,
+    y: sample.y,
+    pressure: pose.overridePressure ? clamp(pose.pressure, 0, 1) : sample.pressure,
+    tiltX: pose.overrideTiltX ? pose.tiltX : sample.tiltX,
+    tiltY: pose.overrideTiltY ? pose.tiltY : sample.tiltY,
+    twist: pose.overrideRotation ? pose.rotation : sample.twist,
+  };
+}
+
+/** `ctx` with Brush Pose applied to its pen sample. */
+export function posedContext(pose: BrushPose, ctx: StampContext): StampContext {
+  const sample = posedSample(pose, ctx.sample);
+  return sample === ctx.sample ? ctx : { ...ctx, sample };
+}
 
 /** Scalar control value in 0..1 for size/opacity/flow/roundness/etc. */
 export function controlFactor(ctrl: DynamicControl, ctx: StampContext): number {
@@ -140,9 +178,10 @@ export function dynamicColor(
 /** Per-stamp deposition (flow) and opacity dynamics folded into stamp alpha. */
 export function stampAlpha(
   s: BrushSettings,
-  ctx: StampContext,
+  ctxIn: StampContext,
   rng: () => number,
 ): number {
+  const ctx = posedContext(s.pose, ctxIn);
   let a = s.flow;
   if (s.transfer.enabled) {
     a *= dynamicScale(s.transfer.flowControl, s.transfer.flowJitter, s.transfer.flowMin, ctx, rng);
@@ -160,7 +199,8 @@ export function stampAlpha(
 }
 
 /** Effective diameter for this stamp (drives spacing too). */
-export function stampDiameter(s: BrushSettings, ctx: StampContext, rng: () => number): number {
+export function stampDiameter(s: BrushSettings, ctxIn: StampContext, rng: () => number): number {
+  const ctx = posedContext(s.pose, ctxIn);
   let f = 1;
   if (s.shape.enabled) {
     f = dynamicScale(s.shape.sizeControl, s.shape.sizeJitter, s.shape.minDiameter, ctx, rng);
@@ -186,18 +226,20 @@ export interface StampEmitOptions {
  */
 export function emitStamps(
   s: BrushSettings,
-  ctx: StampContext,
+  ctxIn: StampContext,
   x: number,
   y: number,
   opts: StampEmitOptions,
   out: number[],
 ): void {
   const { rng } = opts;
+  const ctx = posedContext(s.pose, ctxIn);
   const sc = s.scatter;
   let count = 1;
   let scatterAmt = 0;
   if (sc.enabled) {
-    count = Math.max(1, Math.round(sc.count * (1 - sc.countJitter * rng())));
+    const countFactor = controlFactor(sc.countControl, ctx) * (1 - sc.countJitter * rng());
+    count = Math.max(1, Math.round(sc.count * countFactor));
     scatterAmt = sc.scatter * controlFactor(sc.scatterControl, ctx);
   }
 
@@ -233,6 +275,30 @@ export function emitStamps(
       );
       if (s.shape.flipXJitter && rng() < 0.5) flipX = !flipX;
       if (s.shape.flipYJitter && rng() < 0.5) flipY = !flipY;
+      if (s.shape.brushProjection) {
+        // Brush Projection: the pen's attitude shapes the mark. Tilt lays the
+        // tip over, so the mark stretches along the tilt azimuth and narrows
+        // across it by cos(tilt); barrel rotation spins the whole thing. The
+        // tip's own angle stays as an offset so a flat brush can be trimmed
+        // off the pen's axis.
+        //
+        // An upright pen carries no azimuth to project — atan2(0, 0) would
+        // slam the tip to zero degrees — so below a degree of tilt the angle
+        // control keeps whatever it decided (Direction, jitter, the static
+        // angle) and only barrel rotation is added.
+        const tilt = Math.hypot(ctx.sample.tiltX, ctx.sample.tiltY) * DEG;
+        const twist = (ctx.sample.twist / 360) * TAU;
+        if (tilt > DEG) {
+          const azimuth = Math.atan2(ctx.sample.tiltY, ctx.sample.tiltX);
+          angle = (-s.tip.angle / 180) * Math.PI + azimuth + twist;
+          roundness = Math.max(
+            s.tip.roundness * Math.cos(Math.min(tilt, Math.PI / 2)),
+            s.shape.minRoundness,
+          );
+        } else {
+          angle += twist;
+        }
+      }
     }
     roundness = clamp(roundness, 0.01, 1);
 
@@ -248,7 +314,7 @@ export function emitStamps(
       depthScale = dynamicScale(
         s.texture.depthControl,
         s.texture.depthJitter,
-        0,
+        s.texture.minDepth,
         ctx,
         rng,
       );

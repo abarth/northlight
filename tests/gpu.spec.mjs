@@ -1294,6 +1294,277 @@ const TEST = `
       near(maxC, okRed.c, 0.003), 'maxC=' + maxC);
   }
 
+  // ---- 24. bristle tips ----
+  {
+    const B = NL.brush.bristle;
+    const id = B.bristleTipId({ shape: 'flat-blunt', bristles: 0.4, length: 0.5,
+      thickness: 0.5, stiffness: 0.8 });
+    assert('bristle: tip id is content-addressed and round-trips',
+      id === 'bristle:flat-blunt:b40l50t50s80' &&
+      JSON.stringify(B.parseBristleTip(id)) ===
+        JSON.stringify({ shape: 'flat-blunt', bristles: 0.4, length: 0.5,
+          thickness: 0.5, stiffness: 0.8 }), id);
+    assert('bristle: non-bristle ids are rejected',
+      B.parseBristleTip('round') === null && B.parseBristleTip('bristle:nope:b1l1t1s1') === null &&
+      !B.isBristleTip('chalk') && B.isBristleTip(id), '');
+
+    // The map resolves through the normal tip registry, so every consumer
+    // (engine cache, spacing aspect, cursor outline, preview) just works.
+    const map = NL.brush.patterns.getTip(id);
+    assert('bristle: generated map is cached by id',
+      map.size === 256 && map === NL.brush.patterns.getTip(id), 'size=' + map.size);
+
+    // A flat trim lays a chisel: wide across the blade, shallow in the travel
+    // direction. A round ferrule's patch is nearly as deep as it is wide.
+    const flatAspect = NL.brush.patterns.getTipAspect(id);
+    const roundAspect = NL.brush.patterns.getTipAspect(
+      B.bristleTipId({ shape: 'round-blunt', bristles: 0.4, length: 0.5,
+        thickness: 0.5, stiffness: 0.8 }));
+    assert('bristle: a flat trim is a chisel, a round ferrule is not',
+      flatAspect < 0.35 && roundAspect > 0.6,
+      'flat=' + flatAspect.toFixed(3) + ' round=' + roundAspect.toFixed(3));
+
+    // Thickness is the fraction of each hair spacing carrying paint: thin hairs
+    // leave true zeros between them, thick ones close up into a solid slab.
+    const rowGaps = (tipId) => {
+      const m = NL.brush.patterns.getTip(tipId);
+      const y = Math.floor(m.size / 2);
+      let zeros = 0;
+      let runs = 0;
+      let prev = 1;
+      for (let x = 20; x < m.size - 20; x++) {
+        const v = m.data[y * m.size + x];
+        if (v === 0) { zeros++; if (prev !== 0) runs++; }
+        prev = v;
+      }
+      return { zeros, runs };
+    };
+    const thin = rowGaps(B.bristleTipId({ shape: 'flat-blunt', bristles: 0.4,
+      length: 0.5, thickness: 0.25, stiffness: 0.9 }));
+    const thick = rowGaps(B.bristleTipId({ shape: 'flat-blunt', bristles: 0.4,
+      length: 0.5, thickness: 1, stiffness: 0.9 }));
+    assert('bristle: thin hairs leave true gaps, thick hairs close up',
+      thin.runs >= 8 && thin.zeros > 40 && thick.zeros === 0,
+      'thin=' + JSON.stringify(thin) + ' thick=' + JSON.stringify(thick));
+
+    // Mip chain: the stamp shader samples the level matching the dab's size,
+    // which is what keeps the hair stripes from moireing at painting sizes.
+    const chain = NL.brush.patterns.mipChain({ size: 4,
+      data: new Uint8Array([0,0,255,255, 0,0,255,255, 100,100,200,200, 100,100,200,200]) });
+    assert('bristle: mip chain halves and box-filters',
+      chain.length === 2 && chain[1].size === 2 &&
+      [...chain[1].data].join() === '0,255,100,200', JSON.stringify([...chain[1].data]));
+  }
+
+  // ---- 25. bristle stroke: striations along the drag, opaque body ----
+  {
+    const bris = (thickness) => makeBrush({
+      tip: {
+        shape: NL.brush.bristle.bristleTipId({ shape: 'flat-blunt', bristles: 0.16,
+          length: 0.5, thickness, stiffness: 0.85 }),
+        size: 64, spacing: 0.14, angle: -90,
+      },
+      // blade across the stroke: every dab's gaps land on the last dab's, so the
+      // hairs draw continuous lines instead of a train of stamps
+      shape: { enabled: true, angleControl: { source: 'direction', fadeSteps: 25 } },
+      smoothing: 0,
+    });
+    const runBristle = async (thickness) => {
+      const b = bris(thickness);
+      eng.fillLayer('bg', [1, 1, 1, 1]);
+      eng.beginStroke(NL.brush.engineStrokeParams(b, 'paint'));
+      const sess = new NL.StrokeSession(eng, b,
+        { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 },
+          rng: NL.brush.patterns.seededRng(7) });
+      const sm = (x) => ({ x, y: 150, pressure: 1, tiltX: 0, tiltY: 0, twist: 0 });
+      sess.down(sm(60));
+      for (let x = 70; x <= 340; x += 10) sess.move([sm(x)]);
+      sess.up();
+      eng.endStroke('bg');
+      const d = await read();
+      // cross-section at mid-stroke
+      const col = [];
+      for (let y = 110; y <= 190; y++) col.push(px(d, 200, y)[0]);
+      return col;
+    };
+
+    const thin = await runBristle(0.5);
+    const solid = await runBristle(1);
+    const ink = (c) => c.filter((v) => v < 250).length;
+    const dips = (c) => {
+      let n = 0;
+      for (let i = 1; i < c.length - 1; i++) {
+        if (c[i] > c[i - 1] && c[i] >= c[i + 1] && c[i] < 250) n++;
+      }
+      return n;
+    };
+    // spread of the inked part of the cross-section: how strongly the hairs
+    // read as lines of a different value within the body of the mark
+    const spreadOf = (c) => {
+      const v = c.filter((x) => x < 250);
+      const sorted = [...v].sort((a, b) => a - b);
+      return sorted[Math.floor(sorted.length * 0.9)] - sorted[Math.floor(sorted.length * 0.1)];
+    };
+    const darkest = Math.min(...thin);
+    assert('bristle stroke: mark is as wide as the blade',
+      ink(thin) >= 54 && ink(thin) <= 70, 'width=' + ink(thin));
+    assert('bristle stroke: body of the mark goes opaque',
+      darkest <= 12, 'darkest=' + darkest);
+    assert('bristle stroke: hairs draw striations across the mark',
+      dips(thin) >= 4 && dips(thin) <= 16, 'dips=' + dips(thin));
+    assert('bristle stroke: at full thickness the hairs close into a slab',
+      spreadOf(solid) * 3 < spreadOf(thin),
+      'solid=' + spreadOf(solid) + ' thin=' + spreadOf(thin));
+    eng.fillLayer('bg', [1, 1, 1, 1]);
+  }
+
+  // ---- 26. Brush Pose, Brush Projection, Min Depth, Count Control ----
+  {
+    const pose = (over = {}) => Object.assign({
+      enabled: true, tiltX: 40, tiltY: -30, rotation: 90, pressure: 0.25,
+      overrideTiltX: false, overrideTiltY: false, overrideRotation: false,
+      overridePressure: false,
+    }, over);
+    const raw = { x: 0, y: 0, pressure: 1, tiltX: 5, tiltY: 5, twist: 10 };
+    const none = D.posedSample(pose(), raw);
+    assert('brush pose: nothing is overridden until its box is ticked',
+      none === raw, JSON.stringify(none));
+    const all = D.posedSample(pose({ overrideTiltX: true, overrideTiltY: true,
+      overrideRotation: true, overridePressure: true }), raw);
+    assert('brush pose: ticked inputs replace what the pen reports',
+      all.tiltX === 40 && all.tiltY === -30 && all.twist === 90 && all.pressure === 0.25,
+      JSON.stringify(all));
+    const some = D.posedSample(pose({ overrideTiltX: true }), raw);
+    assert('brush pose: overrides are independent',
+      some.tiltX === 40 && some.tiltY === 5 && some.twist === 10 && some.pressure === 1,
+      JSON.stringify(some));
+    assert('brush pose: disabled pose is a no-op',
+      D.posedSample(pose({ enabled: false, overrideTiltX: true }), raw) === raw, '');
+
+    // Pose also reaches the size/alpha helpers, so a mouse can hold a pressure.
+    const posed = makeBrush({
+      tip: { size: 100 },
+      pose: pose({ overridePressure: true }),
+      shape: { enabled: true, sizeControl: { source: 'pressure', fadeSteps: 25 } },
+    });
+    const ctx0 = { sample: raw, direction: 0, initialDirection: 0, stepIndex: 0 };
+    assert('brush pose: an overridden pressure drives size and flow',
+      near(D.stampDiameter(posed, ctx0, () => 0), 25, 0.5) &&
+      near(D.stampAlpha(Object.assign(structuredClone(posed),
+        { pressureOpacity: true }), ctx0, () => 0), 0.25, 0.01),
+      D.stampDiameter(posed, ctx0, () => 0));
+
+    // Brush Projection: tilt foreshortens the mark along the tilt azimuth and
+    // barrel rotation spins it; an upright pen leaves the angle control alone.
+    const proj = makeBrush({
+      tip: { size: 40, angle: 0, roundness: 1 },
+      shape: { enabled: true, brushProjection: true, minRoundness: 0.05,
+        angleControl: { source: 'direction', fadeSteps: 25 } },
+    });
+    const emitOne = (sample, direction = 0) => {
+      const out = [];
+      D.emitStamps(proj, { sample, direction, initialDirection: 0, stepIndex: 0 },
+        0, 0, { strokeColor: { r: 0, g: 0, b: 0 }, fg: { h: 0, s: 0, v: 0 },
+          bg: { h: 0, s: 0, v: 1 }, rng: () => 0 }, out);
+      return { angle: out[4], roundness: out[5] };
+    };
+    const upright = emitOne({ x: 0, y: 0, pressure: 1, tiltX: 0, tiltY: 0, twist: 0 }, 1.2);
+    assert('brush projection: an upright pen keeps the angle control and roundness',
+      near(upright.angle, 1.2, 1e-6) && near(upright.roundness, 1, 1e-6),
+      JSON.stringify(upright));
+    const laid = emitOne({ x: 0, y: 0, pressure: 1, tiltX: 60, tiltY: 0, twist: 0 }, 1.2);
+    assert('brush projection: tilt narrows the mark across the tilt direction',
+      near(laid.angle, 0, 1e-6) && near(laid.roundness, Math.cos(60 * Math.PI / 180), 0.01),
+      JSON.stringify(laid));
+    const spun = emitOne({ x: 0, y: 0, pressure: 1, tiltX: 0, tiltY: 60, twist: 90 }, 0);
+    assert('brush projection: barrel rotation spins the projected tip',
+      near(spun.angle, Math.PI / 2 + Math.PI / 2, 1e-6), spun.angle);
+
+    // Texture Minimum Depth floors the per-tip depth scale (stamp float 10).
+    const texy = (minDepth) => makeBrush({
+      texture: { enabled: true, textureEachTip: true, depthJitter: 1, minDepth },
+    });
+    const depthOf = (b) => {
+      const out = [];
+      D.emitStamps(b, { sample: { x: 0, y: 0, pressure: 1, tiltX: 0, tiltY: 0, twist: 0 },
+        direction: 0, initialDirection: 0, stepIndex: 0 }, 0, 0,
+        { strokeColor: { r: 0, g: 0, b: 0 }, fg: { h: 0, s: 0, v: 0 },
+          bg: { h: 0, s: 0, v: 1 }, rng: () => 1 }, out);
+      return out[10];
+    };
+    assert('texture: Minimum Depth floors a fully jittered depth',
+      near(depthOf(texy(0)), 0, 1e-6) && near(depthOf(texy(0.4)), 0.4, 1e-6),
+      depthOf(texy(0.4)));
+
+    // Scattering Count Control scales the stamps per step, never below one.
+    const counter = makeBrush({
+      scatter: { enabled: true, count: 8, scatter: 1,
+        countControl: { source: 'pressure', fadeSteps: 25 } },
+    });
+    const countAt = (pressure) => {
+      const out = [];
+      D.emitStamps(counter, { sample: { x: 0, y: 0, pressure, tiltX: 0, tiltY: 0, twist: 0 },
+        direction: 0, initialDirection: 0, stepIndex: 0 }, 0, 0,
+        { strokeColor: { r: 0, g: 0, b: 0 }, fg: { h: 0, s: 0, v: 0 },
+          bg: { h: 0, s: 0, v: 1 }, rng: () => 0 }, out);
+      return out.length / D.STAMP_FLOATS;
+    };
+    assert('scattering: Count Control scales count and never drops below one',
+      countAt(1) === 8 && countAt(0.5) === 4 && countAt(0) === 1,
+      countAt(1) + '/' + countAt(0.5) + '/' + countAt(0));
+  }
+
+  // ---- 27. alla prima preset group ----
+  {
+    const group = NL.brush.presets.allGroups().find((g) => g.id === 'alla-prima');
+    assert('alla prima: the group is present and stocked',
+      !!group && group.presets.length >= 10, group ? group.presets.length : 'missing');
+
+    const chisel = NL.brush.presets.findPreset('ap-flat-chisel').settings;
+    const q = NL.brush.bristle.parseBristleTip(chisel.tip.shape);
+    assert('alla prima: the flat chisel is a bristle flat held across the stroke',
+      !!q && q.shape === 'flat-blunt' && chisel.tip.angle === -90 &&
+      chisel.shape.angleControl.source === 'direction' &&
+      chisel.shape.sizeControl.source === 'pressure' &&
+      chisel.transfer.flowControl.source === 'pressure' &&
+      chisel.texture.pattern === 'linen' && chisel.color.applyPerTip,
+      JSON.stringify({ q, angle: chisel.tip.angle }));
+
+    // Every preset in the set must answer to the pen, or it is not usable.
+    const noPressure = group.presets.filter((p) => {
+      const t = p.settings;
+      return !(t.shape.enabled && t.shape.sizeControl.source === 'pressure') &&
+        !(t.transfer.enabled &&
+          (t.transfer.flowControl.source === 'pressure' ||
+           t.transfer.opacityControl.source === 'pressure'));
+    });
+    assert('alla prima: every preset maps pressure to size or deposit',
+      noPressure.length === 0, noPressure.map((p) => p.id).join());
+
+    // A fixed-attitude flat must NOT rotate with direction — that is what makes
+    // its mark turn broad-to-thin as the stroke turns.
+    const bright = NL.brush.presets.findPreset('ap-bright').settings;
+    assert('alla prima: the bright is held at a fixed attitude',
+      bright.shape.angleControl.source === 'off' && bright.tip.angle === -45, '');
+
+    const posed = NL.brush.presets.findPreset('ap-flat-posed').settings;
+    assert('alla prima: the posed flat holds an attitude without a tilt-capable pen',
+      posed.pose.enabled && posed.pose.overrideTiltX && posed.pose.overrideRotation &&
+      posed.shape.brushProjection, '');
+
+    const dry = NL.brush.presets.findPreset('ap-dry-drag').settings;
+    assert('alla prima: the dry drag carves deep, per dab, with a depth floor',
+      dry.texture.textureEachTip && dry.texture.depth >= 0.65 &&
+      dry.texture.minDepth > 0 && dry.texture.mode === 'subtract', '');
+
+    const linen = NL.brush.patterns.getPattern('linen');
+    let lo = 255;
+    let hi = 0;
+    for (const v of linen.data) { if (v < lo) lo = v; if (v > hi) hi = v; }
+    assert('alla prima: the linen tooth is mid-contrast, so Depth can control it',
+      linen.size === 256 && lo > 20 && hi < 252 && hi - lo > 80, lo + '..' + hi);
+  }
+
   results.push(lost ? 'DEVICE-LOST ' + lost : 'device: alive');
   return results;
 })()

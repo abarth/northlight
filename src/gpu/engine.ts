@@ -15,7 +15,7 @@ import {
   type TextureBlend,
   type TipShape,
 } from '../brush/types';
-import { getPattern, getTip } from '../brush/patterns';
+import { getPattern, getTip, mipChain } from '../brush/patterns';
 import { readTextureRegion, uploadBuffer, uploadTexture } from './transfer';
 import { STAMP_FLOATS } from '../brush/dynamics';
 
@@ -63,6 +63,15 @@ interface HistoryEntry {
 const MAX_HISTORY = 24;
 const UNIFORM_SLICE = 256;
 export const MAX_LAYERS = 64;
+
+/**
+ * Sharpening bias on the tip mip level. A dab covers its tip map with a
+ * roughly 1:1 footprint at level log2(mapSize / dabDiameter); biasing half a
+ * level sharper keeps a bristle tip's hair stripes legible (they are the
+ * point of the mark) while still killing the moiré of point-sampling a 256px
+ * map onto a 40px dab.
+ */
+const TIP_LOD_BIAS = 0.5;
 const LAYER_U_SIZE = 80;
 const STAMP_STRIDE = STAMP_FLOATS * 4; // bytes
 
@@ -186,7 +195,13 @@ export class PaintEngine {
     });
     uploadTexture(this.device, this.whiteTex, new Uint8Array([255]), 1, 1, 1);
 
-    this.sampLinear = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+    this.sampLinear = device.createSampler({
+      magFilter: 'linear',
+      minFilter: 'linear',
+      // tip maps are mipmapped; every other texture bound to this sampler has
+      // a single level, where the mip filter is a no-op
+      mipmapFilter: 'linear',
+    });
     this.sampNearest = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
     this.sampRepeat = device.createSampler({
       magFilter: 'linear',
@@ -369,18 +384,31 @@ export class PaintEngine {
   // Uploads (see transfer.ts for the staging-buffer rationale)
   // -------------------------------------------------------------------------
 
-  /** Cached single-channel texture for patterns / tip shapes / dual tiles. */
-  private grayTexture(key: string, make: () => { size: number; data: Uint8Array }): GPUTexture {
+  /**
+   * Cached single-channel texture for patterns / tip shapes / dual tiles.
+   * Tip maps get a mip chain: they hold detail much finer than the size they
+   * are stamped at (bristle hair stripes above all), and the stamp shader
+   * samples the level that matches the dab's radius.
+   */
+  private grayTexture(
+    key: string,
+    make: () => { size: number; data: Uint8Array },
+    mipped = false,
+  ): GPUTexture {
     let tex = this.patternTextures.get(key);
     if (!tex) {
       const map = make();
+      const levels = mipped ? mipChain(map) : [map];
       tex = this.device.createTexture({
         label: `gray:${key}`,
         size: [map.size, map.size],
+        mipLevelCount: levels.length,
         format: 'r8unorm',
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
       });
-      uploadTexture(this.device, tex, map.data, map.size, map.size, 1);
+      levels.forEach((level, i) => {
+        uploadTexture(this.device, tex!, level.data, level.size, level.size, 1, i);
+      });
       this.patternTextures.set(key, tex);
     }
     return tex;
@@ -561,6 +589,7 @@ export class PaintEngine {
     tipTextured: boolean,
     tex: EngineTextureParams | null,
     noise: boolean,
+    tipMapSize = 0,
   ): void {
     const u = new ArrayBuffer(64);
     const f = new Float32Array(u);
@@ -577,6 +606,8 @@ export class PaintEngine {
     f[9] = tex ? tex.contrast : 0;
     f[10] = tex && tex.invert ? 1 : 0;
     f[11] = tex ? tex.depth : 1;
+    f[12] = tipMapSize;
+    f[13] = TIP_LOD_BIAS;
     uploadBuffer(this.device, target, 0, u);
   }
 
@@ -589,13 +620,13 @@ export class PaintEngine {
     this.strokeTipTex =
       params.tipShape === 'round'
         ? null
-        : this.grayTexture(`tip:${params.tipShape}`, () => getTip(params.tipShape));
+        : this.grayTexture(`tip:${params.tipShape}`, () => getTip(params.tipShape), true);
     this.strokePatternTex = params.texture
       ? this.grayTexture(`pat:${params.texture.pattern}`, () => getPattern(params.texture!.pattern))
       : null;
     this.strokeDualTipTex =
       params.dual && params.dual.shape !== 'round'
-        ? this.grayTexture(`tip:${params.dual.shape}`, () => getTip(params.dual!.shape))
+        ? this.grayTexture(`tip:${params.dual.shape}`, () => getTip(params.dual!.shape), true)
         : null;
 
     this.fillStampUniforms(
@@ -604,6 +635,7 @@ export class PaintEngine {
       params.tipShape !== 'round',
       params.texture,
       params.noise,
+      this.strokeTipTex?.width ?? 0,
     );
     if (params.dual) {
       this.fillStampUniforms(
@@ -612,6 +644,7 @@ export class PaintEngine {
         params.dual.shape !== 'round',
         null,
         false,
+        this.strokeDualTipTex?.width ?? 0,
       );
     }
   }

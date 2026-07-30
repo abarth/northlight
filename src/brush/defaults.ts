@@ -2,6 +2,7 @@ import type { BrushPatch, BrushSettings, DynamicControl } from './types';
 
 export const offControl = (): DynamicControl => ({ source: 'off', fadeSteps: 25 });
 export const pressureControl = (): DynamicControl => ({ source: 'pressure', fadeSteps: 25 });
+export const directionControl = (): DynamicControl => ({ source: 'direction', fadeSteps: 25 });
 
 export function defaultBrush(): BrushSettings {
   return {
@@ -15,8 +16,20 @@ export function defaultBrush(): BrushSettings {
       flipX: false,
       flipY: false,
     },
+    pose: {
+      enabled: false,
+      tiltX: 0,
+      tiltY: 0,
+      rotation: 0,
+      pressure: 1,
+      overrideTiltX: false,
+      overrideTiltY: false,
+      overrideRotation: false,
+      overridePressure: false,
+    },
     shape: {
       enabled: false,
+      brushProjection: false,
       sizeJitter: 0,
       sizeControl: pressureControl(),
       minDiameter: 0,
@@ -35,6 +48,7 @@ export function defaultBrush(): BrushSettings {
       scatterControl: offControl(),
       count: 1,
       countJitter: 0,
+      countControl: offControl(),
     },
     texture: {
       enabled: false,
@@ -48,6 +62,7 @@ export function defaultBrush(): BrushSettings {
       textureEachTip: false,
       depthJitter: 0,
       depthControl: offControl(),
+      minDepth: 0,
     },
     dual: {
       enabled: false,

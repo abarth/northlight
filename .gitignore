@@ -1,3 +1,5 @@
 node_modules/
 dist/
 *.local
+sheets/probe.png
+sheets/probe.json

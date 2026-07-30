@@ -2,6 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 import { useStore, type PaintToolId } from '../store';
 import type { BrushSettings, TipShape } from '../brush/types';
 import { PATTERNS, TEXTURE_BLENDS, TIP_SHAPES } from '../brush/types';
+import {
+  BRISTLE_SHAPES,
+  DEFAULT_BRISTLE,
+  bristleTipId,
+  bristleTipLabel,
+  parseBristleTip,
+  type BristleQualities,
+} from '../brush/bristle';
 import { registeredPatternOptions } from '../brush/patterns';
 import { tipCanvas } from './brushPreview';
 import {
@@ -88,11 +96,30 @@ export function BrushSettingsPanel() {
     upd({ [key]: { ...(s[key] as object), ...patch } } as Partial<BrushSettings>);
   const openIt = (id: string) => setOpen((o) => (o === id ? '' : id));
 
-  /** Builtin tip options, plus the current imported tip when one is active. */
-  const tipOptions = (current: string) =>
-    TIP_SHAPES.some((t) => t.id === current)
-      ? TIP_SHAPES
-      : [...TIP_SHAPES, { id: current, label: `Imported (${current.split(':')[1] ?? '?'})` }];
+  /**
+   * Builtin tips, the ten bristle shapes, and the current imported tip when
+   * one is active. Choosing a bristle shape keeps whatever qualities are
+   * already set (or the defaults), the way Photoshop keeps the Bristle
+   * Qualities when you switch trim.
+   */
+  const tipOptions = (current: string) => {
+    const q = parseBristleTip(current) ?? DEFAULT_BRISTLE;
+    const bristles = BRISTLE_SHAPES.map((b) => ({
+      id: bristleTipId({ ...q, shape: b.id }),
+      label: `${b.label} Bristle`,
+    }));
+    const opts = [...TIP_SHAPES, ...bristles];
+    return opts.some((t) => t.id === current)
+      ? opts
+      : [...opts, { id: current, label: `Imported (${current.split(':')[1] ?? '?'})` }];
+  };
+
+  /** Rewrites the tip id with one bristle quality changed. */
+  const setBristle = (patch: Partial<BristleQualities>) => {
+    const q = parseBristleTip(s.tip.shape) ?? DEFAULT_BRISTLE;
+    sect('tip', { shape: bristleTipId({ ...q, ...patch }) });
+  };
+  const bristle = parseBristleTip(s.tip.shape);
 
   const tipRow = (label: string, value: TipShape, onChange: (v: string) => void) => (
     <TipRow label={label} value={value} options={tipOptions(value)} onChange={onChange} />
@@ -146,6 +173,12 @@ export function BrushSettingsPanel() {
           label="Roundness"
           value={s.tip.roundness}
           min={1}
+          disabled={!!bristle}
+          title={
+            bristle
+              ? 'A bristle tip carries its own footprint (see Bristle Qualities); only Brush Projection squashes it'
+              : undefined
+          }
           onChange={(v) => sect('tip', { roundness: Math.max(v, 0.01) })}
         />
         <PctSlider
@@ -159,6 +192,117 @@ export function BrushSettingsPanel() {
           <CheckRow label="Flip X" checked={s.tip.flipX} onChange={(v) => sect('tip', { flipX: v })} />
           <CheckRow label="Flip Y" checked={s.tip.flipY} onChange={(v) => sect('tip', { flipY: v })} />
         </div>
+      </PanelSection>
+
+      {bristle && (
+        <PanelSection
+          title={`Bristle Qualities — ${bristleTipLabel(s.tip.shape)}`}
+          open={open === 'bristle'}
+          onOpen={() => openIt('bristle')}
+        >
+          <div className="hint" style={{ marginBottom: 6 }}>
+            The hairs themselves. Point the blade across the stroke (Angle −90° with
+            Shape Dynamics ▸ Angle set to Direction) and they draw continuous
+            striations; hold it at a fixed angle and the mark turns broad-to-thin
+            on stroke direction instead.
+          </div>
+          <PctSlider
+            label="Bristles"
+            value={bristle.bristles}
+            title="How many hairs across the blade"
+            onChange={(v) => setBristle({ bristles: v })}
+          />
+          <PctSlider
+            label="Length"
+            value={bristle.length}
+            title="Longer hairs bend further under the pen, deepening the contact patch"
+            onChange={(v) => setBristle({ length: v })}
+          />
+          <PctSlider
+            label="Thickness"
+            value={bristle.thickness}
+            title="Fraction of each hair spacing that carries paint; the rest is a gap"
+            onChange={(v) => setBristle({ thickness: v })}
+          />
+          <PctSlider
+            label="Stiffness"
+            value={bristle.stiffness}
+            title="Stiff hairs keep crisp, separate streaks; slack ones bleed together"
+            onChange={(v) => setBristle({ stiffness: v })}
+          />
+          <ValSlider
+            label="Angle"
+            value={s.tip.angle}
+            min={-180}
+            max={180}
+            unit="°"
+            title="Rotation of the blade — the same control as the tip Angle above"
+            onChange={(v) => sect('tip', { angle: v })}
+          />
+        </PanelSection>
+      )}
+
+      <PanelSection
+        title="Brush Pose"
+        enabled={s.pose.enabled}
+        onToggle={(v) => sect('pose', { enabled: v })}
+        open={open === 'pose'}
+        onOpen={() => openIt('pose')}
+      >
+        <div className="hint" style={{ marginBottom: 6 }}>
+          The attitude the brush is held at. Tick Override and that slider replaces
+          what the pen reports — the only way to hold a flat at one angle with a
+          mouse, or with a pen that has no tilt sensor.
+        </div>
+        <ValSlider
+          label="Tilt X"
+          value={s.pose.tiltX}
+          min={-90}
+          max={90}
+          unit="°"
+          onChange={(v) => sect('pose', { tiltX: v })}
+        />
+        <CheckRow
+          label="Override Tilt X"
+          checked={s.pose.overrideTiltX}
+          onChange={(v) => sect('pose', { overrideTiltX: v })}
+        />
+        <ValSlider
+          label="Tilt Y"
+          value={s.pose.tiltY}
+          min={-90}
+          max={90}
+          unit="°"
+          onChange={(v) => sect('pose', { tiltY: v })}
+        />
+        <CheckRow
+          label="Override Tilt Y"
+          checked={s.pose.overrideTiltY}
+          onChange={(v) => sect('pose', { overrideTiltY: v })}
+        />
+        <ValSlider
+          label="Rotation"
+          value={s.pose.rotation}
+          min={0}
+          max={360}
+          unit="°"
+          onChange={(v) => sect('pose', { rotation: v })}
+        />
+        <CheckRow
+          label="Override Rotation"
+          checked={s.pose.overrideRotation}
+          onChange={(v) => sect('pose', { overrideRotation: v })}
+        />
+        <PctSlider
+          label="Pressure"
+          value={s.pose.pressure}
+          onChange={(v) => sect('pose', { pressure: v })}
+        />
+        <CheckRow
+          label="Override Pressure"
+          checked={s.pose.overridePressure}
+          onChange={(v) => sect('pose', { overridePressure: v })}
+        />
       </PanelSection>
 
       <PanelSection
@@ -220,6 +364,13 @@ export function BrushSettingsPanel() {
             onChange={(v) => sect('shape', { flipYJitter: v })}
           />
         </div>
+        <hr />
+        <CheckRow
+          label="Brush Projection"
+          checked={s.shape.brushProjection}
+          onChange={(v) => sect('shape', { brushProjection: v })}
+          title="Let the stylus attitude shape the tip: tilt flattens the mark along the direction of tilt, barrel rotation spins it"
+        />
       </PanelSection>
 
       <PanelSection
@@ -255,6 +406,10 @@ export function BrushSettingsPanel() {
           label="Count Jitter"
           value={s.scatter.countJitter}
           onChange={(v) => sect('scatter', { countJitter: v })}
+        />
+        <ControlRow
+          value={s.scatter.countControl}
+          onChange={(v) => sect('scatter', { countControl: v })}
         />
       </PanelSection>
 
@@ -324,6 +479,13 @@ export function BrushSettingsPanel() {
           value={s.texture.depthControl}
           disabled={!s.texture.textureEachTip}
           onChange={(v) => sect('texture', { depthControl: v })}
+        />
+        <PctSlider
+          label="Min Depth"
+          value={s.texture.minDepth}
+          disabled={!s.texture.textureEachTip}
+          title="Floor for the jittered/controlled depth, so the tooth never smooths out completely"
+          onChange={(v) => sect('texture', { minDepth: v })}
         />
       </PanelSection>
 

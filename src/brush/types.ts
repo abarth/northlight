@@ -38,6 +38,7 @@ export type TipShape = 'round' | 'chalk' | 'spatter' | 'grain' | (string & {});
 export type PatternId =
   | 'paper'
   | 'canvas'
+  | 'linen'
   | 'sponge'
   | 'clouds'
   | 'speckle'
@@ -75,6 +76,13 @@ export interface BrushTip {
 
 export interface ShapeDynamics {
   enabled: boolean;
+  /**
+   * Photoshop's Brush Projection: the stylus's attitude shapes the tip
+   * instead of the angle/roundness sliders — tilt foreshortens the mark along
+   * the tilt direction and barrel rotation spins it. Tilt a flat brush and it
+   * lays a longer, narrower mark, exactly as a real one does.
+   */
+  brushProjection: boolean;
   /** 0..1 random size reduction per stamp */
   sizeJitter: number;
   sizeControl: DynamicControl;
@@ -103,6 +111,8 @@ export interface Scattering {
   count: number;
   /** 0..1 random reduction of count */
   countJitter: number;
+  /** Photoshop's Count > Control: scales count, never below one stamp */
+  countControl: DynamicControl;
 }
 
 export interface TextureSettings {
@@ -126,6 +136,8 @@ export interface TextureSettings {
   /** 0..1, only used when textureEachTip */
   depthJitter: number;
   depthControl: DynamicControl;
+  /** Photoshop's Minimum Depth: floor for the jittered/controlled depth */
+  minDepth: number;
 }
 
 export interface DualBrush {
@@ -177,8 +189,31 @@ export interface TransferSettings {
   flowMin: number;
 }
 
+/**
+ * Photoshop's Brush Pose: the stylus attitude the brush is held at. Each of
+ * the four inputs has an Override — when it is set, that slider replaces
+ * whatever the pen reports for the whole stroke, which is how a flat brush
+ * gets a fixed, repeatable attitude (and the only way to hold one at all with
+ * a mouse or a pen that has no tilt).
+ */
+export interface BrushPose {
+  enabled: boolean;
+  /** degrees, -90..90 */
+  tiltX: number;
+  tiltY: number;
+  /** degrees, 0..360 — barrel rotation */
+  rotation: number;
+  /** 0..1 */
+  pressure: number;
+  overrideTiltX: boolean;
+  overrideTiltY: boolean;
+  overrideRotation: boolean;
+  overridePressure: boolean;
+}
+
 export interface BrushSettings {
   tip: BrushTip;
+  pose: BrushPose;
   shape: ShapeDynamics;
   scatter: Scattering;
   texture: TextureSettings;
@@ -262,6 +297,7 @@ export const TIP_SHAPES: { id: TipShape; label: string }[] = [
 export const PATTERNS: { id: PatternId; label: string }[] = [
   { id: 'paper', label: 'Paper' },
   { id: 'canvas', label: 'Canvas' },
+  { id: 'linen', label: 'Linen' },
   { id: 'sponge', label: 'Sponge' },
   { id: 'clouds', label: 'Clouds' },
   { id: 'speckle', label: 'Speckle' },

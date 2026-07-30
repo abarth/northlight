@@ -1,4 +1,5 @@
 import * as brushAbr from '../brush/abr';
+import * as brushBristle from '../brush/bristle';
 import * as brushDefaults from '../brush/defaults';
 import * as brushDynamics from '../brush/dynamics';
 import { engineStrokeParams } from '../brush/engineParams';
@@ -35,6 +36,7 @@ const api = {
   StrokeSession,
   rasterizeSelection,
   brush: {
+    bristle: brushBristle,
     defaults: brushDefaults,
     dynamics: brushDynamics,
     patterns: brushPatterns,

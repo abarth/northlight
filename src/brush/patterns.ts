@@ -1,3 +1,4 @@
+import { isBristleTip, makeBristleTip, parseBristleTip } from './bristle';
 import type { PatternId, TipShape } from './types';
 
 /**
@@ -11,6 +12,9 @@ export interface GrayMap {
   /** size*size bytes, 0..255 */
   data: Uint8Array<ArrayBuffer>;
 }
+
+/** GrayMap without the buffer-flavour constraint, for pure map transforms. */
+type AnyGrayMap = { size: number; data: Uint8Array };
 
 /** Deterministic PRNG, exported for previews and tests. */
 export function seededRng(seed: number): () => number {
@@ -111,6 +115,62 @@ function makePattern(id: PatternId): GrayMap {
           const wy = 0.5 + 0.5 * Math.sin((y / size) * Math.PI * 2 * 16 + Math.PI / 2);
           const weave = Math.max(wx, wy) * 0.6 + 0.25;
           out[y * size + x] = weave + (n[y * size + x] - 0.5) * 0.35;
+        }
+      }
+      break;
+    }
+    case 'linen': {
+      // Oil-primed linen: a plain weave whose threads are irregular. The
+      // built-in `canvas` pattern is a pair of clean sines, which at the
+      // depths a dry-brush drag needs prints as a visible screen door; real
+      // tooth has threads that wander, vary in width, carry the odd slub, and
+      // alternate which one lies on top at every crossing. That irregularity
+      // is the whole point — it is what makes a scumble skip in patches
+      // instead of in a grid.
+      const THREADS = 18; // 256 / 18 -> ~14px pitch, tileable
+      const rng = mulberry32(901);
+      const warp: { off: number; w: number; bright: number }[] = [];
+      const weft: { off: number; w: number; bright: number }[] = [];
+      for (const set of [warp, weft]) {
+        for (let i = 0; i < THREADS; i++) {
+          const slub = rng() < 0.12;
+          set.push({
+            off: (rng() * 2 - 1) * 0.22,
+            w: (slub ? 0.82 : 0.5 + rng() * 0.22) ,
+            bright: (slub ? 1 : 0.72 + rng() * 0.28),
+          });
+        }
+      }
+      // slow wander so threads are not ruler-straight
+      const wobbleX = fractal(size, 902, 2, 4);
+      const wobbleY = fractal(size, 903, 2, 4);
+      const fibre = fractal(size, 904, 2, 48);
+      const pitch = size / THREADS;
+
+      /** Height of the nearest thread of `set` at coordinate `c`. */
+      const threadAt = (c: number, wobble: number, set: typeof warp) => {
+        const p = (c + wobble * pitch * 0.5) / pitch;
+        const i = Math.round(p) % THREADS;
+        const idx = (i + THREADS) % THREADS;
+        const t = (p - Math.round(p) - set[idx].off) / set[idx].w;
+        const prof = Math.abs(t) >= 1 ? 0 : Math.cos((t * Math.PI) / 2) ** 1.4;
+        return { h: prof * set[idx].bright, idx };
+      };
+
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const i = y * size + x;
+          const a = threadAt(x, wobbleX[i] - 0.5, warp);
+          const b = threadAt(y, wobbleY[i] - 0.5, weft);
+          // plain weave: which thread is on top alternates at each crossing
+          const warpOnTop = (a.idx + b.idx) % 2 === 0;
+          const top = warpOnTop ? a.h : b.h;
+          const under = warpOnTop ? b.h : a.h;
+          const height = Math.max(top, under * 0.55);
+          // Kept mid-contrast on purpose: Depth is what decides how hard the
+          // weave bites, and a pattern that already runs 0..1 leaves no room
+          // between "invisible" and "printed fabric".
+          out[i] = 0.4 + 0.5 * height + (fibre[i] - 0.5) * 0.14;
         }
       }
       break;
@@ -242,7 +302,7 @@ const registeredTips = new Map<string, GrayMap>();
 /** Patterns registered at runtime (e.g. imported from .abr patt sections). */
 const registeredPatterns = new Map<string, { map: GrayMap; label: string }>();
 
-const BUILTIN_PATTERNS: PatternId[] = ['paper', 'canvas', 'sponge', 'clouds', 'speckle'];
+const BUILTIN_PATTERNS: PatternId[] = ['paper', 'canvas', 'linen', 'sponge', 'clouds', 'speckle'];
 
 export function getPattern(id: PatternId): GrayMap {
   const registered = registeredPatterns.get(id);
@@ -276,10 +336,42 @@ export function getTip(shape: TipShape): GrayMap {
   if (registered) return registered;
   let t = tipCache.get(shape);
   if (!t) {
-    t = makeTip(BUILTIN_TIPS.includes(shape) ? shape : 'round');
+    const bristle = isBristleTip(shape) ? parseBristleTip(shape) : null;
+    t = bristle ? makeBristleTip(bristle) : makeTip(BUILTIN_TIPS.includes(shape) ? shape : 'round');
     tipCache.set(shape, t);
   }
   return t;
+}
+
+/**
+ * Box-filtered mip chain for a tip/pattern map, level 0 first. Sampled tips
+ * carry detail far finer than the size they are usually stamped at (a bristle
+ * tip's hair stripes especially), and point-sampling level 0 turns that into
+ * moiré; the stamp shader picks the level that matches the dab's radius.
+ */
+export function mipChain(map: AnyGrayMap): AnyGrayMap[] {
+  const levels: AnyGrayMap[] = [map];
+  let cur: AnyGrayMap = map;
+  while (cur.size > 2) {
+    const size = cur.size >> 1;
+    const data = new Uint8Array(size * size);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const sx = x * 2;
+        const sy = y * 2;
+        data[y * size + x] = Math.round(
+          (cur.data[sy * cur.size + sx] +
+            cur.data[sy * cur.size + Math.min(sx + 1, cur.size - 1)] +
+            cur.data[Math.min(sy + 1, cur.size - 1) * cur.size + sx] +
+            cur.data[Math.min(sy + 1, cur.size - 1) * cur.size + Math.min(sx + 1, cur.size - 1)]) /
+            4,
+        );
+      }
+    }
+    cur = { size, data };
+    levels.push(cur);
+  }
+  return levels;
 }
 
 /** Registers a sampled tip (square alpha map) under an id, e.g. from an ABR. */

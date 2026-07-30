@@ -389,7 +389,8 @@ struct StampU {
   noise: f32,
   texMode: u32,
   texBCI: vec4f,       // brightness, contrast, invert, depth
-  _p0: vec2f,
+  tipMapSize: f32,     // edge length of the tip alpha map, 0 when analytic
+  tipLodBias: f32,
   _p1: vec2f,
 }
 
@@ -409,6 +410,7 @@ struct VSOut {
   @location(4) color: vec3f,
   @location(5) flags: f32,
   @location(6) depthScale: f32,
+  @location(7) tipLod: f32,
 }
 
 @vertex
@@ -443,6 +445,12 @@ fn vs(
   out.color = color;
   out.flags = flags;
   out.depthScale = depthScale;
+  // Mip level whose texels match this dab's on-screen footprint. The dab
+  // covers 2*radius px across and 2*radius*roundness down, so the geometric
+  // mean is the level that neither aliases the wide axis nor smears the
+  // squashed one. Constant per instance, so interpolation is exact.
+  let footprint = max(2.0 * radius * sqrt(clamp(roundness, 0.01, 1.0)), 1.0);
+  out.tipLod = max(0.0, log2(max(SU.tipMapSize, 1.0) / footprint) - SU.tipLodBias);
   return out;
 }
 
@@ -467,7 +475,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
     let f = u32(in.flags + 0.5);
     if ((f & 1u) != 0u) { uv.x = 1.0 - uv.x; }
     if ((f & 2u) != 0u) { uv.y = 1.0 - uv.y; }
-    a = textureSampleLevel(tipTex, clampSamp, clamp(uv, vec2f(0.0), vec2f(1.0)), 0.0).r;
+    a = textureSampleLevel(tipTex, clampSamp, clamp(uv, vec2f(0.0), vec2f(1.0)), in.tipLod).r;
     // hide the apron outside the tip square
     if (abs(in.tipPos.x) > 1.0 || abs(in.tipPos.y) > 1.0) { a = 0.0; }
   } else {

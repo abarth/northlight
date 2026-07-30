@@ -39,6 +39,7 @@ export function uploadTexture(
   width: number,
   height: number,
   bytesPerPixel: number,
+  mipLevel = 0,
 ): void {
   const unpadded = width * bytesPerPixel;
   const padded = Math.ceil(unpadded / 256) * 256;
@@ -59,7 +60,7 @@ export function uploadTexture(
   const enc = device.createCommandEncoder();
   enc.copyBufferToTexture(
     { buffer: staging, bytesPerRow: padded },
-    { texture: tex },
+    { texture: tex, mipLevel },
     [width, height],
   );
   device.queue.submit([enc.finish()]);
