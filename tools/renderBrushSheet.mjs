@@ -19,6 +19,7 @@ const OUT = argv[0] ?? 'strokes.png';
 const flag = (n) => { const i = argv.indexOf(n); return i < 0 ? null : argv[i + 1]; };
 const GROUP = flag('--group');
 const ABR = flag('--abr');
+const CURVES = argv.includes('--curves');
 const COMPARE = argv.includes('--compare');
 const PRESET = !GROUP && argv[1] && !argv[1].startsWith('--') ? argv[1] : 'fresco-sponge';
 const sliceAt = argv.indexOf('--slice');
@@ -89,7 +90,7 @@ await page.waitForFunction(() => !!window.__northlight, null, { timeout: 30000 }
 const refB64 = COMPARE ? readFileSync(REF_ABR).toString('base64') : null;
 const abrB64 = ABR ? readFileSync(ABR).toString('base64') : null;
 
-const result = await page.evaluate(async ({ W, PRESET, GROUP, SLICE, refB64, abrB64 }) => {
+const result = await page.evaluate(async ({ W, PRESET, GROUP, SLICE, refB64, abrB64, CURVES }) => {
   const NL = window.__northlight;
 
   // ---- pick the brushes to draw ----
@@ -131,7 +132,7 @@ const result = await page.evaluate(async ({ W, PRESET, GROUP, SLICE, refB64, abr
     }
   }
 
-  const ROW = brushes[0].compact ? 236 : 510;
+  const ROW = CURVES ? 440 : brushes[0].compact ? 236 : 510;
   const H = brushes.length * ROW + 24;
 
   const canvas = document.createElement('canvas');
@@ -166,6 +167,30 @@ const result = await page.evaluate(async ({ W, PRESET, GROUP, SLICE, refB64, abr
   brushes.forEach((b, bi) => {
     const y0 = bi * ROW + 20;
     labels.push({ y: y0, text: b.label });
+
+    if (CURVES) {
+      // Does a combed track follow the stroke? Angle Control = Direction
+      // rotates the tip to the tangent, but the hairs only stay separate if
+      // consecutive dabs land in register, and a curve rotates the tip
+      // between dabs. Straight / gentle S / tight arc, side by side.
+      const pts1 = [];
+      for (let x = 40; x <= 460; x += 5) pts1.push(samp(x, y0 + 90, 0.85));
+      stroke(b.settings, pts1, seed++);
+
+      const pts2 = [];
+      for (let t = 0; t <= 1.0001; t += 0.004) {
+        pts2.push(samp(500 + t * 420, y0 + 180 + Math.sin(t * Math.PI * 2) * 120, 0.85));
+      }
+      stroke(b.settings, pts2, seed++);
+
+      const pts3 = [];
+      for (let t = 0; t <= 1.0001; t += 0.003) {
+        const a = -Math.PI * 0.85 + t * Math.PI * 1.7;
+        pts3.push(samp(1220 + Math.cos(a) * 150, y0 + 200 + Math.sin(a) * 150, 0.85));
+      }
+      stroke(b.settings, pts3, seed++);
+      return;
+    }
 
     // long constant-pressure stroke: the clearest test for repetition,
     // and its flanks show the edge hardness
@@ -209,7 +234,7 @@ const result = await page.evaluate(async ({ W, PRESET, GROUP, SLICE, refB64, abr
   for (const l of labels) ctx.fillText(l.text, 18, l.y + 60);
   const out = ctx.getImageData(0, 0, W, H).data;
   return { data: Array.from(out), W, H, labels: labels.map((l) => l.text) };
-}, { W, PRESET, GROUP, SLICE, refB64, abrB64 });
+}, { W, PRESET, GROUP, SLICE, refB64, abrB64, CURVES });
 
 writeFileSync(OUT, png(result.W, result.H, Uint8Array.from(result.data)));
 console.log('wrote', OUT, `${result.W}x${result.H}`);

@@ -55,6 +55,15 @@ export class StrokeSession {
    */
   private queue: { target: 'primary' | 'dual'; records: number[] }[] = [];
   private airbrushTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * The pen-down dab, held back until the first segment establishes a stroke
+   * direction. Direction is only known once the pen has moved, so emitting it
+   * at pen-down would orient it along the default (rightwards) — visible as a
+   * horizontal stub at the start of every curved stroke for any brush whose
+   * angle follows Direction. Only deferred when a control actually needs it,
+   * so plain brushes keep depositing the instant the pen lands.
+   */
+  private pendingDown: PointerSample | null = null;
 
   constructor(engine: PaintEngine, settings: BrushSettings, opts: StrokeSessionOptions) {
     this.engine = engine;
@@ -69,6 +78,25 @@ export class StrokeSession {
       cd.enabled && !cd.applyPerTip
         ? dynamicColor(cd, this.fg, this.bg, this.contextAt(defaultSample(0, 0, 1)), this.rng)
         : hsvToRgb(this.fg);
+  }
+
+  /** Does any dynamic read the stroke direction? */
+  private usesDirection(): boolean {
+    const s = this.settings;
+    return [
+      s.shape.sizeControl, s.shape.angleControl, s.shape.roundnessControl,
+      s.scatter.scatterControl, s.transfer.opacityControl, s.transfer.flowControl,
+      s.color.fgBgControl, s.texture.depthControl,
+    ].some((c) => c.source === 'direction' || c.source === 'initial-direction');
+  }
+
+  /** Emits the held-back pen-down dab, now that a direction exists. */
+  private flushPendingDown(): void {
+    const at = this.pendingDown;
+    if (!at) return;
+    this.pendingDown = null;
+    if (!this.initialDirectionSet) this.initialDirection = this.direction;
+    this.emit(at.x, at.y, at);
   }
 
   private contextAt(sample: PointerSample): StampContext {
@@ -124,7 +152,12 @@ export class StrokeSession {
     this.pathDist = 0;
     this.emitDual(sample.x, sample.y, sample);
     this.dualNext = dualSpacingPx(this.settings.dual);
-    this.emit(sample.x, sample.y, sample);
+    this.pendingDown = null;
+    if (this.usesDirection()) {
+      this.pendingDown = sample;
+    } else {
+      this.emit(sample.x, sample.y, sample);
+    }
     this.flush();
 
     if (this.settings.airbrush) {
@@ -132,6 +165,8 @@ export class StrokeSession {
       this.airbrushTimer = setInterval(() => {
         const at = this.smoothed;
         if (!at) return;
+        // a held pen never establishes a direction; deposit it as-is
+        this.flushPendingDown();
         this.stepIndex++;
         // build-up dabs reuse the existing dual mask; the train only
         // advances with pen travel
@@ -163,11 +198,14 @@ export class StrokeSession {
 
   up(): void {
     this.stopAirbrush();
+    // a tap that never moved still deposits its dab, at the default direction
+    this.flushPendingDown();
     this.flush();
   }
 
   cancel(): void {
     this.stopAirbrush();
+    this.pendingDown = null;
     this.queue = [];
   }
 
@@ -189,6 +227,7 @@ export class StrokeSession {
       this.initialDirection = this.direction;
       this.initialDirectionSet = true;
     }
+    this.flushPendingDown();
 
     const lerpSample = (t: number): PointerSample => ({
       x: a.x + dx * t,

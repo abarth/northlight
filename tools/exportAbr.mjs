@@ -13,7 +13,7 @@ import { dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 
 const OUT = process.argv[2] ?? 'brushes/Northlight-Oil-Fresco.abr';
-const GROUP = process.argv[3] ?? 'oil';
+const GROUP = process.argv[3] ?? 'oil';  // comma-separated for a multi-group pack
 const PORT = process.env.PORT ?? '4190';
 
 const repoRoot = new URL('..', import.meta.url).pathname;
@@ -38,10 +38,13 @@ await page.waitForFunction(() => !!window.__northlight, null, { timeout: 30000 }
 
 const res = await page.evaluate(async (GROUP) => {
   const NL = window.__northlight;
-  const group = NL.brush.presets.allGroups().find((g) => g.id === GROUP);
-  if (!group) throw new Error('group not found: ' + GROUP);
-
-  const brushes = group.presets.map((p) => ({ name: p.name, settings: p.settings }));
+  const wanted = GROUP.split(',').map((g) => g.trim()).filter(Boolean);
+  const brushes = [];
+  for (const id of wanted) {
+    const group = NL.brush.presets.allGroups().find((g) => g.id === id);
+    if (!group) throw new Error('group not found: ' + id);
+    for (const p of group.presets) brushes.push({ name: p.name, settings: p.settings });
+  }
   const buf = NL.brush.abrWrite.writeAbr(brushes);
 
   // ---- verify: parse our own bytes back ----

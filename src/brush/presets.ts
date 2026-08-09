@@ -56,6 +56,20 @@ interface FrescoSpec {
   dualSpacing: number;
   dualScatter: number;
   dualMode?: TextureBlend;
+  dualCount?: number;
+  /**
+   * Primary Scattering: displaces individual dabs off the stroke spine, which
+   * is the one mechanism here that lowers coverage without touching the tip
+   * or the dual mask at all.
+   */
+  scatter?: number;
+  scatterCount?: number;
+  /**
+   * Shape-jitter amount, default 0.05. The fan tips set it to 0 on purpose:
+   * their hairs only draw as continuous strands if consecutive dabs land in
+   * register, and any jitter smears the gaps closed.
+   */
+  jitter?: number;
   /** linen canvas tooth depth; omit for no texture */
   tooth?: number;
   opacity?: number;
@@ -69,14 +83,14 @@ const fresco = (s: FrescoSpec): BrushSettings =>
       // pressure -> size with no floor is what gives these brushes their taper
       sizeControl: pressureControl(),
       minDiameter: 0,
-      sizeJitter: 0.05,
+      sizeJitter: s.jitter ?? 0.05,
       // with no fixed angle the tip follows the stroke, like a dragged brush
       angleControl:
         s.angle === undefined
           ? { source: 'direction', fadeSteps: 25 }
           : { source: 'off', fadeSteps: 25 },
-      angleJitter: 0.02,
-      roundnessJitter: 0.1,
+      angleJitter: s.jitter === 0 ? 0 : 0.02,
+      roundnessJitter: s.jitter === 0 ? 0 : 0.1,
       minRoundness: 0.65,
       // No flip jitter on purpose: striations only read as dragged bristles
       // if consecutive stamps reinforce each other, and mirroring every stamp
@@ -84,6 +98,15 @@ const fresco = (s: FrescoSpec): BrushSettings =>
       flipXJitter: false,
       flipYJitter: false,
     },
+    scatter: s.scatter
+      ? {
+          enabled: true,
+          bothAxes: true,
+          scatter: s.scatter,
+          count: s.scatterCount ?? 2,
+          countJitter: 0.4,
+        }
+      : { enabled: false },
     dual: {
       enabled: true,
       shape: s.dual,
@@ -95,7 +118,7 @@ const fresco = (s: FrescoSpec): BrushSettings =>
       spacing: s.dualSpacing,
       scatter: s.dualScatter,
       bothAxes: true,
-      count: 1,
+      count: s.dualCount ?? 1,
       countJitter: 0.3,
     },
     // document-anchored (textureEachTip off), so the tooth adds no
@@ -441,6 +464,73 @@ export const BRUSH_GROUPS: BrushGroup[] = [
         tip: 'bristle-round', size: 200, spacing: 0.12, flow: 0.22,
         dual: 'sponge-fractal', dualSize: 240, dualSpacing: 0.28, dualScatter: 0.92,
         tooth: 0.12,
+      })),
+    ],
+  },
+  {
+    id: 'wisp',
+    name: 'Wisp & Scumble (low coverage)',
+    presets: [
+      /**
+       * These vary COVERAGE — how much of the mark's own footprint carries
+       * any ink at all — rather than density. The distinction matters because
+       * flow does not control it: Fresco Veil paints at 15% flow and is still
+       * ~90% covered, just uniformly thin. To open real gaps inside a mark,
+       * one of three things has to be sparse, and each brush below leans on a
+       * different one:
+       *
+       *  - the PRIMARY TIP itself (fan-comb's hairs are cut to zero between
+       *    strands). Its dabs must land in register for the gaps to survive,
+       *    so those presets set jitter: 0 and keep spacing tight — otherwise
+       *    successive dabs smear the gaps closed.
+       *  - the DUAL MASK, via a sparse tip and a long dual spacing. Union of
+       *    overlapping stamps fills in as 1-(1-m)^(1/spacing), so a mask with
+       *    holes needs both a low-mean tip and few overlaps.
+       *  - SCATTERING on the primary, which throws whole dabs off the spine
+       *    and is the only one of the three that leaves the tip and the mask
+       *    untouched.
+       *
+       * Measured coverage runs from ~55% (Fan Bristle) to ~5% (Dust Motes);
+       * tools/measureCoverage.mjs reports it.
+       */
+      p('fan-bristle', 'Fan Bristle', fresco({
+        tip: 'fan-comb', size: 190, spacing: 0.05, flow: 0.26, jitter: 0,
+        dual: 'sponge-fractal', dualSize: 220, dualSpacing: 0.32, dualScatter: 1.05,
+        tooth: 0.1,
+      })),
+      p('hair-fringe', 'Hair Fringe', fresco({
+        tip: 'fan-comb', size: 130, spacing: 0.05, flow: 0.16, jitter: 0,
+        dual: 'crackle-web', dualSize: 160, dualSpacing: 0.34, dualScatter: 1.12,
+      })),
+      p('scumble-dust', 'Scumble Dust', fresco({
+        tip: 'bristle-round', size: 150, spacing: 0.16, flow: 0.28,
+        scatter: 1.15, scatterCount: 2,
+        dual: 'crackle-web', dualSize: 190, dualSpacing: 0.3, dualScatter: 0.98,
+        tooth: 0.12,
+      })),
+      p('dry-fan-scrub', 'Dry Fan Scrub', fresco({
+        tip: 'fan-comb', size: 210, spacing: 0.06, flow: 0.18, jitter: 0,
+        dual: 'sponge-fractal', dualSize: 240, dualSpacing: 0.5, dualScatter: 1.6,
+        tooth: 0.1,
+      })),
+      p('wisp-veil', 'Wisp Veil', fresco({
+        tip: 'plume-soft', size: 200, spacing: 0.14, flow: 0.22,
+        dual: 'wisp-filament', dualSize: 250, dualSpacing: 0.5, dualScatter: 1.6,
+      })),
+      p('smoke-wisp', 'Smoke Wisp', fresco({
+        tip: 'plume-soft', size: 170, spacing: 0.17, flow: 0.2,
+        scatter: 0.75, scatterCount: 2,
+        dual: 'wisp-filament', dualSize: 220, dualSpacing: 0.6, dualScatter: 1.9,
+      })),
+      p('ash-spray', 'Ash Spray', fresco({
+        tip: 'bristle-round', size: 70, spacing: 0.34, flow: 0.36,
+        scatter: 1.9, scatterCount: 3,
+        dual: 'granite-grit', dualSize: 110, dualSpacing: 0.35, dualScatter: 1.15,
+      })),
+      p('dust-motes', 'Dust Motes', fresco({
+        tip: 'plume-soft', size: 180, spacing: 0.18, flow: 0.42,
+        scatter: 0.9, scatterCount: 3,
+        dual: 'dust-motes', dualSize: 230, dualSpacing: 0.7, dualScatter: 2.2,
       })),
     ],
   },

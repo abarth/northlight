@@ -56,6 +56,10 @@ sections, all evaluated per stamp:
   Photoshop's measured soft round); 100% hardness keeps the ~1px anti-aliased
   rim. Adobe does not publish the exact curve, so "exact" means
   indistinguishable in normal use.
+  Direction-driven dynamics hold their first dab back until the pen has
+  actually moved: direction is undefined at pen-down, so emitting there
+  oriented the dab rightwards and left a horizontal stub at the start of every
+  curved stroke.
 - **Shape Dynamics** — size/angle/roundness jitter, each with a Photoshop
   **Control** source (Off / Fade / Pen Pressure / Pen Tilt / Rotation /
   Direction / Initial Direction where applicable), **Minimum Diameter**,
@@ -122,7 +126,33 @@ falloff; because N collapses at a stroke's ends, low K also leaves a long
 translucent terminal. The presets run K from 15 (Palette Knife) down to 1.1
 (Fresco Veil), grouped as hard, firm and soft edges.
 
-`brushes/Northlight-Oil-Fresco.abr` ships the set as a Photoshop file.
+### Wisp & Scumble brushes
+Eight more that vary **coverage** — how much of a mark's own footprint carries
+any ink — rather than density. The distinction is not academic: flow does not
+control it. Fresco Veil paints at 15% flow and is still ~93% covered, just
+uniformly thin, because accumulation turns any tip value above ~1% into solid
+ink. To open real gaps inside a mark something has to be sparse by
+construction, and each brush leans on one of three mechanisms:
+
+- **the primary tip** — Fan Comb's hairs are cut to zero between strands. Its
+  dabs have to land in register for the gaps to survive, so those presets set
+  no shape jitter; and the hairs must be near translation-invariant along the
+  drag, or they wander sideways between dabs and twenty overlapping copies
+  smear every gap shut. Straight hairs do follow a curve, tracing concentric
+  tracks, because rotating the tip about its centre preserves each hair's
+  perpendicular offset.
+- **the dual mask** — a sparse tip plus a long dual spacing. The union of
+  overlapping stamps fills in as `1 − (1 − m)^(1/spacing)`, so holes need both
+  a low-mean tip and few overlaps.
+- **Scattering on the primary** — throws whole dabs off the spine, and is the
+  only one of the three that leaves both the tip and the mask untouched.
+
+Measured coverage runs from ~89% down to 13% (Dust Motes);
+`tools/measureCoverage.mjs` reports coverage, density and total ink for a
+group, painting onto a transparent layer so the composite's alpha *is* the
+coverage.
+
+`brushes/Northlight-Oil-Fresco.abr` ships all twenty as a Photoshop file.
 
 ### Photoshop ABR import and export
 The Brushes panel's **Import ABR…** button loads Photoshop brush files:
@@ -170,7 +200,8 @@ Dry Media (a **Graphite Pencil** with scatter/multi-stamp roughness, pressure
 opacity, 50% minimum size; Charcoal; Chalk), Wet Media (a **Sponge** using
 the sponge pattern texture plus a spatter dual brush; Watercolor with wet
 edges; Ink Wash), Special Effects (spatter spray, scattered dots, color
-confetti), and **Oil & Fresco** (the twelve dual brushes described above).
+confetti), **Oil & Fresco** (twelve dual brushes) and **Wisp & Scumble**
+(eight low-coverage brushes) — both described above.
 
 ### Options bar (Photoshop layout)
 Brush tip picker (size/hardness/angle/roundness popover), **Mode** (the
@@ -368,7 +399,8 @@ brushes/          shipped .abr brush packs
 tools/            dev utilities, all driving the real engine headlessly:
   renderBrushSheet.mjs  paint labelled test strokes for a preset or group
   renderTipSheet.mjs    contact sheet of the generated tip bitmaps
-  exportAbr.mjs         write a group to .abr and verify the round trip
+  measureCoverage.mjs   coverage / density / ink per brush
+  exportAbr.mjs         write groups to .abr and verify the round trip
 ```
 
 Strokes render as instanced quads (position, radius, alpha, angle, roundness,

@@ -71,7 +71,8 @@ const tiles = await page.evaluate((CELL) => {
   const tipIds = [
     'sponge-fractal', 'granite-grit', 'crackle-web',
     'fiber-drag', 'mist-billow', 'stipple-flecks',
-    'bristle-chisel', 'bristle-round', 'blade-flat', 'plume-soft',
+    'wisp-filament', 'dust-motes',
+    'bristle-chisel', 'bristle-round', 'blade-flat', 'plume-soft', 'fan-comb',
   ];
   const out = [];
   const box = (map) => {
@@ -89,9 +90,29 @@ const tiles = await page.evaluate((CELL) => {
     const t0 = performance.now();
     const map = NL.brush.patterns.getTip(id);
     const ms = performance.now() - t0;
-    let sum = 0;
-    for (const v of map.data) sum += v;
-    out.push({ id, size: map.size, ms: Math.round(ms), mean: +(sum / map.data.length / 255).toFixed(3), cell: box(map) });
+    // Mean over the padded square is misleading; report the ink box, plus
+    // how much of it is genuinely zero. Accumulation turns anything above
+    // ~1% into solid ink, so only true zeros survive as gaps.
+    let sum = 0, zero = 0, minX = map.size, maxX = -1, minY = map.size, maxY = -1;
+    for (let y = 0; y < map.size; y++) {
+      for (let x = 0; x < map.size; x++) {
+        if (map.data[y * map.size + x] > 0) {
+          if (x < minX) minX = x; if (x > maxX) maxX = x;
+          if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+      }
+    }
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        const v = map.data[y * map.size + x];
+        sum += v;
+        if (v <= 2) zero++;
+      }
+    }
+    const boxPx = Math.max(1, (maxX - minX + 1) * (maxY - minY + 1));
+    out.push({ id, size: map.size, ms: Math.round(ms),
+      mean: +(sum / boxPx / 255).toFixed(3), zero: +(zero / boxPx).toFixed(3),
+      box: (maxX - minX + 1) + 'x' + (maxY - minY + 1), cell: box(map) });
   }
   const lp = NL.brush.patterns.getPattern('linen');
   let s2 = 0;
@@ -112,7 +133,7 @@ tiles.forEach((t, i) => {
 });
 writeFileSync(OUT, pngGray(W, H, sheet));
 console.log('wrote', OUT);
-for (const t of tiles) console.log(`  ${t.id.padEnd(20)} ${String(t.size).padStart(5)}px  mean=${t.mean}  gen=${t.ms}ms`);
+for (const t of tiles) console.log(`  ${t.id.padEnd(18)} ${String(t.size).padStart(5)}px  ink=${String(t.box).padStart(9)}  mean=${String(t.mean).padEnd(5)}  zero=${String(t.zero ?? '').padEnd(5)}  gen=${t.ms}ms`);
 await browser.close();
 server.kill();
 process.exit(0);
