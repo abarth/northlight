@@ -62,8 +62,8 @@ sections, all evaluated per stamp:
   **Minimum Roundness**, and flip X/Y jitter.
 - **Scattering** — scatter % (across-stroke or both axes) with control,
   **Count** (multiple stamps per step) and **Count Jitter**.
-- **Texture** — five procedural tileable patterns (Paper, Canvas, Sponge,
-  Clouds, Speckle) with scale, brightness, contrast, invert, five combine
+- **Texture** — six procedural tileable patterns (Paper, Canvas, Sponge,
+  Clouds, Speckle, **Linen**) with scale, brightness, contrast, invert, five combine
   modes (Multiply/Subtract/Darken/Overlay/Height), **Depth**, and **Texture
   Each Tip** with depth jitter + control (per-stamp) vs. whole-stroke
   texturing (Photoshop's default), applied at commit time.
@@ -93,7 +93,38 @@ pointer-up. Spacing is distance-based and re-evaluated per stamp, so
 pressure-driven size changes stamp density correctly. The **eraser** shares
 the whole engine and erases layer alpha.
 
-### Photoshop ABR import
+### Oil & Fresco brushes
+Twelve dual brushes built to leave organic, oil-painting marks that **do not
+visibly repeat**, over ten high-resolution procedural tips
+(`src/brush/organicTips.ts`) — up to 1024px, against the 90px sampled tips
+typical of commercial packs.
+
+Repetition is a frequency-domain problem. The dual mask is the stamp train
+convolved with the tip, `M(f) = T(f)·S(f)`, so it has two independent causes:
+
+- A spectral **line in `S`** at the stamp frequency is the "same mark every N
+  pixels" artifact. Jitter attenuates that line by the characteristic
+  function of the offset distribution, which falls off with
+  **ρ = scatter / spacing**; every preset here keeps ρ ≥ 3.1, cutting the
+  periodic amplitude below a tenth of an unscattered train. Both Axes is
+  mandatory — across-stroke-only scatter never moves the along-stroke
+  coordinate, so it does nothing for repetition at all.
+- A narrow-band **`T`** makes every stamp read as the same grain. The tips
+  are domain-warped fractal noise with a large-scale density field, so
+  different regions of one tip look genuinely different and a scattered
+  train keeps landing on different-looking material.
+
+Edge character comes from **K = flow / spacing**. Accumulating N overlapping
+dabs of flow `f` over a tip profile `a(r)` gives
+`A(r) ≈ 1 − exp(−K·√(1−(r/R)²)·a(r))`, so a large K squares the cross-section
+off into a hard flank while a small one lets the stroke keep the tip's own
+falloff; because N collapses at a stroke's ends, low K also leaves a long
+translucent terminal. The presets run K from 15 (Palette Knife) down to 1.1
+(Fresco Veil), grouped as hard, firm and soft edges.
+
+`brushes/Northlight-Oil-Fresco.abr` ships the set as a Photoshop file.
+
+### Photoshop ABR import and export
 The Brushes panel's **Import ABR…** button loads Photoshop brush files:
 legacy v1/v2 and modern v6–v10 (8BIM `samp` tips, Actions-descriptor `desc`,
 and `patt` texture patterns), including PackBits-compressed and 16-bit tips.
@@ -119,6 +150,18 @@ tips, 33 patterns parsed with zero unresolved references) and cross-checked
 against GIMP's loader, SonyStone/ABR-Viewer, and jlai/brush-viewer; see
 `src/brush/abr.ts` and the test suite for the details and URLs.
 
+Every preset group also exports: hover a group header in the Brushes panel
+and hit **ABR**. `src/brush/abrWrite.ts` writes version 6.2 files with the
+same three sections — `samp` tips (cropped to their ink, so a flat mark keeps
+its aspect, and PackBits-compressed), `patt` texture patterns, and the `desc`
+descriptor — embedding every tip and pattern the presets reference so the
+file stands alone. Byte-level details were read back out of a genuine
+Photoshop file rather than guessed: the 301-byte sampled-brush header with
+its doubled bounding rect and two record-relative lengths, and the
+NUL-terminated UTF-16BE strings. The test suite round-trips real presets
+through `writeAbr` → `parseAbr` and checks the tip bitmaps survive
+byte-for-byte.
+
 ### Brush presets
 The **Brushes** panel (sidebar tab) has a grouped, Photoshop-style preset
 library with live stroke previews (rendered by the real dynamics evaluator):
@@ -126,8 +169,8 @@ General, **Size Flow** (pressure→size), **Opacity Flow** (pressure→opacity),
 Dry Media (a **Graphite Pencil** with scatter/multi-stamp roughness, pressure
 opacity, 50% minimum size; Charcoal; Chalk), Wet Media (a **Sponge** using
 the sponge pattern texture plus a spatter dual brush; Watercolor with wet
-edges; Ink Wash), and Special Effects (spatter spray, scattered dots, color
-confetti).
+edges; Ink Wash), Special Effects (spatter spray, scattered dots, color
+confetti), and **Oil & Fresco** (the twelve dual brushes described above).
 
 ### Options bar (Photoshop layout)
 Brush tip picker (size/hardness/angle/roundness popover), **Mode** (the
@@ -279,6 +322,8 @@ src/
     patterns.ts    procedural tileable patterns, sampled tips, runtime tip
                    registry (seeded, deterministic)
     presets.ts     grouped preset library + imported groups
+    organicTips.ts high-res fractal tips + linen pattern for Oil & Fresco
+    abrWrite.ts    Photoshop .abr writer (v6.2 samp/patt/desc)
     abr.ts         Photoshop .abr parser (v1/v2 + v6-v10, PackBits,
                    Actions-descriptor reader, patt pattern decoder,
                    validated settings mapping)
@@ -313,12 +358,17 @@ src/
     sampling.ts   eyedropper readback
     view.ts       zoom stops / fit
     document.ts   New / Image Size / Canvas Size / Rotation / Crop
-    io.ts         Open / Place / Export PNG / ABR import
+    io.ts         Open / Place / Export PNG / ABR import + export
     history.ts    undo / redo
     debug.ts      window.__northlight surface for tests + console
   ui/             React components (canvas view, overlay painter, keyboard
                   map hook, toolbar, options bar, Color/Brushes/Brush
                   Settings tabs, layers panel)
+brushes/          shipped .abr brush packs
+tools/            dev utilities, all driving the real engine headlessly:
+  renderBrushSheet.mjs  paint labelled test strokes for a preset or group
+  renderTipSheet.mjs    contact sheet of the generated tip bitmaps
+  exportAbr.mjs         write a group to .abr and verify the round trip
 ```
 
 Strokes render as instanced quads (position, radius, alpha, angle, roundness,

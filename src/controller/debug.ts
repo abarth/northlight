@@ -1,4 +1,5 @@
 import * as brushAbr from '../brush/abr';
+import * as brushAbrWrite from '../brush/abrWrite';
 import * as brushDefaults from '../brush/defaults';
 import * as brushDynamics from '../brush/dynamics';
 import { engineStrokeParams } from '../brush/engineParams';
@@ -40,6 +41,7 @@ const api = {
     patterns: brushPatterns,
     presets: brushPresets,
     abr: brushAbr,
+    abrWrite: brushAbrWrite,
     engineStrokeParams,
     importAbr,
     tipOutline,

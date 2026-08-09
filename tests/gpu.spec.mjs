@@ -1199,6 +1199,113 @@ const TEST = `
       NL.store.getState().applyPreset('soft-round', 'brush');
     }
 
+  // ---- 21c. ABR export ----
+  // writeAbr is the inverse of the parser above, so the strongest cheap check
+  // is a round trip: serialize real presets, parse the bytes back, and diff.
+  {
+    const probe = makeBrush({
+      tip: { size: 33, spacing: 0.17, angle: 12, roundness: 0.5, hardness: 1 },
+      flow: 0.4, opacity: 0.75, blendMode: 'multiply',
+    });
+    const knife = NL.brush.presets.findPreset('palette-knife');
+    const sponge = NL.brush.presets.findPreset('fresco-sponge');
+    const buf = NL.brush.abrWrite.writeAbr([
+      { name: 'Round Probe', settings: probe },
+      { name: knife.name, settings: knife.settings },
+      { name: sponge.name, settings: sponge.settings },
+    ]);
+    const dv = new DataView(buf);
+    assert('abr export: version 6.2 header',
+      dv.getUint16(0) === 6 && dv.getUint16(2) === 2,
+      dv.getUint16(0) + '.' + dv.getUint16(2));
+
+    const back = NL.brush.abr.parseAbr(buf);
+    assert('abr export: every brush comes back, in order, named',
+      back.brushes.length === 3 && back.brushes[0].name === 'Round Probe' &&
+      back.brushes[1].name === knife.name && back.brushes[2].name === sponge.name,
+      JSON.stringify(back.brushes.map((b) => b.name)));
+
+    // a computed round tip carries no bitmap, so it must round-trip as null
+    assert('abr export: round tip stays computed (no sampled data)',
+      back.brushes[0].tipId === null &&
+      near(back.brushes[0].settings.tip.size, 33, 0.01) &&
+      near(back.brushes[0].settings.tip.spacing, 0.17, 1e-6) &&
+      near(back.brushes[0].settings.tip.angle, 12, 1e-6) &&
+      near(back.brushes[0].settings.tip.roundness, 0.5, 1e-6) &&
+      back.brushes[0].settings.blendMode === 'multiply' &&
+      near(back.brushes[0].settings.opacity, 0.75, 1e-6),
+      JSON.stringify(back.brushes[0]));
+
+    const want = sponge.settings;
+    const got = back.brushes[2].settings;
+    assert('abr export: shape dynamics survive (pressure size, direction angle)',
+      got.shape.enabled &&
+      got.shape.sizeControl.source === want.shape.sizeControl.source &&
+      got.shape.angleControl.source === want.shape.angleControl.source &&
+      near(got.shape.minDiameter, want.shape.minDiameter, 1e-6) &&
+      near(got.shape.minRoundness, want.shape.minRoundness, 1e-6),
+      JSON.stringify(got.shape));
+    assert('abr export: dual brush survives (size, spacing, scatter, axes, mode)',
+      got.dual.enabled && got.dual.mode === want.dual.mode &&
+      near(got.dual.size, want.dual.size, 0.01) &&
+      near(got.dual.spacing, want.dual.spacing, 1e-6) &&
+      near(got.dual.scatter, want.dual.scatter, 1e-6) &&
+      got.dual.bothAxes === want.dual.bothAxes &&
+      got.dual.count === want.dual.count,
+      JSON.stringify(got.dual));
+    assert('abr export: texture + transfer survive',
+      got.texture.enabled && got.texture.mode === want.texture.mode &&
+      near(got.texture.depth, want.texture.depth, 1e-6) &&
+      near(got.texture.scale, want.texture.scale, 1e-6) &&
+      got.texture.textureEachTip === want.texture.textureEachTip &&
+      got.transfer.enabled &&
+      got.transfer.flowControl.source === want.transfer.flowControl.source &&
+      near(got.transfer.flowMin, want.transfer.flowMin, 1e-6),
+      JSON.stringify([got.texture, got.transfer]));
+    assert('abr export: flow and opacity survive',
+      near(got.flow, want.flow, 1e-6) && near(got.opacity, want.opacity, 1e-6),
+      got.flow + ',' + got.opacity);
+
+    // ids must resolve to bitmaps actually embedded in the file
+    assert('abr export: primary, dual and pattern ids all resolve',
+      back.tips.has(back.brushes[2].tipId) &&
+      back.tips.has(got.dual.shape) &&
+      back.patterns.has(back.brushes[2].texturePatternId),
+      JSON.stringify({ tip: back.brushes[2].tipId, dual: got.dual.shape,
+                       pat: back.brushes[2].texturePatternId }));
+
+    // Tips are stored cropped to their ink, which is what carries a flat
+    // mark's aspect ratio; padded back to square on read, the ink box must
+    // still be wide and short for the blade rather than square.
+    const bladeId = back.brushes[1].settings.tip.shape;
+    const blade = back.tips.get(back.brushes[1].tipId);
+    let minX = blade.size, maxX = -1, minY = blade.size, maxY = -1;
+    for (let y = 0; y < blade.size; y++) {
+      for (let x = 0; x < blade.size; x++) {
+        if (blade.data[y * blade.size + x] > 0) {
+          if (x < minX) minX = x; if (x > maxX) maxX = x;
+          if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+      }
+    }
+    const bw = maxX - minX + 1, bh = maxY - minY + 1;
+    assert('abr export: flat tip keeps its aspect through the crop',
+      bw > bh * 2, bw + 'x' + bh);
+
+    // and the pixels themselves must survive PackBits intact
+    const srcTip = NL.brush.patterns.getTip('sponge-fractal');
+    const outTip = back.tips.get(got.dual.shape);
+    let same = srcTip.size === outTip.size;
+    if (same) {
+      for (let i = 0; i < srcTip.data.length; i++) {
+        if (srcTip.data[i] !== outTip.data[i]) { same = false; break; }
+      }
+    }
+    assert('abr export: tip bitmap survives RLE byte-for-byte',
+      same, srcTip.size + ' vs ' + outTip.size);
+    void bladeId;
+  }
+
     // --- new texture combine modes (screen) through the real pipeline ---
     {
       NL.brush.patterns.registerPattern('test-mid-gray',
