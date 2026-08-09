@@ -696,8 +696,10 @@ export function makeBarkGrain(size = TEXTURE_TIP_SIZE): GrayMap {
   const rng = mulberry32(seed + 23);
   // 2 cells across at every octave: bark's fissures run down the grain, and
   // any real u-variation turns them into undulating marble instead
-  const grain = makeStack(rng, 2, 3, { cellsY: 22, persistence: 0.6, lacunarityX: 1 });
-  const fissure = makeStack(rng, 2, 3, { cellsY: 8, persistence: 0.45, lacunarityX: 1 });
+  // Fine ribs with thin splits. At 22/8 the fissures were as wide as the
+  // ribs and accumulated into blobs rather than reading as grain.
+  const grain = makeStack(rng, 2, 3, { cellsY: 40, persistence: 0.6, lacunarityX: 1 });
+  const fissure = makeStack(rng, 2, 3, { cellsY: 16, persistence: 0.45, lacunarityX: 1 });
   const knots = makeWorley(rng, 6);
   const vig = raggedVignette(size, seed + 47, 0.7);
 
@@ -712,7 +714,7 @@ export function makeBarkGrain(size = TEXTURE_TIP_SIZE): GrayMap {
       // most of the work: a wide window cuts them deep and irregular, and the
       // grain only shades the ribs between them.
       const g = smoothstep(0.4, 0.62, evalStack(grain, u, v));
-      const split = 1 - 0.97 * smoothstep(0.46, 0.78, evalRidged(fissure, u, v));
+      const split = 1 - 0.97 * smoothstep(0.62, 0.86, evalRidged(fissure, u, v));
       const k = worley(knots, u, v);
       const knot = 0.75 + 0.25 * smoothstep(0.12, 0.5, k.f1);
       out[i] = (0.18 + 0.82 * g) * split * knot * vig[i];

@@ -152,14 +152,18 @@ Measured coverage runs from ~89% down to 13% (Dust Motes);
 group, painting onto a transparent layer so the composite's alpha *is* the
 coverage.
 
-### Organic Scumble brushes
-Six that run one recipe over a range of organic textures. The family
-character comes from **primary Scattering**: throwing whole dabs off the
-spine gives a billowing, cloud-shaped silhouette rather than a defined band,
-and a low K keeps it translucent enough to build up in passes. What
-distinguishes each brush is the texture in the dual slot.
+### Organic Texture brushes
+Six that carry new textures on Oil & Fresco's envelope discipline. They use
+**no position jitter at all**: scattering the primary buys a billowing
+silhouette, but it does so by throwing dabs off the spine, which overrides the
+pressure envelope because where a dab lands no longer tracks the pen. Here the
+mark's outline is the tip's own, tapered by pressure → size with no minimum
+diameter, and edge is set by keeping K in the 2–3 band Ol' Huckleberry sits
+in — tight spacing so the flanks accumulate firm, low flow so the terminals
+stay translucent and the mark builds up in passes. All the texture comes from
+the dual mask.
 
-Most use **cellular (Worley) tips**, added because fractal noise could not
+They use **cellular (Worley) tips**, added because fractal noise could not
 make them. Fbm's level sets are smooth rounded blobs, so everything built
 from it reads as cloud or sponge; cellular noise's level sets are cell walls.
 `f1` alone gives round pores or tufts centred on the feature points, `f2 - f1`

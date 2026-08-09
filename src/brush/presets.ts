@@ -539,56 +539,54 @@ export const BRUSH_GROUPS: BrushGroup[] = [
     ],
   },
   {
-    id: 'scumble',
-    name: 'Organic Scumble',
+    id: 'organic',
+    name: 'Organic Texture',
     presets: [
       /**
-       * Scumble Dust's recipe, run over a range of organic textures.
+       * The cellular textures, given Oil & Fresco's envelope discipline
+       * rather than Scumble Dust's.
        *
-       * The family character comes from primary Scattering: throwing whole
-       * dabs off the spine gives a billowing, cloud-shaped silhouette instead
-       * of a defined band, and a low K keeps it translucent enough to build
-       * up in passes. What then distinguishes each brush is the texture in
-       * the dual slot.
+       * Scattering the primary buys a billowing silhouette, but it does so by
+       * throwing dabs off the spine — which overrides the pressure envelope,
+       * since where a dab lands no longer tracks the pen. These carry no
+       * position jitter at all, so the mark's outline is the tip's own,
+       * tapered by pressure -> size with no minimum diameter.
        *
-       * Most of these use cellular (Worley) tips. Fractal noise has smooth
-       * rounded level sets, so everything built from it reads as cloud or
-       * sponge; the level sets of cellular noise are cell walls, which is
-       * what lichen, bone porosity and moss tufts actually look like.
+       * Edge is then the flow/spacing ratio K, kept in the 2-4 band that
+       * Ol' Huckleberry sits in: tight spacing so the flanks accumulate to a
+       * firm edge, low flow so the terminals stay translucent for the length
+       * of a tip radius and the whole mark can be built up in passes. All the
+       * texture comes from the dual mask.
        */
-      p('lichen-scumble', 'Lichen Scumble', fresco({
-        tip: 'bristle-round', size: 160, spacing: 0.15, flow: 0.3,
-        scatter: 1, scatterCount: 2,
-        dual: 'lichen-crust', dualSize: 200, dualSpacing: 0.28, dualScatter: 0.92,
+      p('lichen-crust', 'Lichen Crust', fresco({
+        tip: 'bristle-round', size: 170, spacing: 0.07, flow: 0.2,
+        dual: 'lichen-crust', dualSize: 210, dualSpacing: 0.28, dualScatter: 0.92,
         tooth: 0.12,
       })),
       p('bone-dust', 'Bone Dust', fresco({
-        tip: 'plume-soft', size: 180, spacing: 0.17, flow: 0.26,
-        scatter: 1.25, scatterCount: 2,
+        tip: 'plume-soft', size: 180, spacing: 0.08, flow: 0.18,
         dual: 'bone-pore', dualSize: 220, dualSpacing: 0.3, dualScatter: 0.98,
         tooth: 0.1,
       })),
       p('moss-stipple', 'Moss Stipple', fresco({
-        tip: 'bristle-round', size: 140, spacing: 0.14, flow: 0.34,
-        scatter: 0.85, scatterCount: 3,
-        dual: 'moss-tuft', dualSize: 180, dualSpacing: 0.26, dualScatter: 0.85,
+        tip: 'bristle-round', size: 150, spacing: 0.07, flow: 0.22,
+        dual: 'moss-tuft', dualSize: 190, dualSpacing: 0.26, dualScatter: 0.85,
       })),
       p('rust-bloom', 'Rust Bloom', fresco({
-        tip: 'bristle-round', size: 170, spacing: 0.16, flow: 0.28,
-        scatter: 1.1, scatterCount: 2,
+        tip: 'bristle-round', size: 175, spacing: 0.075, flow: 0.19,
         dual: 'rust-bloom', dualSize: 210, dualSpacing: 0.3, dualScatter: 0.98,
         tooth: 0.14,
       })),
       p('bark-scrub', 'Bark Scrub', fresco({
-        tip: 'bristle-chisel', size: 190, spacing: 0.09, flow: 0.3,
-        scatter: 0.55, scatterCount: 2,
-        dual: 'bark-grain', dualSize: 220, dualSpacing: 0.26, dualScatter: 0.85,
+        // bark-grain's fissures are wide and dark; at K=4 they accumulated
+        // into solid patches, so this runs lower and with a finer grain
+        tip: 'bristle-chisel', size: 190, spacing: 0.06, flow: 0.15,
+        dual: 'bark-grain', dualSize: 185, dualSpacing: 0.26, dualScatter: 0.85,
         tooth: 0.12,
       })),
-      p('ember-scumble', 'Ember Scumble', fresco({
-        tip: 'bristle-round', size: 120, spacing: 0.2, flow: 0.4,
-        scatter: 1.5, scatterCount: 3,
-        dual: 'dust-motes', dualSize: 170, dualSpacing: 0.4, dualScatter: 1.3,
+      p('ember-grit', 'Ember Grit', fresco({
+        tip: 'bristle-round', size: 140, spacing: 0.09, flow: 0.16,
+        dual: 'dust-motes', dualSize: 180, dualSpacing: 0.4, dualScatter: 1.3,
       })),
     ],
   },
