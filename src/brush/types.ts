@@ -42,6 +42,11 @@ export type TipShape =
   | 'stipple-flecks'
   | 'wisp-filament'
   | 'dust-motes'
+  | 'lichen-crust'
+  | 'bone-pore'
+  | 'moss-tuft'
+  | 'bark-grain'
+  | 'rust-bloom'
   | 'bristle-chisel'
   | 'bristle-round'
   | 'blade-flat'
@@ -290,6 +295,11 @@ export const TIP_SHAPES: { id: TipShape; label: string }[] = [
   { id: 'stipple-flecks', label: 'Salt Flecks' },
   { id: 'wisp-filament', label: 'Wisp Filament' },
   { id: 'dust-motes', label: 'Dust Motes' },
+  { id: 'lichen-crust', label: 'Lichen Crust' },
+  { id: 'bone-pore', label: 'Bone Pore' },
+  { id: 'moss-tuft', label: 'Moss Tuft' },
+  { id: 'bark-grain', label: 'Bark Grain' },
+  { id: 'rust-bloom', label: 'Rust Bloom' },
 ];
 
 export const PATTERNS: { id: PatternId; label: string }[] = [

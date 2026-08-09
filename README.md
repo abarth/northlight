@@ -152,7 +152,24 @@ Measured coverage runs from ~89% down to 13% (Dust Motes);
 group, painting onto a transparent layer so the composite's alpha *is* the
 coverage.
 
-`brushes/Northlight-Oil-Fresco.abr` ships all twenty as a Photoshop file.
+### Organic Scumble brushes
+Six that run one recipe over a range of organic textures. The family
+character comes from **primary Scattering**: throwing whole dabs off the
+spine gives a billowing, cloud-shaped silhouette rather than a defined band,
+and a low K keeps it translucent enough to build up in passes. What
+distinguishes each brush is the texture in the dual slot.
+
+Most use **cellular (Worley) tips**, added because fractal noise could not
+make them. Fbm's level sets are smooth rounded blobs, so everything built
+from it reads as cloud or sponge; cellular noise's level sets are cell walls.
+`f1` alone gives round pores or tufts centred on the feature points, `f2 - f1`
+gives the walls between cells — which is what lichen thalli, bone porosity and
+moss tufts actually look like. Lichen Crust, Bone Pore, Moss Tuft and Rust
+Bloom are built on it; Bark Grain pins its ridged field in u so the fissures
+run down the grain instead of undulating into marble.
+
+`brushes/Northlight-Oil-Fresco.abr` ships all twenty-six as a Photoshop
+file.
 
 ### Photoshop ABR import and export
 The Brushes panel's **Import ABR…** button loads Photoshop brush files:
@@ -200,8 +217,9 @@ Dry Media (a **Graphite Pencil** with scatter/multi-stamp roughness, pressure
 opacity, 50% minimum size; Charcoal; Chalk), Wet Media (a **Sponge** using
 the sponge pattern texture plus a spatter dual brush; Watercolor with wet
 edges; Ink Wash), Special Effects (spatter spray, scattered dots, color
-confetti), **Oil & Fresco** (twelve dual brushes) and **Wisp & Scumble**
-(eight low-coverage brushes) — both described above.
+confetti), **Oil & Fresco** (twelve dual brushes), **Wisp & Scumble** (eight
+low-coverage brushes) and **Organic Scumble** (six scattered-dab brushes) —
+all described above.
 
 ### Options bar (Photoshop layout)
 Brush tip picker (size/hardness/angle/roundness popover), **Mode** (the
@@ -353,7 +371,7 @@ src/
     patterns.ts    procedural tileable patterns, sampled tips, runtime tip
                    registry (seeded, deterministic)
     presets.ts     grouped preset library + imported groups
-    organicTips.ts high-res fractal tips + linen pattern for Oil & Fresco
+    organicTips.ts high-res fractal + cellular tips, linen pattern
     abrWrite.ts    Photoshop .abr writer (v6.2 samp/patt/desc)
     abr.ts         Photoshop .abr parser (v1/v2 + v6-v10, PackBits,
                    Actions-descriptor reader, patt pattern decoder,
