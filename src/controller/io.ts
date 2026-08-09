@@ -1,4 +1,5 @@
 import * as brushAbr from '../brush/abr';
+import { writeAbr } from '../brush/abrWrite';
 import * as brushDefaults from '../brush/defaults';
 import * as brushPatterns from '../brush/patterns';
 import * as brushPresets from '../brush/presets';
@@ -9,7 +10,8 @@ import { MAX_LAYERS, buildRenderState, getEngine } from './engineHost';
 import { newDocument } from './document';
 
 /**
- * Import/export: File > Open / Place / Export PNG, and ABR brush import.
+ * Import/export: File > Open / Place / Export PNG, and ABR brush
+ * import/export.
  */
 
 /** Draws a bitmap into a doc-sized buffer of premultiplied RGBA. */
@@ -109,6 +111,23 @@ export async function exportPng(): Promise<void> {
   const a = document.createElement('a');
   a.href = url;
   a.download = 'northlight.png';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Exports a brush group to a Photoshop .abr file and downloads it. Every
+ * sampled tip and texture pattern the presets reference is embedded, so the
+ * file stands alone in Photoshop.
+ */
+export function exportAbrGroup(groupId: string): void {
+  const group = brushPresets.allGroups().find((g) => g.id === groupId);
+  if (!group || group.presets.length === 0) return;
+  const buffer = writeAbr(group.presets.map((p) => ({ name: p.name, settings: p.settings })));
+  const url = URL.createObjectURL(new Blob([buffer], { type: 'application/octet-stream' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${group.name.replace(/[^\w. -]+/g, '-')}.abr`;
   a.click();
   URL.revokeObjectURL(url);
 }

@@ -744,6 +744,20 @@ select {
   user-select: none;
 }
 
+/* Per-group "export as .abr" affordance; only shown on hover so the group
+   headers stay quiet. */
+.preset-group-export {
+  margin-left: auto;
+  opacity: 0;
+  padding: 1px 5px;
+  font-size: 9px;
+}
+
+.preset-group-header:hover .preset-group-export,
+.preset-group-export:focus-visible {
+  opacity: 1;
+}
+
 .preset-row {
   display: flex;
   align-items: center;

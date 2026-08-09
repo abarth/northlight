@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { allGroups, type BrushPreset } from '../brush/presets';
-import { importAbr } from '../controller';
+import { exportAbrGroup, importAbr } from '../controller';
 import { useStore, type PaintToolId } from '../store';
 import { drawBrushPreview } from './brushPreview';
 import { ValSlider } from './controls';
@@ -90,6 +90,16 @@ export function BrushesPanel() {
               >
                 <span className="bs-arrow">{open ? '▾' : '▸'}</span>
                 {group.name}
+                <button
+                  className="btn small preset-group-export"
+                  title={`Export "${group.name}" as a Photoshop .abr file`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    exportAbrGroup(group.id);
+                  }}
+                >
+                  ABR
+                </button>
               </div>
               {open &&
                 group.presets.map((preset) => (

@@ -1,3 +1,4 @@
+import { ORGANIC_PATTERNS, ORGANIC_TIPS } from './organicTips';
 import type { PatternId, TipShape } from './types';
 
 /**
@@ -91,6 +92,10 @@ function toBytes(f: Float32Array): Uint8Array<ArrayBuffer> {
 const PATTERN_SIZE = 256;
 
 function makePattern(id: PatternId): GrayMap {
+  // organic patterns are generated at their own, larger sizes
+  const organic = ORGANIC_PATTERNS[id];
+  if (organic) return organic();
+
   const size = PATTERN_SIZE;
   const out = new Float32Array(size * size);
 
@@ -163,6 +168,10 @@ function makePattern(id: PatternId): GrayMap {
 const TIP_SIZE = 128;
 
 function makeTip(shape: TipShape): GrayMap {
+  // the organic Oil & Fresco tips are much larger than the 128px built-ins
+  const organic = ORGANIC_TIPS[shape];
+  if (organic) return organic();
+
   const size = TIP_SIZE;
   const out = new Float32Array(size * size);
   const cx = size / 2;
@@ -242,7 +251,9 @@ const registeredTips = new Map<string, GrayMap>();
 /** Patterns registered at runtime (e.g. imported from .abr patt sections). */
 const registeredPatterns = new Map<string, { map: GrayMap; label: string }>();
 
-const BUILTIN_PATTERNS: PatternId[] = ['paper', 'canvas', 'sponge', 'clouds', 'speckle'];
+const BUILTIN_PATTERNS: PatternId[] = [
+  'paper', 'canvas', 'sponge', 'clouds', 'speckle', ...Object.keys(ORGANIC_PATTERNS),
+];
 
 export function getPattern(id: PatternId): GrayMap {
   const registered = registeredPatterns.get(id);
@@ -269,7 +280,9 @@ export function registeredPatternOptions(): { id: string; label: string }[] {
   return [...registeredPatterns].map(([id, { label }]) => ({ id, label }));
 }
 
-const BUILTIN_TIPS: TipShape[] = ['round', 'chalk', 'spatter', 'grain'];
+const BUILTIN_TIPS: TipShape[] = [
+  'round', 'chalk', 'spatter', 'grain', ...Object.keys(ORGANIC_TIPS),
+];
 
 export function getTip(shape: TipShape): GrayMap {
   const registered = registeredTips.get(shape);

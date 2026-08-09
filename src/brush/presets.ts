@@ -1,5 +1,5 @@
 import { makeBrush, pressureControl } from './defaults';
-import type { BrushSettings } from './types';
+import type { BrushSettings, TextureBlend, TipShape } from './types';
 
 export interface BrushPreset {
   id: string;
@@ -18,6 +18,109 @@ const p = (id: string, name: string, settings: BrushSettings): BrushPreset => ({
   name,
   settings,
 });
+
+/**
+ * Oil & Fresco brushes: a dual brush plus the two knobs that shape it.
+ *
+ * EDGE comes from K = flow / spacing. Accumulating N overlapping dabs of
+ * flow f gives A(r) = 1 - exp(-K * sqrt(1 - (r/R)^2) * a(r)) for a tip
+ * profile a(r), so a large K squares the cross-section off into a hard flank
+ * while a small one lets the stroke keep the tip's own falloff. Because N
+ * collapses at the ends of a stroke, a low K also leaves the long translucent
+ * terminal that Ol' Huckleberry gets from 10% flow at 5% spacing (K = 2).
+ * Here K runs from 15 (Palette Knife) down to 1.1 (Fresco Veil).
+ *
+ * NON-REPETITION comes from rho = dualScatter / dualSpacing. The dual mask is
+ * the stamp train convolved with the tip, M(f) = T(f) * S(f); a spectral line
+ * in S at the stamp frequency is the "same mark every N pixels" artifact, and
+ * jitter attenuates it by the characteristic function of the offset
+ * distribution, which falls off with rho. Every brush below keeps rho >= 3.1,
+ * cutting the periodic amplitude to under a tenth of an unscattered train.
+ * Both Axes is on everywhere and is not optional: across-stroke-only scatter
+ * leaves the along-stroke coordinate untouched and does nothing at all for
+ * repetition. The tips supply the other factor, a broadband T with no
+ * characteristic blob size (see organicTips.ts).
+ */
+interface FrescoSpec {
+  /** primary tip: sets the shape of the mark */
+  tip: TipShape;
+  size: number;
+  /** primary spacing as a fraction of diameter; with flow this fixes K */
+  spacing: number;
+  flow: number;
+  /** fixed tip angle in degrees; omit to let the tip follow the stroke */
+  angle?: number;
+  /** dual tip: supplies the organic texture */
+  dual: TipShape;
+  dualSize: number;
+  dualSpacing: number;
+  dualScatter: number;
+  dualMode?: TextureBlend;
+  /** linen canvas tooth depth; omit for no texture */
+  tooth?: number;
+  opacity?: number;
+}
+
+const fresco = (s: FrescoSpec): BrushSettings =>
+  makeBrush({
+    tip: { shape: s.tip, size: s.size, spacing: s.spacing, angle: s.angle ?? 0 },
+    shape: {
+      enabled: true,
+      // pressure -> size with no floor is what gives these brushes their taper
+      sizeControl: pressureControl(),
+      minDiameter: 0,
+      sizeJitter: 0.05,
+      // with no fixed angle the tip follows the stroke, like a dragged brush
+      angleControl:
+        s.angle === undefined
+          ? { source: 'direction', fadeSteps: 25 }
+          : { source: 'off', fadeSteps: 25 },
+      angleJitter: 0.02,
+      roundnessJitter: 0.1,
+      minRoundness: 0.65,
+      // No flip jitter on purpose: striations only read as dragged bristles
+      // if consecutive stamps reinforce each other, and mirroring every stamp
+      // scrubs them into mush. Decorrelation is the dual tip's job.
+      flipXJitter: false,
+      flipYJitter: false,
+    },
+    dual: {
+      enabled: true,
+      shape: s.dual,
+      mode: s.dualMode ?? 'multiply',
+      size: s.dualSize,
+      // Overlapping dual stamps union together, so the mask saturates and the
+      // texture washes out as ~1/spacing. These stay long enough to keep
+      // holes, with scatter raised to hold rho >= 3.1.
+      spacing: s.dualSpacing,
+      scatter: s.dualScatter,
+      bothAxes: true,
+      count: 1,
+      countJitter: 0.3,
+    },
+    // document-anchored (textureEachTip off), so the tooth adds no
+    // along-stroke period of its own
+    texture: s.tooth
+      ? {
+          enabled: true,
+          pattern: 'linen',
+          scale: 1,
+          mode: 'multiply',
+          depth: s.tooth,
+          contrast: 0.1,
+          textureEachTip: false,
+        }
+      : { enabled: false },
+    transfer: {
+      enabled: true,
+      flowControl: pressureControl(),
+      flowMin: 0.25,
+      flowJitter: 0.15,
+    },
+    flow: s.flow,
+    opacity: s.opacity ?? 1,
+    smoothing: 0.2,
+  });
 
 export const BRUSH_GROUPS: BrushGroup[] = [
   {
@@ -265,6 +368,80 @@ export const BRUSH_GROUPS: BrushGroup[] = [
           color: { enabled: true, applyPerTip: true, hueJitter: 0.25, satJitter: 0.2, briJitter: 0.25 },
         }),
       ),
+    ],
+  },
+  {
+    id: 'oil',
+    name: 'Oil & Fresco',
+    presets: [
+      // --- hard edge (K >= 9): crisp flanks, for blocking and knife work ---
+      p('palette-knife', 'Palette Knife', fresco({
+        tip: 'blade-flat', size: 220, spacing: 0.04, flow: 0.6, angle: 30,
+        dual: 'crackle-web', dualSize: 220, dualSpacing: 0.25, dualScatter: 0.8,
+        tooth: 0.08,
+      })),
+      p('granite-block', 'Granite Block', fresco({
+        tip: 'blade-flat', size: 200, spacing: 0.045, flow: 0.55,
+        dual: 'granite-grit', dualSize: 240, dualSpacing: 0.22, dualScatter: 0.7,
+        tooth: 0.13,
+      })),
+      p('impasto-chisel', 'Impasto Chisel', fresco({
+        tip: 'bristle-chisel', size: 175, spacing: 0.05, flow: 0.5, angle: -20,
+        dual: 'granite-grit', dualSize: 200, dualSpacing: 0.2, dualScatter: 0.65,
+        tooth: 0.14,
+      })),
+      p('stone-edge', 'Stone Edge', fresco({
+        tip: 'blade-flat', size: 140, spacing: 0.05, flow: 0.45,
+        dual: 'sponge-fractal', dualSize: 170, dualSpacing: 0.22, dualScatter: 0.72,
+        tooth: 0.11,
+      })),
+
+      // --- firm edge (K ~ 3-6): defined but broken, the everyday brushes ---
+      p('fresco-sponge', 'Fresco Sponge', fresco({
+        tip: 'bristle-chisel', size: 180, spacing: 0.06, flow: 0.35,
+        dual: 'sponge-fractal', dualSize: 260, dualSpacing: 0.24, dualScatter: 0.78,
+        tooth: 0.13,
+      })),
+      p('bristle-drag', 'Dry Bristle Drag', fresco({
+        tip: 'bristle-chisel', size: 160, spacing: 0.05, flow: 0.3,
+        dual: 'fiber-drag', dualSize: 190, dualSpacing: 0.2, dualScatter: 0.66,
+        tooth: 0.11,
+      })),
+      p('fresco-scumble', 'Fresco Scumble', fresco({
+        tip: 'bristle-round', size: 150, spacing: 0.07, flow: 0.28,
+        dual: 'crackle-web', dualSize: 200, dualSpacing: 0.26, dualScatter: 0.85,
+        tooth: 0.14,
+      })),
+      p('lichen-stipple', 'Lichen Stipple', fresco({
+        tip: 'bristle-round', size: 170, spacing: 0.08, flow: 0.3,
+        dual: 'stipple-flecks', dualSize: 210, dualSpacing: 0.26, dualScatter: 0.85,
+        tooth: 0.12,
+      })),
+
+      // --- soft edge: the feathered plume tip does the softening, while K
+      //     stays near 2 so one pass still reads. Fresco Veil alone drops to
+      //     K = 1.1, where the stroke is a true translucent glaze. ---
+      p('salt-wash', 'Salt Wash', fresco({
+        tip: 'plume-soft', size: 190, spacing: 0.1, flow: 0.22,
+        dual: 'stipple-flecks', dualSize: 230, dualSpacing: 0.28, dualScatter: 0.9,
+        tooth: 0.1,
+      })),
+      p('ash-drift', 'Ash Drift', fresco({
+        tip: 'plume-soft', size: 210, spacing: 0.1, flow: 0.2,
+        dual: 'fiber-drag', dualSize: 250, dualSpacing: 0.3, dualScatter: 0.95,
+      })),
+      p('fresco-veil', 'Fresco Veil', fresco({
+        tip: 'plume-soft', size: 240, spacing: 0.14, flow: 0.15,
+        dual: 'mist-billow', dualSize: 300, dualSpacing: 0.3, dualScatter: 1,
+        opacity: 0.9,
+      })),
+      // Soft by low K rather than by a feathered tip: the edge stays
+      // translucent but keeps a firmer boundary than the plume brushes.
+      p('sponge-glaze', 'Sponge Glaze', fresco({
+        tip: 'bristle-round', size: 200, spacing: 0.12, flow: 0.22,
+        dual: 'sponge-fractal', dualSize: 240, dualSpacing: 0.28, dualScatter: 0.92,
+        tooth: 0.12,
+      })),
     ],
   },
 ];

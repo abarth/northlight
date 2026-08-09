@@ -28,7 +28,23 @@ export interface DynamicControl {
  * textures; any other string is a sampled tip registered at runtime
  * (e.g. imported from a Photoshop .abr file).
  */
-export type TipShape = 'round' | 'chalk' | 'spatter' | 'grain' | (string & {});
+export type TipShape =
+  | 'round'
+  | 'chalk'
+  | 'spatter'
+  | 'grain'
+  // Oil & Fresco texture tips (Dual Brush) and primary tips
+  | 'sponge-fractal'
+  | 'granite-grit'
+  | 'crackle-web'
+  | 'fiber-drag'
+  | 'mist-billow'
+  | 'stipple-flecks'
+  | 'bristle-chisel'
+  | 'bristle-round'
+  | 'blade-flat'
+  | 'plume-soft'
+  | (string & {});
 
 /**
  * Texture patterns. The five names are built-in procedural patterns; any
@@ -41,6 +57,7 @@ export type PatternId =
   | 'sponge'
   | 'clouds'
   | 'speckle'
+  | 'linen'
   | (string & {});
 
 /** How texture/dual-brush values combine with brush coverage. */
@@ -257,6 +274,16 @@ export const TIP_SHAPES: { id: TipShape; label: string }[] = [
   { id: 'chalk', label: 'Chalk' },
   { id: 'spatter', label: 'Spatter' },
   { id: 'grain', label: 'Grain' },
+  { id: 'bristle-chisel', label: 'Bristle Chisel' },
+  { id: 'bristle-round', label: 'Bristle Round' },
+  { id: 'blade-flat', label: 'Flat Blade' },
+  { id: 'plume-soft', label: 'Soft Plume' },
+  { id: 'sponge-fractal', label: 'Fractal Sponge' },
+  { id: 'granite-grit', label: 'Granite Grit' },
+  { id: 'crackle-web', label: 'Crackle Web' },
+  { id: 'fiber-drag', label: 'Fibre Drag' },
+  { id: 'mist-billow', label: 'Mist Billow' },
+  { id: 'stipple-flecks', label: 'Salt Flecks' },
 ];
 
 export const PATTERNS: { id: PatternId; label: string }[] = [
@@ -265,4 +292,5 @@ export const PATTERNS: { id: PatternId; label: string }[] = [
   { id: 'sponge', label: 'Sponge' },
   { id: 'clouds', label: 'Clouds' },
   { id: 'speckle', label: 'Speckle' },
+  { id: 'linen', label: 'Linen' },
 ];
