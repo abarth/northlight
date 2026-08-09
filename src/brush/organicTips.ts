@@ -100,12 +100,23 @@ interface StackOpts {
   cellsY?: number;
   persistence?: number;
   lacunarity?: number;
+  /**
+   * Per-octave growth across the u axis, defaulting to `lacunarity`. Setting
+   * it to 1 pins the u frequency while v keeps doubling, which buys fine
+   * multi-scale striation WITHOUT the along-stroke wander that normally comes
+   * with extra octaves — and that wander is what smears a combed track shut,
+   * since dabs step along u between stamps.
+   */
+  lacunarityX?: number;
   /** rotate each octave's frame — breaks lattice alignment, breaks tiling */
   rotate?: boolean;
 }
 
 function makeStack(rng: () => number, cells: number, octaves: number, opts: StackOpts = {}): Stack {
-  const { cellsY = cells, persistence = 0.5, lacunarity = 2, rotate = false } = opts;
+  const {
+    cellsY = cells, persistence = 0.5, lacunarity = 2,
+    lacunarityX = lacunarity, rotate = false,
+  } = opts;
   const layers: Octave[] = [];
   let ax = cells;
   let ay = cellsY;
@@ -119,7 +130,7 @@ function makeStack(rng: () => number, cells: number, octaves: number, opts: Stac
     layers.push({ g: lattice(cx, cy, rng), cx, cy, amp, cos: Math.cos(ang), sin: Math.sin(ang) });
     total += amp;
     amp *= persistence;
-    ax *= lacunarity;
+    ax *= lacunarityX;
     ay *= lacunarity;
   }
   return { layers, total };
@@ -523,7 +534,7 @@ interface ChiselOpts {
   seed?: number;
   /** ink height as a fraction of width — 1 is round */
   aspect?: number;
-  /** cells along the mark; higher is finer striation */
+  /** cells across the mark; higher is finer striation */
   streakCells?: number;
   /**
    * Cells ACROSS the mark, i.e. how much the striations wander along the
@@ -564,8 +575,10 @@ function chiselField(o: ChiselOpts = {}): GrayMap {
   const oy = Math.floor((size - h) / 2);
 
   const rng = mulberry32(seed + 5);
+  // lacunarityX 1 keeps every octave as straight as the first: the extra
+  // octaves subdivide the hairs instead of making them wander
   const streaks = makeStack(rng, streakCellsX, streakOctaves,
-    { cellsY: streakCells, persistence: 0.55 });
+    { cellsY: streakCells, persistence: 0.55, lacunarityX: 1 });
   // rotated + off-2 lacunarity, or the tooth lattice shows as square blocks
   const tooth = makeStack(rng, 64, 3, { persistence: 0.5, lacunarity: 2.15, rotate: true });
   const edge = lowResField(96, seed + 61, 5, 4, size);
@@ -619,12 +632,14 @@ export const makeBladeFlat = () =>
  */
 export const makeFanComb = () =>
   chiselField({
-    // Few, coarse, near-straight hairs. Fine strands (62 cells) landed ~3px
-    // apart at working size and their soft edges overlapped; wavy ones
-    // (streakCellsX 5) drifted sideways between dabs and smeared shut. Two
-    // octaves over 2 cells across keeps them combing straight down the drag.
-    seed: 606017, aspect: 0.5, streakCells: 14, streakCellsX: 2,
-    streakOctaves: 2, streakDepth: 1, streakLo: 0.46, streakHi: 0.64,
+    // Many fine hairs rather than a few bold ones, so the comb reads as
+    // bristle grain instead of a rake. Three octaves at lacunarityX 1
+    // subdivide 20 strands into 40 and 80 without bending them, and the
+    // finest lands sub-pixel on canvas, fraying the strand edges. The gap
+    // FRACTION is held near the coarse version's, so the pitch halves
+    // without the mark filling in.
+    seed: 606017, aspect: 0.5, streakCells: 20, streakCellsX: 2,
+    streakOctaves: 3, streakDepth: 1, streakLo: 0.47, streakHi: 0.63,
     toothDepth: 0.2, edgeRag: 0.35, edgeSoft: 0.72, power: 3,
   });
 

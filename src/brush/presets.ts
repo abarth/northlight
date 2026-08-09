@@ -490,16 +490,20 @@ export const BRUSH_GROUPS: BrushGroup[] = [
        *    and is the only one of the three that leaves the tip and the mask
        *    untouched.
        *
-       * Measured coverage runs from ~55% (Fan Bristle) to ~5% (Dust Motes);
+       * Because the fan tips' gaps are exact zeros, flow cannot fill them:
+       * coverage and density are independent for those brushes, so flow is
+       * free to set how loaded the hairs look without closing the comb.
+       *
+       * Measured coverage runs from ~89% (Scumble Dust) to ~13% (Dust Motes);
        * tools/measureCoverage.mjs reports it.
        */
       p('fan-bristle', 'Fan Bristle', fresco({
-        tip: 'fan-comb', size: 190, spacing: 0.05, flow: 0.26, jitter: 0,
+        tip: 'fan-comb', size: 190, spacing: 0.05, flow: 0.34, jitter: 0,
         dual: 'sponge-fractal', dualSize: 220, dualSpacing: 0.32, dualScatter: 1.05,
         tooth: 0.1,
       })),
       p('hair-fringe', 'Hair Fringe', fresco({
-        tip: 'fan-comb', size: 130, spacing: 0.05, flow: 0.16, jitter: 0,
+        tip: 'fan-comb', size: 130, spacing: 0.05, flow: 0.22, jitter: 0,
         dual: 'crackle-web', dualSize: 160, dualSpacing: 0.34, dualScatter: 1.12,
       })),
       p('scumble-dust', 'Scumble Dust', fresco({
@@ -509,7 +513,7 @@ export const BRUSH_GROUPS: BrushGroup[] = [
         tooth: 0.12,
       })),
       p('dry-fan-scrub', 'Dry Fan Scrub', fresco({
-        tip: 'fan-comb', size: 210, spacing: 0.06, flow: 0.18, jitter: 0,
+        tip: 'fan-comb', size: 210, spacing: 0.06, flow: 0.25, jitter: 0,
         dual: 'sponge-fractal', dualSize: 240, dualSpacing: 0.5, dualScatter: 1.6,
         tooth: 0.1,
       })),
