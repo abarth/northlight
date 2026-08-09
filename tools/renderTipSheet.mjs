@@ -72,6 +72,7 @@ const tiles = await page.evaluate((CELL) => {
     'sponge-fractal', 'granite-grit', 'crackle-web',
     'fiber-drag', 'mist-billow', 'stipple-flecks',
     'wisp-filament', 'dust-motes',
+    'lichen-crust', 'bone-pore', 'moss-tuft', 'bark-grain', 'rust-bloom',
     'bristle-chisel', 'bristle-round', 'blade-flat', 'plume-soft', 'fan-comb',
   ];
   const out = [];

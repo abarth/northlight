@@ -538,6 +538,60 @@ export const BRUSH_GROUPS: BrushGroup[] = [
       })),
     ],
   },
+  {
+    id: 'scumble',
+    name: 'Organic Scumble',
+    presets: [
+      /**
+       * Scumble Dust's recipe, run over a range of organic textures.
+       *
+       * The family character comes from primary Scattering: throwing whole
+       * dabs off the spine gives a billowing, cloud-shaped silhouette instead
+       * of a defined band, and a low K keeps it translucent enough to build
+       * up in passes. What then distinguishes each brush is the texture in
+       * the dual slot.
+       *
+       * Most of these use cellular (Worley) tips. Fractal noise has smooth
+       * rounded level sets, so everything built from it reads as cloud or
+       * sponge; the level sets of cellular noise are cell walls, which is
+       * what lichen, bone porosity and moss tufts actually look like.
+       */
+      p('lichen-scumble', 'Lichen Scumble', fresco({
+        tip: 'bristle-round', size: 160, spacing: 0.15, flow: 0.3,
+        scatter: 1, scatterCount: 2,
+        dual: 'lichen-crust', dualSize: 200, dualSpacing: 0.28, dualScatter: 0.92,
+        tooth: 0.12,
+      })),
+      p('bone-dust', 'Bone Dust', fresco({
+        tip: 'plume-soft', size: 180, spacing: 0.17, flow: 0.26,
+        scatter: 1.25, scatterCount: 2,
+        dual: 'bone-pore', dualSize: 220, dualSpacing: 0.3, dualScatter: 0.98,
+        tooth: 0.1,
+      })),
+      p('moss-stipple', 'Moss Stipple', fresco({
+        tip: 'bristle-round', size: 140, spacing: 0.14, flow: 0.34,
+        scatter: 0.85, scatterCount: 3,
+        dual: 'moss-tuft', dualSize: 180, dualSpacing: 0.26, dualScatter: 0.85,
+      })),
+      p('rust-bloom', 'Rust Bloom', fresco({
+        tip: 'bristle-round', size: 170, spacing: 0.16, flow: 0.28,
+        scatter: 1.1, scatterCount: 2,
+        dual: 'rust-bloom', dualSize: 210, dualSpacing: 0.3, dualScatter: 0.98,
+        tooth: 0.14,
+      })),
+      p('bark-scrub', 'Bark Scrub', fresco({
+        tip: 'bristle-chisel', size: 190, spacing: 0.09, flow: 0.3,
+        scatter: 0.55, scatterCount: 2,
+        dual: 'bark-grain', dualSize: 220, dualSpacing: 0.26, dualScatter: 0.85,
+        tooth: 0.12,
+      })),
+      p('ember-scumble', 'Ember Scumble', fresco({
+        tip: 'bristle-round', size: 120, spacing: 0.2, flow: 0.4,
+        scatter: 1.5, scatterCount: 3,
+        dual: 'dust-motes', dualSize: 170, dualSpacing: 0.4, dualScatter: 1.3,
+      })),
+    ],
+  },
 ];
 
 /** Groups added at runtime (e.g. imported from .abr files). */

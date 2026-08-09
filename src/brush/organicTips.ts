@@ -166,6 +166,80 @@ function evalRidged(s: Stack, u: number, v: number): number {
   return sum / s.total;
 }
 
+/**
+ * Cellular (Worley) noise: one jittered feature point per grid cell, with the
+ * distances to the nearest two returned.
+ *
+ * This is a different shape of randomness from the fbm above, and the reason
+ * the organic tips needed it. Level sets of fractal noise are smooth rounded
+ * blobs, so everything built from it reads as cloud or sponge. Worley's level
+ * sets are cell walls, which is what lichen thalli, bone porosity, pebbles
+ * and moss tufts actually look like:
+ *
+ *   f1 alone    -> round pores or tufts centred on the points
+ *   f2 - f1     -> the walls between cells, for crusts and mosaics
+ *
+ * Positions use unwrapped cell coordinates while the jitter is looked up
+ * wrapped, so the field is periodic without distances folding at the seam.
+ */
+interface Worley {
+  cells: number;
+  jitter: Float32Array;
+  /** one random value per cell, for per-cell shading */
+  value: Float32Array;
+}
+
+function makeWorley(rng: () => number, cells: number): Worley {
+  const jitter = new Float32Array(cells * cells * 2);
+  const value = new Float32Array(cells * cells);
+  for (let i = 0; i < cells * cells; i++) {
+    jitter[i * 2] = rng();
+    jitter[i * 2 + 1] = rng();
+    value[i] = rng();
+  }
+  return { cells, jitter, value };
+}
+
+interface WorleyHit {
+  f1: number;
+  f2: number;
+  /** value of the nearest cell */
+  v: number;
+}
+
+function worley(w: Worley, u: number, v: number): WorleyHit {
+  const n = w.cells;
+  const px = u * n;
+  const py = v * n;
+  const ix = Math.floor(px);
+  const iy = Math.floor(py);
+  let f1 = 1e9;
+  let f2 = 1e9;
+  let nearest = 0;
+  for (let dj = -1; dj <= 1; dj++) {
+    for (let di = -1; di <= 1; di++) {
+      const cx = ix + di;
+      const cy = iy + dj;
+      let wx = cx % n;
+      let wy = cy % n;
+      if (wx < 0) wx += n;
+      if (wy < 0) wy += n;
+      const k = wy * n + wx;
+      const fx = cx + w.jitter[k * 2];
+      const fy = cy + w.jitter[k * 2 + 1];
+      const d = Math.sqrt((px - fx) * (px - fx) + (py - fy) * (py - fy));
+      if (d < f1) {
+        f2 = f1;
+        f1 = d;
+        nearest = k;
+      } else if (d < f2) {
+        f2 = d;
+      }
+    }
+  }
+  return { f1, f2, v: w.value[nearest] };
+}
+
 function renderStack(size: number, s: Stack): Float32Array {
   const out = new Float32Array(size * size);
   for (let y = 0; y < size; y++) {
@@ -518,6 +592,168 @@ export function makeStippleFlecks(size = TEXTURE_TIP_SIZE): GrayMap {
   return toMap(size, out);
 }
 
+/**
+ * Crustose lichen: cells pressed together with dark crenulated seams between
+ * them. The seam comes from f2 - f1 (small only on a cell wall); warping the
+ * lookup makes the walls wander the way a real thallus does, and a per-cell
+ * value shades each lobe slightly differently so no two read alike.
+ */
+export function makeLichenCrust(size = TEXTURE_TIP_SIZE): GrayMap {
+  const seed = 771001;
+  const wx = lowResField(96, seed + 3, 3, 3, size);
+  const wy = lowResField(96, seed + 7, 3, 3, size);
+  const rng = mulberry32(seed + 29);
+  const cells = makeWorley(rng, 11);
+  const grain = makeStack(rng, 44, 3, { persistence: 0.5, lacunarity: 2.13, rotate: true });
+  const vig = raggedVignette(size, seed + 51, 0.7);
+
+  const out = new Float32Array(size * size);
+  for (let y = 0; y < size; y++) {
+    const v0 = y / size;
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const u = x / size + 0.11 * (wx[i] - 0.5);
+      const v = v0 + 0.11 * (wy[i] - 0.5);
+      const c = worley(cells, u, v);
+      const wall = smoothstep(0.03, 0.19, c.f2 - c.f1);
+      const lobe = 0.55 + 0.45 * c.v;
+      const g = smoothstep(0.3, 0.78, evalStack(grain, u, v));
+      out[i] = wall * lobe * (0.45 + 0.55 * g) * vig[i];
+    }
+  }
+  return toMap(size, out);
+}
+
+/**
+ * Porous bone: a closed ground drilled by round pores at the feature points,
+ * their radii varying per cell so the porosity is graded rather than a
+ * regular perforation.
+ */
+export function makeBonePore(size = TEXTURE_TIP_SIZE): GrayMap {
+  const seed = 445009;
+  const wx = lowResField(96, seed + 5, 3, 3, size);
+  const wy = lowResField(96, seed + 11, 3, 3, size);
+  const rng = mulberry32(seed + 37);
+  const cells = makeWorley(rng, 15);
+  const grain = makeStack(rng, 52, 3, { persistence: 0.5, lacunarity: 2.17, rotate: true });
+  const vig = raggedVignette(size, seed + 61, 0.72);
+
+  const out = new Float32Array(size * size);
+  for (let y = 0; y < size; y++) {
+    const v0 = y / size;
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const u = x / size + 0.07 * (wx[i] - 0.5);
+      const v = v0 + 0.07 * (wy[i] - 0.5);
+      const c = worley(cells, u, v);
+      // radius scales with the cell's own value: a few big voids, many small
+      const r = 0.12 + 0.42 * c.v * c.v;
+      const pore = smoothstep(r * 0.45, r, c.f1);
+      const g = smoothstep(0.28, 0.8, evalStack(grain, u, v));
+      out[i] = pore * (0.55 + 0.45 * g) * vig[i];
+    }
+  }
+  return toMap(size, out);
+}
+
+/**
+ * Moss: dense fine tufts, clustered rather than evenly sown. A high-frequency
+ * cellular field supplies the tufts and a slow fbm decides where the turf is
+ * thick, so the mark has bald patches.
+ */
+export function makeMossTuft(size = TEXTURE_TIP_SIZE): GrayMap {
+  const seed = 909311;
+  const patch = lowResField(96, seed + 13, 3, 3, size);
+  const rng = mulberry32(seed + 41);
+  const cells = makeWorley(rng, 34);
+  const fuzz = makeStack(rng, 80, 2, { persistence: 0.5, lacunarity: 2.19, rotate: true });
+  const vig = raggedVignette(size, seed + 71, 0.66, 0.3);
+
+  const out = new Float32Array(size * size);
+  for (let y = 0; y < size; y++) {
+    const v0 = y / size;
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const u = x / size;
+      const c = worley(cells, u, v0);
+      const tuft = smoothstep(0.62, 0.16, c.f1) * (0.5 + 0.5 * c.v);
+      const thick = smoothstep(0.34, 0.66, patch[i]);
+      const f = smoothstep(0.25, 0.8, evalStack(fuzz, u, v0));
+      out[i] = tuft * thick * (0.5 + 0.5 * f) * vig[i];
+    }
+  }
+  return toMap(size, out);
+}
+
+/**
+ * Bark: long grain running down the mark, split by deep fissures. The ridged
+ * field is pinned in u (lacunarityX 1) so the fissures run straight along the
+ * grain instead of wandering across it.
+ */
+export function makeBarkGrain(size = TEXTURE_TIP_SIZE): GrayMap {
+  const seed = 313007;
+  const wy = lowResField(96, seed + 9, 3, 3, size);
+  const rng = mulberry32(seed + 23);
+  // 2 cells across at every octave: bark's fissures run down the grain, and
+  // any real u-variation turns them into undulating marble instead
+  const grain = makeStack(rng, 2, 3, { cellsY: 22, persistence: 0.6, lacunarityX: 1 });
+  const fissure = makeStack(rng, 2, 3, { cellsY: 8, persistence: 0.45, lacunarityX: 1 });
+  const knots = makeWorley(rng, 6);
+  const vig = raggedVignette(size, seed + 47, 0.7);
+
+  const out = new Float32Array(size * size);
+  for (let y = 0; y < size; y++) {
+    const v0 = y / size;
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const u = x / size;
+      const v = v0 + 0.02 * (wy[i] - 0.5);
+      // Bark is read by its splits more than its grain, so the fissures do
+      // most of the work: a wide window cuts them deep and irregular, and the
+      // grain only shades the ribs between them.
+      const g = smoothstep(0.4, 0.62, evalStack(grain, u, v));
+      const split = 1 - 0.97 * smoothstep(0.46, 0.78, evalRidged(fissure, u, v));
+      const k = worley(knots, u, v);
+      const knot = 0.75 + 0.25 * smoothstep(0.12, 0.5, k.f1);
+      out[i] = (0.18 + 0.82 * g) * split * knot * vig[i];
+    }
+  }
+  return toMap(size, out);
+}
+
+/**
+ * Rust: corroded patches eating into a sounder ground, the pitting confined
+ * to where the bloom has taken hold rather than spread evenly.
+ */
+export function makeRustBloom(size = TEXTURE_TIP_SIZE): GrayMap {
+  const seed = 660221;
+  const wx = lowResField(96, seed + 3, 3, 3, size);
+  const wy = lowResField(96, seed + 17, 3, 3, size);
+  const bloom = lowResField(96, seed + 31, 4, 4, size);
+  const rng = mulberry32(seed + 59);
+  const pits = makeWorley(rng, 26);
+  const tooth = makeStack(rng, 40, 3, { persistence: 0.5, lacunarity: 2.13, rotate: true });
+  const vig = raggedVignette(size, seed + 83, 0.7);
+
+  const out = new Float32Array(size * size);
+  for (let y = 0; y < size; y++) {
+    const v0 = y / size;
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const u = x / size + 0.13 * (wx[i] - 0.5);
+      const v = v0 + 0.13 * (wy[i] - 0.5);
+      const c = worley(pits, u, v);
+      const eaten = smoothstep(0.1, 0.42, c.f1);
+      // how far the corrosion has spread; outside it the ground stays sound
+      const spread = smoothstep(0.38, 0.66, bloom[i]);
+      const t = smoothstep(0.26, 0.78, evalStack(tooth, u, v));
+      const ground = 0.5 + 0.5 * t;
+      out[i] = ground * (1 - spread * (1 - eaten)) * vig[i];
+    }
+  }
+  return toMap(size, out);
+}
+
 // ---------------------------------------------------------------------------
 // primary tips (the mark's shape and edge)
 //
@@ -721,6 +957,11 @@ export const ORGANIC_TIPS: Record<string, () => GrayMap> = {
   'stipple-flecks': makeStippleFlecks,
   'wisp-filament': makeWispFilament,
   'dust-motes': makeDustMotes,
+  'lichen-crust': makeLichenCrust,
+  'bone-pore': makeBonePore,
+  'moss-tuft': makeMossTuft,
+  'bark-grain': makeBarkGrain,
+  'rust-bloom': makeRustBloom,
   // primary tips, for the Brush Tip Shape slot
   'bristle-chisel': makeBristleChisel,
   'bristle-round': makeBristleRound,
