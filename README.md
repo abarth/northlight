@@ -147,6 +147,18 @@ construction, and each brush leans on one of three mechanisms:
 - **Scattering on the primary** — throws whole dabs off the spine, and is the
   only one of the three that leaves both the tip and the mask untouched.
 
+Scatter is bounded by continuity. The mask gates the primary
+multiplicatively, so anywhere its train misses the spine the stroke paints
+nothing — a hard break rather than a thin patch — and a stamp can only miss
+if it is thrown further than the tip's ink reaches. Any brush meant to read
+as continuous therefore keeps `scatter * size / 2 <= reff`, where `reff` is
+the radius holding the tip's ink; that sits well inside `size/2`, because the
+ragged vignette closing off each texture tip also pulls its ink in. So rho is
+raised by lowering spacing, never by pushing scatter past that bound.
+`tools/dualTrainAudit.mjs` reports the margin, and `measureCoverage.mjs`
+checks the resulting strokes for dropouts over several seeds — breaks are a
+chance event, so a single stroke can easily look clean.
+
 Measured coverage runs from ~89% down to 13% (Dust Motes);
 `tools/measureCoverage.mjs` reports coverage, density and total ink for a
 group, painting onto a transparent layer so the composite's alpha *is* the
@@ -421,7 +433,9 @@ brushes/          shipped .abr brush packs
 tools/            dev utilities, all driving the real engine headlessly:
   renderBrushSheet.mjs  paint labelled test strokes for a preset or group
   renderTipSheet.mjs    contact sheet of the generated tip bitmaps
-  measureCoverage.mjs   coverage / density / ink per brush
+  measureCoverage.mjs   coverage / density / ink / dropout per brush
+  dualTrainAudit.mjs    dual-mask train geometry and break risk
+  diagVariants.mjs      re-render one preset with settings knocked out
   exportAbr.mjs         write groups to .abr and verify the round trip
 ```
 

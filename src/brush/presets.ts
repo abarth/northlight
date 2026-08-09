@@ -40,7 +40,21 @@ const p = (id: string, name: string, settings: BrushSettings): BrushPreset => ({
  * leaves the along-stroke coordinate untouched and does nothing at all for
  * repetition. The tips supply the other factor, a broadband T with no
  * characteristic blob size (see organicTips.ts).
- */
+ *
+ * CONTINUITY bounds how far that scatter may go. The mask gates the primary
+ * multiplicatively, so anywhere the train misses the spine the stroke paints
+ * nothing — a hard break, not a thin patch. A stamp can only miss if it is
+ * thrown further than the tip's ink reaches, so any brush meant to read as
+ * continuous keeps
+ *
+ *     scatter * size / 2  <=  reff
+ *
+ * where reff is the radius holding the tip's ink. That is well inside size/2,
+ * because the ragged vignette closing off each texture tip also pulls its ink
+ * in. Raising rho is therefore done by lowering spacing, not by raising
+ * scatter past that bound. tools/dualTrainAudit.mjs reports the margin, and
+ * the deliberately sparse Wisp & Scumble brushes are the ones allowed to
+ * exceed it. */
 interface FrescoSpec {
   /** primary tip: sets the shape of the mark */
   tip: TipShape;
@@ -451,11 +465,11 @@ export const BRUSH_GROUPS: BrushGroup[] = [
       })),
       p('ash-drift', 'Ash Drift', fresco({
         tip: 'plume-soft', size: 210, spacing: 0.1, flow: 0.2,
-        dual: 'fiber-drag', dualSize: 250, dualSpacing: 0.3, dualScatter: 0.95,
+        dual: 'fiber-drag', dualSize: 250, dualSpacing: 0.25, dualScatter: 0.81,
       })),
       p('fresco-veil', 'Fresco Veil', fresco({
         tip: 'plume-soft', size: 240, spacing: 0.14, flow: 0.15,
-        dual: 'mist-billow', dualSize: 300, dualSpacing: 0.3, dualScatter: 1,
+        dual: 'mist-billow', dualSize: 300, dualSpacing: 0.23, dualScatter: 0.74,
         opacity: 0.9,
       })),
       // Soft by low K rather than by a feathered tip: the edge stays
@@ -499,12 +513,12 @@ export const BRUSH_GROUPS: BrushGroup[] = [
        */
       p('fan-bristle', 'Fan Bristle', fresco({
         tip: 'fan-comb', size: 190, spacing: 0.05, flow: 0.34, jitter: 0,
-        dual: 'sponge-fractal', dualSize: 220, dualSpacing: 0.32, dualScatter: 1.05,
+        dual: 'sponge-fractal', dualSize: 220, dualSpacing: 0.25, dualScatter: 0.82,
         tooth: 0.1,
       })),
       p('hair-fringe', 'Hair Fringe', fresco({
         tip: 'fan-comb', size: 130, spacing: 0.05, flow: 0.22, jitter: 0,
-        dual: 'crackle-web', dualSize: 160, dualSpacing: 0.34, dualScatter: 1.12,
+        dual: 'crackle-web', dualSize: 160, dualSpacing: 0.26, dualScatter: 0.84,
       })),
       p('scumble-dust', 'Scumble Dust', fresco({
         tip: 'bristle-round', size: 150, spacing: 0.16, flow: 0.28,
@@ -565,7 +579,7 @@ export const BRUSH_GROUPS: BrushGroup[] = [
       })),
       p('bone-dust', 'Bone Dust', fresco({
         tip: 'plume-soft', size: 180, spacing: 0.08, flow: 0.18,
-        dual: 'bone-pore', dualSize: 220, dualSpacing: 0.3, dualScatter: 0.98,
+        dual: 'bone-pore', dualSize: 220, dualSpacing: 0.24, dualScatter: 0.77,
         tooth: 0.1,
       })),
       p('moss-stipple', 'Moss Stipple', fresco({
@@ -574,7 +588,7 @@ export const BRUSH_GROUPS: BrushGroup[] = [
       })),
       p('rust-bloom', 'Rust Bloom', fresco({
         tip: 'bristle-round', size: 175, spacing: 0.075, flow: 0.19,
-        dual: 'rust-bloom', dualSize: 210, dualSpacing: 0.3, dualScatter: 0.98,
+        dual: 'rust-bloom', dualSize: 210, dualSpacing: 0.25, dualScatter: 0.8,
         tooth: 0.14,
       })),
       p('bark-scrub', 'Bark Scrub', fresco({
