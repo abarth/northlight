@@ -40,10 +40,13 @@ export type TipShape =
   | 'fiber-drag'
   | 'mist-billow'
   | 'stipple-flecks'
+  | 'wisp-filament'
+  | 'dust-motes'
   | 'bristle-chisel'
   | 'bristle-round'
   | 'blade-flat'
   | 'plume-soft'
+  | 'fan-comb'
   | (string & {});
 
 /**
@@ -278,12 +281,15 @@ export const TIP_SHAPES: { id: TipShape; label: string }[] = [
   { id: 'bristle-round', label: 'Bristle Round' },
   { id: 'blade-flat', label: 'Flat Blade' },
   { id: 'plume-soft', label: 'Soft Plume' },
+  { id: 'fan-comb', label: 'Fan Comb' },
   { id: 'sponge-fractal', label: 'Fractal Sponge' },
   { id: 'granite-grit', label: 'Granite Grit' },
   { id: 'crackle-web', label: 'Crackle Web' },
   { id: 'fiber-drag', label: 'Fibre Drag' },
   { id: 'mist-billow', label: 'Mist Billow' },
   { id: 'stipple-flecks', label: 'Salt Flecks' },
+  { id: 'wisp-filament', label: 'Wisp Filament' },
+  { id: 'dust-motes', label: 'Dust Motes' },
 ];
 
 export const PATTERNS: { id: PatternId; label: string }[] = [

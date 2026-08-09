@@ -1199,6 +1199,53 @@ const TEST = `
       NL.store.getState().applyPreset('soft-round', 'brush');
     }
 
+  // ---- 21b-2. Direction control: no horizontal stub at pen-down ----
+  // Direction is only known once the pen has moved, so the pen-down dab used
+  // to be laid at the default (rightwards) orientation. On a flat tip that
+  // shows as a horizontal stub at the start of every curved stroke.
+  {
+    const st = makeBrush({
+      tip: { size: 44, hardness: 1, roundness: 0.14, spacing: 0.1 },
+      shape: { enabled: true, angleControl: { source: 'direction', fadeSteps: 25 } },
+      smoothing: 0,
+    });
+    eng.beginStroke(NL.brush.engineStrokeParams(st, 'paint'));
+    const s = new NL.StrokeSession(eng, st, { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 } });
+    const samp = (x, y) => ({ x, y, pressure: 1, tiltX: 0, tiltY: 0, twist: 0 });
+    // straight down: a correctly oriented first dab is tall and narrow, a
+    // stub-oriented one is wide and flat
+    s.down(samp(200, 90));
+    const pts = [];
+    for (let y = 96; y <= 210; y += 6) pts.push(samp(200, y));
+    s.move(pts);
+    s.up();
+    eng.endStroke('bg');
+    let d = await read();
+    const side = px(d, 218, 90)[0];
+    const along = px(d, 200, 110)[0];
+    assert('direction control: pen-down dab follows the stroke, no horizontal stub',
+      side >= 240 && along <= 40, 'side=' + side + ' along=' + along);
+    NL.store.getState().undo?.();
+    eng.fillLayer('bg', [1, 1, 1, 1]);
+  }
+
+  // a tap that never moves must still deposit its dab
+  {
+    const st = makeBrush({
+      tip: { size: 30, hardness: 1, spacing: 0.1 },
+      shape: { enabled: true, angleControl: { source: 'direction', fadeSteps: 25 } },
+    });
+    eng.beginStroke(NL.brush.engineStrokeParams(st, 'paint'));
+    const s = new NL.StrokeSession(eng, st, { fg: { h: 0, s: 0, v: 0 }, bg: { h: 0, s: 0, v: 1 } });
+    s.down({ x: 120, y: 200, pressure: 1, tiltX: 0, tiltY: 0, twist: 0 });
+    s.up();
+    eng.endStroke('bg');
+    const d = await read();
+    assert('direction control: a tap with no movement still paints',
+      px(d, 120, 200)[0] <= 40, String(px(d, 120, 200)[0]));
+    eng.fillLayer('bg', [1, 1, 1, 1]);
+  }
+
   // ---- 21c. ABR export ----
   // writeAbr is the inverse of the parser above, so the strongest cheap check
   // is a round trip: serialize real presets, parse the bytes back, and diff.
@@ -1292,17 +1339,37 @@ const TEST = `
     assert('abr export: flat tip keeps its aspect through the crop',
       bw > bh * 2, bw + 'x' + bh);
 
-    // and the pixels themselves must survive PackBits intact
+    // The ink itself must survive PackBits intact. Tips are written cropped
+    // to their ink and padded back to a square on read, so the round-tripped
+    // map is the size of the ink box, not of the source square — compare the
+    // ink where the importer centres it.
     const srcTip = NL.brush.patterns.getTip('sponge-fractal');
     const outTip = back.tips.get(got.dual.shape);
-    let same = srcTip.size === outTip.size;
-    if (same) {
-      for (let i = 0; i < srcTip.data.length; i++) {
-        if (srcTip.data[i] !== outTip.data[i]) { same = false; break; }
+    let iminX = srcTip.size, imaxX = -1, iminY = srcTip.size, imaxY = -1;
+    for (let y = 0; y < srcTip.size; y++) {
+      for (let x = 0; x < srcTip.size; x++) {
+        if (srcTip.data[y * srcTip.size + x] > 0) {
+          if (x < iminX) iminX = x; if (x > imaxX) imaxX = x;
+          if (y < iminY) iminY = y; if (y > imaxY) imaxY = y;
+        }
       }
     }
-    assert('abr export: tip bitmap survives RLE byte-for-byte',
-      same, srcTip.size + ' vs ' + outTip.size);
+    const iw = imaxX - iminX + 1, ih = imaxY - iminY + 1;
+    const pad = Math.max(iw, ih);
+    const ox = Math.floor((pad - iw) / 2), oy = Math.floor((pad - ih) / 2);
+    let same = outTip.size === pad;
+    let firstBad = '';
+    if (same) {
+      for (let y = 0; y < ih && same; y++) {
+        for (let x = 0; x < iw; x++) {
+          const a = srcTip.data[(iminY + y) * srcTip.size + iminX + x];
+          const b = outTip.data[(y + oy) * pad + (x + ox)];
+          if (a !== b) { same = false; firstBad = '@' + x + ',' + y + ' ' + a + '!=' + b; break; }
+        }
+      }
+    }
+    assert('abr export: tip ink survives RLE byte-for-byte',
+      same, 'src ink ' + iw + 'x' + ih + ' -> ' + pad + ', got ' + outTip.size + ' ' + firstBad);
     void bladeId;
   }
 

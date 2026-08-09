@@ -207,8 +207,14 @@ function raggedVignette(size: number, seed: number, inner = 0.72, rag = 0.26): F
     for (let x = 0; x < size; x++) {
       const i = y * size + x;
       const dx = (x - c) / r;
-      const d = Math.sqrt(dx * dx + dy * dy) * (1 + rag * (edge[i] - 0.5) * 2);
-      out[i] = smoothstep(1, inner, d);
+      const raw = Math.sqrt(dx * dx + dy * dy);
+      const d = raw * (1 + rag * (edge[i] - 0.5) * 2);
+      // The ragged term can pull the falloff inward by as much as (1 - rag),
+      // which leaves ink alive at the bitmap's own border — and that border
+      // then stamps into the mask as a hard rectangle wherever scatter
+      // separates the dabs. The raw-radius guard forces a true zero by the
+      // edge regardless of how the raggedness lands.
+      out[i] = smoothstep(1, inner, d) * smoothstep(1, 0.9, raw);
     }
   }
   return out;
@@ -375,6 +381,88 @@ export function makeFiberDrag(size = TEXTURE_TIP_SIZE): GrayMap {
 }
 
 /**
+ * Thin filaments on open ground: only the sharpest crests of a ridged field
+ * survive the threshold, so what is left is strands rather than blobs, and a
+ * patch field breaks them into clumps. Mean coverage is very low by design —
+ * this is the tip that makes a mark read as wispy rather than merely pale.
+ */
+export function makeWispFilament(size = TEXTURE_TIP_SIZE): GrayMap {
+  const seed = 24601;
+  const wx = lowResField(96, seed + 7, 3, 3, size);
+  const wy = lowResField(96, seed + 13, 3, 3, size);
+  const patch = lowResField(96, seed + 19, 3, 3, size);
+
+  const rng = mulberry32(seed + 53);
+  const veins = makeStack(rng, 6, 5, { persistence: 0.54, lacunarity: 2.09, rotate: true });
+  const fine = makeStack(rng, 34, 3, { persistence: 0.5, lacunarity: 2.19, rotate: true });
+  const vig = raggedVignette(size, seed + 71, 0.6, 0.3);
+
+  const out = new Float32Array(size * size);
+  for (let y = 0; y < size; y++) {
+    const v0 = y / size;
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const u = x / size + 0.24 * (wx[i] - 0.5);
+      const v = v0 + 0.24 * (wy[i] - 0.5);
+      // A window near the top of the ridged field's actual range keeps only
+      // the crest lines. Averaging 1-|2n-1| over octaves centres the field
+      // near 0.5 and it rarely clears 0.8, so the window sits just above the
+      // mean rather than near 1 — otherwise nothing survives at all.
+      const strand = smoothstep(0.58, 0.78, evalRidged(veins, u, v));
+      const grain = smoothstep(0.3, 0.75, evalStack(fine, u, v));
+      // strands only appear where the patch field is open, so the tip has
+      // large genuinely empty regions rather than an even haze
+      const open = smoothstep(0.36, 0.6, patch[i]);
+      out[i] = strand * (0.45 + 0.55 * grain) * open * vig[i];
+    }
+  }
+  return toMap(size, out);
+}
+
+/**
+ * Scattered motes on open ground: the inverse of the salt tip, so the ground
+ * is bare and only the specks carry ink. Radii are heavy-tailed, giving a few
+ * large motes among many small ones.
+ */
+export function makeDustMotes(size = TEXTURE_TIP_SIZE): GrayMap {
+  const seed = 13372;
+  const rng = mulberry32(seed);
+  const haze = makeStack(rng, 16, 3, { persistence: 0.5, lacunarity: 2.13, rotate: true });
+  const vig = raggedVignette(size, seed + 29, 0.55, 0.3);
+
+  const out = new Float32Array(size * size);
+  const motes = Math.round((size * size) / 620);
+  for (let k = 0; k < motes; k++) {
+    const cx = rng() * size;
+    const cy = rng() * size;
+    const r = 1.5 + rng() * rng() * rng() * size * 0.045;
+    const a = 0.4 + rng() * 0.6;
+    const ri = Math.ceil(r + 2);
+    for (let dy = -ri; dy <= ri; dy++) {
+      const y = Math.round(cy + dy);
+      if (y < 0 || y >= size) continue;
+      for (let dx = -ri; dx <= ri; dx++) {
+        const x = Math.round(cx + dx);
+        if (x < 0 || x >= size) continue;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d > r + 1.5) continue;
+        const i = y * size + x;
+        out[i] = Math.max(out[i], a * smoothstep(r + 1.5, r * 0.5, d));
+      }
+    }
+  }
+  // a faint haze between the motes keeps the mark from looking like confetti
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      out[i] = Math.min(1, out[i] + 0.16 * smoothstep(0.55, 0.9, evalStack(haze, x / size, y / size)));
+      out[i] *= vig[i];
+    }
+  }
+  return toMap(size, out);
+}
+
+/**
  * Salt flecks: a mostly closed field pitted with discrete rounded voids, like
  * salt thrown into wet pigment. The voids are placed by rejection against a
  * noise field rather than drawn on a grid, so they never line up.
@@ -437,7 +525,19 @@ interface ChiselOpts {
   aspect?: number;
   /** cells along the mark; higher is finer striation */
   streakCells?: number;
+  /**
+   * Cells ACROSS the mark, i.e. how much the striations wander along the
+   * stroke. This is what decides whether gaps between hairs survive: dabs
+   * step along the stroke, so a wavy band shifts sideways as it goes and
+   * twenty overlapping copies fill every gap. Near-1 keeps the hairs
+   * translation-invariant along the drag, the way a real fan brush combs.
+   */
+  streakCellsX?: number;
+  streakOctaves?: number;
   streakDepth?: number;
+  /** striation threshold window; a narrow, high window separates the hairs */
+  streakLo?: number;
+  streakHi?: number;
   toothDepth?: number;
   edgeRag?: number;
   /** where the falloff starts: near 1 is a crisp edge, lower is feathered */
@@ -454,7 +554,8 @@ interface ChiselOpts {
 function chiselField(o: ChiselOpts = {}): GrayMap {
   const {
     size = PRIMARY_TIP_SIZE, seed = 7717, aspect = 472 / 768, streakCells = 40,
-    streakDepth = 0.55, toothDepth = 0.28, edgeRag = 0.34, edgeSoft = 0.7,
+    streakCellsX = 5, streakOctaves = 4, streakDepth = 0.55, streakLo = 0.3,
+    streakHi = 0.7, toothDepth = 0.28, edgeRag = 0.34, edgeSoft = 0.7,
     power = 2.6,
   } = o;
 
@@ -463,7 +564,8 @@ function chiselField(o: ChiselOpts = {}): GrayMap {
   const oy = Math.floor((size - h) / 2);
 
   const rng = mulberry32(seed + 5);
-  const streaks = makeStack(rng, 5, 4, { cellsY: streakCells, persistence: 0.55 });
+  const streaks = makeStack(rng, streakCellsX, streakOctaves,
+    { cellsY: streakCells, persistence: 0.55 });
   // rotated + off-2 lacunarity, or the tooth lattice shows as square blocks
   const tooth = makeStack(rng, 64, 3, { persistence: 0.5, lacunarity: 2.15, rotate: true });
   const edge = lowResField(96, seed + 61, 5, 4, size);
@@ -481,7 +583,7 @@ function chiselField(o: ChiselOpts = {}): GrayMap {
       const r = Math.pow(Math.abs(nx) ** power + Math.abs(ny) ** (power - 0.4), 1 / (power - 0.2));
       const rr = r * (1 + edgeRag * (edge[(y + oy) * size + x] - 0.5) * 2);
       const shape = smoothstep(1, edgeSoft, rr);
-      const st = smoothstep(0.3, 0.7, evalStack(streaks, x / w, v));
+      const st = smoothstep(streakLo, streakHi, evalStack(streaks, x / w, v));
       const th = smoothstep(0.3, 0.7, evalStack(tooth, x / w, v));
       out[(y + oy) * size + x] = shape * (1 - streakDepth * (1 - st)) * (1 - toothDepth * (1 - th));
     }
@@ -507,6 +609,23 @@ export const makeBladeFlat = () =>
   chiselField({
     seed: 131719, aspect: 0.4, streakCells: 54, streakDepth: 0.18,
     toothDepth: 0.12, edgeRag: 0.08, edgeSoft: 0.93, power: 4.5,
+  });
+
+/**
+ * Splayed fan: the striations are cut all the way to zero between hairs
+ * (streakDepth 1 over a narrow, high window), so unlike the other primaries
+ * this tip is full of gaps before any dual mask touches it. That is what
+ * drops a mark's coverage rather than just its density.
+ */
+export const makeFanComb = () =>
+  chiselField({
+    // Few, coarse, near-straight hairs. Fine strands (62 cells) landed ~3px
+    // apart at working size and their soft edges overlapped; wavy ones
+    // (streakCellsX 5) drifted sideways between dabs and smeared shut. Two
+    // octaves over 2 cells across keeps them combing straight down the drag.
+    seed: 606017, aspect: 0.5, streakCells: 14, streakCellsX: 2,
+    streakOctaves: 2, streakDepth: 1, streakLo: 0.46, streakHi: 0.64,
+    toothDepth: 0.2, edgeRag: 0.35, edgeSoft: 0.72, power: 3,
   });
 
 /** Feathered plume: a wide, gentle falloff for genuinely soft edges. */
@@ -585,11 +704,14 @@ export const ORGANIC_TIPS: Record<string, () => GrayMap> = {
   'fiber-drag': makeFiberDrag,
   'mist-billow': makeMistBillow,
   'stipple-flecks': makeStippleFlecks,
+  'wisp-filament': makeWispFilament,
+  'dust-motes': makeDustMotes,
   // primary tips, for the Brush Tip Shape slot
   'bristle-chisel': makeBristleChisel,
   'bristle-round': makeBristleRound,
   'blade-flat': makeBladeFlat,
   'plume-soft': makePlumeSoft,
+  'fan-comb': makeFanComb,
 };
 
 export const ORGANIC_PATTERNS: Record<string, () => GrayMap> = {
