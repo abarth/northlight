@@ -3,7 +3,14 @@
  * by parsing the bytes back with the importer and diffing every setting that
  * survives a round trip.
  *
- *   node tools/exportAbr.mjs brushes/Northlight-Oil-Fresco.abr oil
+ *   node tools/exportAbr.mjs brushes/Northlight-Oil-Fresco.abr oil,wisp
+ *   node tools/exportAbr.mjs brushes/probe/x.abr --probes
+ *
+ * --probes writes a ladder of small files that each add one more ABR feature
+ * (computed tip -> sampled tip -> dual -> texture -> everything -> a whole
+ * group). Photoshop reports load failures without saying which brush or which
+ * section it choked on, so loading the ladder in order localises it in one
+ * pass instead of bisecting the whole pack.
  *
  * Env: CHROMIUM_PATH.
  */
@@ -14,6 +21,7 @@ import { spawn } from 'node:child_process';
 
 const OUT = process.argv[2] ?? 'brushes/Northlight-Oil-Fresco.abr';
 const GROUP = process.argv[3] ?? 'oil';  // comma-separated for a multi-group pack
+const PROBES = process.argv.includes('--probes');
 const PORT = process.env.PORT ?? '4190';
 
 const repoRoot = new URL('..', import.meta.url).pathname;
@@ -35,6 +43,80 @@ const page = await browser.newPage();
 page.on('pageerror', (e) => console.error('[page]', e.message));
 await page.goto(APP);
 await page.waitForFunction(() => !!window.__northlight, null, { timeout: 30000 });
+
+if (PROBES) {
+  const out = await page.evaluate(async () => {
+    const NL = window.__northlight;
+    const { makeBrush } = NL.brush.defaults;
+    const off = { source: 'off', fadeSteps: 25 };
+    const press = { source: 'pressure', fadeSteps: 25 };
+    const base = () => makeBrush({ tip: { size: 60, hardness: 1, spacing: 0.1 } });
+
+    const ladder = [];
+    // 1: the simplest file the format allows — computed round tip, every
+    //    optional section off. Isolates the descriptor itself.
+    ladder.push(['1-round-only', [{ name: 'Probe Round', settings: base() }]]);
+    // 2: adds a sampled tip, i.e. the samp section
+    {
+      const s = base();
+      s.tip.shape = 'bristle-chisel';
+      s.tip.size = 180;
+      ladder.push(['2-sampled-tip', [{ name: 'Probe Sampled', settings: s }]]);
+    }
+    // 3: adds shape dynamics
+    {
+      const s = base();
+      s.tip.shape = 'bristle-chisel';
+      s.shape = { ...s.shape, enabled: true, sizeControl: press, angleControl: off };
+      ladder.push(['3-dynamics', [{ name: 'Probe Dynamics', settings: s }]]);
+    }
+    // 4: adds the dual brush (a second sampled tip)
+    {
+      const s = base();
+      s.tip.shape = 'bristle-chisel';
+      s.dual = { ...s.dual, enabled: true, shape: 'sponge-fractal', size: 90,
+                 spacing: 0.25, scatter: 0.8, bothAxes: true, count: 1 };
+      ladder.push(['4-dual', [{ name: 'Probe Dual', settings: s }]]);
+    }
+    // 5: adds a texture pattern, i.e. the patt section
+    {
+      const s = base();
+      s.texture = { ...s.texture, enabled: true, pattern: 'linen', depth: 0.3 };
+      ladder.push(['5-texture', [{ name: 'Probe Texture', settings: s }]]);
+    }
+    // 6: one real preset with everything on
+    {
+      const pr = NL.brush.presets.findPreset('fresco-sponge');
+      ladder.push(['6-one-full', [{ name: pr.name, settings: pr.settings }]]);
+    }
+    // 7: a whole group, to separate "a feature is wrong" from "the pack is
+    //    too large / something later in the list is wrong"
+    {
+      const g = NL.brush.presets.allGroups().find((x) => x.id === 'oil');
+      ladder.push(['7-oil-group', g.presets.map((p) => ({ name: p.name, settings: p.settings }))]);
+    }
+
+    return ladder.map(([label, brushes]) => {
+      const buf = NL.brush.abrWrite.writeAbr(brushes);
+      const bytes = new Uint8Array(buf);
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      }
+      return { label, b64: btoa(bin), size: bytes.length, count: brushes.length };
+    });
+  });
+  const dir = dirname(OUT);
+  mkdirSync(dir, { recursive: true });
+  for (const p of out) {
+    const path = `${dir}/probe-${p.label}.abr`;
+    writeFileSync(path, Buffer.from(p.b64, 'base64'));
+    console.log(`${path}  ${(p.size / 1024).toFixed(0)} KB, ${p.count} brush(es)`);
+  }
+  await browser.close();
+  server.kill();
+  process.exit(0);
+}
 
 const res = await page.evaluate(async (GROUP) => {
   const NL = window.__northlight;
