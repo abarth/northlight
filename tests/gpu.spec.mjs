@@ -1368,6 +1368,37 @@ const TEST = `
         }
       }
     }
+    // Photoshop identifies a brush by its descriptor CLASS, and rejects a
+    // file whose tip is not classed computedBrush/sampledBrush with "unknown
+    // brush type". parseAbr discards class ids, so the round trip above
+    // cannot see them — check the bytes directly.
+    {
+      const raw = new Uint8Array(buf);
+      const countAscii = (str) => {
+        const pat = [];
+        for (const ch of str) pat.push(ch.charCodeAt(0));
+        let n = 0;
+        outer: for (let i = 0; i + pat.length <= raw.length; i++) {
+          for (let k = 0; k < pat.length; k++) if (raw[i + k] !== pat[k]) continue outer;
+          n++;
+        }
+        return n;
+      };
+      // a 4-char key is written as u32 0 + ascii, so the root's 'null' class
+      // has this exact prefix; every other descriptor must be classed
+      const nullClasses = countAscii('\u0000\u0000\u0000\u0000null');
+      const missing = ['brushPreset', 'sampledBrush', 'computedBrush', 'brVr',
+                       'dualBrush', 'brushGroup', 'PbTl', 'Ptrn']
+        .filter((c) => countAscii(c) === 0);
+      // 'brushPreset' appears twice per brush: once as the preset's class
+      // id, once as a key inside toolOptions
+      assert('abr export: descriptors carry Photoshop class ids',
+        missing.length === 0 && nullClasses === 1 &&
+        countAscii('brushPreset') === 6,
+        'missing=' + JSON.stringify(missing) + ' nullClasses=' + nullClasses +
+        ' brushPreset=' + countAscii('brushPreset'));
+    }
+
     assert('abr export: tip ink survives RLE byte-for-byte',
       same, 'src ink ' + iw + 'x' + ih + ' -> ' + pad + ', got ' + outTip.size + ' ' + firstBad);
     void bladeId;

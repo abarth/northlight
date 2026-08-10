@@ -220,8 +220,12 @@ its aspect, and PackBits-compressed), `patt` texture patterns, and the `desc`
 descriptor — embedding every tip and pattern the presets reference so the
 file stands alone. Byte-level details were read back out of a genuine
 Photoshop file rather than guessed: the 301-byte sampled-brush header with
-its doubled bounding rect and two record-relative lengths, and the
-NUL-terminated UTF-16BE strings. The test suite round-trips real presets
+its doubled bounding rect and two record-relative lengths, the NUL-terminated
+UTF-16BE strings, and the class id on every descriptor. That last one is not
+optional — Photoshop identifies a brush by its tip descriptor's class, and
+refuses a file classed anything but `computedBrush`/`sampledBrush` with
+"unknown brush type". Lenient readers (`abr.ts` included) discard class ids,
+so a parser round trip cannot catch a wrong one; the suite checks the bytes. The test suite round-trips real presets
 through `writeAbr` → `parseAbr` and checks the tip bitmaps survive
 byte-for-byte.
 
@@ -436,7 +440,8 @@ tools/            dev utilities, all driving the real engine headlessly:
   measureCoverage.mjs   coverage / density / ink / dropout per brush
   dualTrainAudit.mjs    dual-mask train geometry and break risk
   diagVariants.mjs      re-render one preset with settings knocked out
-  exportAbr.mjs         write groups to .abr and verify the round trip
+  exportAbr.mjs         write groups to .abr, verify the round trip, and
+                        --probes a feature ladder for isolating load failures
 ```
 
 Strokes render as instanced quads (position, radius, alpha, angle, roundness,

@@ -19,7 +19,8 @@ import type { BlendMode } from '../types';
  *   relative to the record length,
  * - descriptor and pattern strings are NUL-terminated UTF-16BE (Photoshop
  *   stores "Nm" of an 18-character name with a count of 19),
- * - pattern channels use the VirtualMemoryArrayList layout, maxChannels 24.
+ * - pattern channels use the VirtualMemoryArrayList layout, maxChannels 24,
+ * - and every descriptor is classed (see writeDesc).
  *
  * Round-tripping through parseAbr is covered in tests/gpu.spec.mjs.
  */
@@ -146,9 +147,19 @@ function packBits(row: Uint8Array): Uint8Array {
 type Emit = (w: ByteWriter) => void;
 type Entry = [string, Emit];
 
-function writeDesc(w: ByteWriter, items: Entry[]): void {
+/**
+ * Every descriptor carries a class id naming what it is, and Photoshop needs
+ * them: it rejects a file whose tip descriptor is not classed
+ * `computedBrush` or `sampledBrush` with "unknown brush type" — the class IS
+ * the brush type. A lenient reader (abr.ts included) discards class ids
+ * entirely, so a round trip through the parser cannot catch a wrong one.
+ * The ids used here were read out of a genuine Photoshop file: brushPreset
+ * per brush, computedBrush/sampledBrush per tip, brVr on every dynamics
+ * object, dualBrush, brushGroup, Ptrn on the texture, PbTl on toolOptions.
+ */
+function writeDesc(w: ByteWriter, items: Entry[], classId = 'null'): void {
   w.unicode('');
-  w.key('null');
+  w.key(classId);
   w.u32(items.length);
   for (const [k, fn] of items) {
     w.key(k);
@@ -162,7 +173,10 @@ const T = {
   bool: (v: boolean): Emit => (w) => { w.ascii('bool').u8(v ? 1 : 0); },
   long: (n: number): Emit => (w) => { w.ascii('long').i32(Math.round(n)); },
   enm: (t: string, v: string): Emit => (w) => { w.ascii('enum').key(t).key(v); },
-  objc: (items: Entry[]): Emit => (w) => { w.ascii('Objc'); writeDesc(w, items); },
+  objc: (items: Entry[], classId = 'null'): Emit => (w) => {
+    w.ascii('Objc');
+    writeDesc(w, items, classId);
+  },
   list: (items: Emit[]): Emit => (w) => {
     w.ascii('VlLs').u32(items.length);
     for (const fn of items) fn(w);
@@ -181,7 +195,7 @@ function dyn(control: DynamicControl, jitterPct: number, minPct = 0): Emit {
     ['fStp', T.long(Math.max(1, Math.round(control.fadeSteps)))],
     ['jitter', T.untf('#Prc', jitterPct)],
     ['Mnm ', T.untf('#Prc', minPct)],
-  ]);
+  ], 'brVr');
 }
 
 const BLEND_ENUM: Record<TextureBlend, string> = {
@@ -374,7 +388,8 @@ function tipDescriptor(
     ['flipY', T.bool(flipY)],
   ];
   if (uuid) items.push(['sampledData', T.text(uuid)]);
-  return T.objc(items);
+  // the class is what tells Photoshop which kind of tip this is
+  return T.objc(items, uuid ? 'sampledBrush' : 'computedBrush');
 }
 
 function brushPreset(
@@ -428,15 +443,16 @@ function brushPreset(
           ['scatterDynamics', dyn({ source: 'off', fadeSteps: 25 }, pct(d.scatter))],
         ]
       : [['useDualBrush', T.bool(false)]],
+    'dualBrush',
   )]);
 
-  items.push(['brushGroup', T.objc([['useBrushGroup', T.bool(false)]])]);
+  items.push(['brushGroup', T.objc([['useBrushGroup', T.bool(false)]], 'brushGroup')]);
 
   const tx = s.texture;
   items.push(['useTexture', T.bool(tx.enabled && !!pattern)]);
   if (tx.enabled && pattern) {
     items.push(
-      ['Txtr', T.objc([['Nm  ', T.text(pattern.name)], ['Idnt', T.text(pattern.uuid)]])],
+      ['Txtr', T.objc([['Nm  ', T.text(pattern.name)], ['Idnt', T.text(pattern.uuid)]], 'Ptrn')],
       ['interpretation', T.bool(true)],
       ['textureScale', T.untf('#Prc', pct(tx.scale))],
       ['textureBlendMode', T.enm('BlnM', BLEND_ENUM[tx.mode] ?? 'Mltp')],
@@ -490,10 +506,10 @@ function brushPreset(
       ['usePressureOverridesSize', T.bool(s.pressureSize)],
       ['usePressureOverridesOpacity', T.bool(s.pressureOpacity)],
       ['useLegacy', T.bool(false)],
-    ])],
+    ], 'PbTl')],
   );
 
-  return T.objc(items);
+  return T.objc(items, 'brushPreset');
 }
 
 // ---------------------------------------------------------------------------
